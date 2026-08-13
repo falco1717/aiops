@@ -158,6 +158,22 @@ Requirements on the proxy side: a DNS record for `PUBLIC_HOSTNAME` pointing at
 the host, a cert resolver able to issue for that name, and the app joined to the
 proxy's docker network (`TRAEFIK_NETWORK`).
 
+#### Routing from a file instead of labels
+
+If you keep per-app routing in Traefik's file provider, `deploy/traefik/aiops.yml`
+is a ready-made config. Copy it into that directory (`/opt/traefik/` on a
+Saltbox host, mounted at `/etc/traefik`) and set `TRAEFIK_ENABLE=false` in
+`.env`, then recreate the container.
+
+Turn the labels off when you do. Leaving both on means two providers serve the
+same `Host` rule at equal priority, and which one wins is not deterministic.
+
+Two syntax notes that are easy to get wrong: inside a file-provider config,
+middlewares defined by that provider are referenced **bare** (`globalHeaders`),
+while ones defined on docker labels keep their suffix (`gzip@docker`). And the
+service URL there uses the container name rather than an IP, because the
+container's address changes on every recreate.
+
 ---
 
 ## Using it
@@ -178,6 +194,54 @@ proxy's docker network (`TRAEFIK_NETWORK`).
    DST. "Run now" fires one immediately without disturbing the cron timing.
 5. **Account** — change your own password, and (as an admin) add, promote,
    reset, and remove users.
+
+### Provider accounts, failover and access
+
+A provider can have several named sign-ins — "Jordan's Claude", "Walt's Claude"
+— each with its own credential directory, handed to the CLI through
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME`. They do not see each other. An install that
+signed in before accounts existed keeps working: the existing login is adopted
+as a "Default" account on upgrade.
+
+Give an account a **fallback** and a usage limit stops being an outage: the turn
+moves to the other account automatically, the run records which account served
+it and where it came from, and the limited one is held out of rotation until its
+window resets. Without a fallback the run fails and says so.
+
+**Who can use what**: an account with no grants is open to everyone. Grant it to
+named users and only they — plus admins — may start sessions on it. Enforced at
+session creation, not just hidden in the UI.
+
+### Usage
+
+Two different things, deliberately kept apart:
+
+- **Plan limits** come from the CLI itself. Claude Code emits a
+  `rate_limit_event` carrying the window (`five_hour`, `weekly`), its status and
+  when it resets. This is the authoritative number and is what drives automatic
+  failover.
+- **Measured usage** is what AIOps ran: tokens and estimated cost per window and
+  per account, plus per-session context size. It covers *this server only* —
+  work done in a terminal elsewhere on the same account is not counted.
+
+Costs are API-rate estimates. On a subscription login they are not an extra
+charge; they are shown to compare relative spend.
+
+### Subagents
+
+`--forward-subagent-text` is on, so a subagent's text and thinking come through,
+not just its tool calls. Messages carrying a `parent_tool_use_id` are folded
+into a collapsible group in the transcript, so a subagent's steps read the way
+they do in Claude Code rather than interleaving with the main thread.
+
+### Skills and slash commands
+
+These already work — type `/name` in the prompt and the CLI expands it, because
+AIOps never passes `--bare`. The composer's **/ Skills** button lists what the
+session actually has: skills from the workspace's `.claude/skills`, commands
+from `.claude/commands`, the container's `~/.claude`, and the slash commands the
+CLI itself reported at startup (so `/goal`, `/context`, `/usage` and anything a
+plugin adds appear automatically). Terminal-only commands are filtered out.
 
 ### Accounts and roles
 
@@ -285,12 +349,19 @@ See `backend/tests/README.md` for what each one covers.
 
 ## Known limitations
 
-- **Codex event parsing is defensive.** Codex's `--json` schema has changed
-  between releases, so the adapter recognises the shapes it knows, renders
-  anything else generically, and always stores the raw payload. If a Codex run
-  shows less detail than the equivalent Claude run, that's why — check a raw
-  event and extend `backend/app/providers/codex.py`. Claude's `stream-json`
-  schema is documented and parsed precisely.
+- **Codex's event schema is version-sensitive.** The adapter is written against
+  output captured from a live `codex exec --json` (an item envelope:
+  `item.started` / `item.completed` carrying an `item.type`), and
+  `tests/test_codex_parser.py` pins it to those exact lines. Older shapes are
+  still handled and anything unrecognised is rendered generically with the raw
+  payload kept. If a Codex release changes the schema, that test fails rather
+  than the UI quietly going blank.
+- **Measured usage is per-server.** AIOps counts what it ran. It cannot see
+  usage from your terminal or another machine on the same account, so treat the
+  plan-window figure from the CLI as the real one.
+- **Failover detects limits heuristically for Codex.** Claude reports plan state
+  structurally; for Codex the adapter matches limit wording in the error text.
+  A novel phrasing would surface as an ordinary failure rather than a failover.
 - **One turn at a time per session.** Sending a prompt while a session is still
   working returns 409. Both CLIs resume from a stored session id, and
   interleaving two turns against one session id would corrupt that history.

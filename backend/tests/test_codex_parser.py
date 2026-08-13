@@ -152,6 +152,23 @@ check("terminal-only commands are filtered out",
 check("reported commands are marked as coming from the CLI",
       caps["goal"].source == "CLI", str(caps.get("goal")))
 
+spawn = cp.parse_line(
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_9","name":"Task",'
+    '"input":{"subagent_type":"Explore","description":"find the runner"}}]}}'
+)
+check("a subagent spawn is named from its input",
+      spawn and spawn.agent_name == "Explore", str(spawn and spawn.agent_name))
+check("and exposes the id its children will reference",
+      spawn and spawn.spawns_tool_use_id == "toolu_9", str(spawn and spawn.spawns_tool_use_id))
+
+child = cp.parse_line(
+    '{"type":"assistant","parent_tool_use_id":"toolu_9",'
+    '"message":{"content":[{"type":"text","text":"searching"}]}}'
+)
+check("a child message is attributed to its parent call",
+      child and child.parent_tool_use_id == "toolu_9" and child.agent_name is None,
+      str(child and (child.parent_tool_use_id, child.agent_name)))
+
 fallback = {c.name for c in discover("claude", None, None)}
 check("a session with nothing reported still offers the built-ins",
       "goal" in fallback and "model" in fallback, str(sorted(fallback))[:160])

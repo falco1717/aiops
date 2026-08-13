@@ -49,7 +49,10 @@ services:
       - internal
       - proxy
     labels:
-      traefik.enable: "true"
+      # Set TRAEFIK_ENABLE=false when routing is defined in a Traefik file
+      # provider instead (see deploy/traefik/aiops.yml). Leaving both on makes
+      # two providers serve the same Host rule at equal priority.
+      traefik.enable: "${TRAEFIK_ENABLE:-true}"
       traefik.docker.network: "${TRAEFIK_NETWORK:-saltbox}"
 
       # HTTPS router. AIOps authenticates on its own (session cookie + login

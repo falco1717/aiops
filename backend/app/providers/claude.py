@@ -164,13 +164,16 @@ class ClaudeProvider(Provider):
                             parent_tool_use_id=parent, agent_name=agent,
                         )
                 elif btype == "tool_use":
+                    spawned = _spawned_agent_name(block)
                     return NormalizedEvent(
                         kind="tool_use",
                         tool_name=block.get("name"),
                         text=_summarize_tool_input(block.get("input")),
                         raw=data,
                         parent_tool_use_id=parent,
-                        agent_name=agent or _spawned_agent_name(block),
+                        agent_name=agent or spawned,
+                        # Only meaningful for a spawn; children reference this id.
+                        spawns_tool_use_id=block.get("id") if spawned else None,
                     )
                 elif btype == "tool_result":
                     return NormalizedEvent(

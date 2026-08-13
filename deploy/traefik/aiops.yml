@@ -1,0 +1,52 @@
+# AIOps — https://aiops.example.com
+#
+# Install to /opt/traefik/aiops.yml (mounted at /etc/traefik in the traefik
+# container). The file provider runs with watch=true, so it is picked up live —
+# no Traefik restart needed.
+#
+# Using this file means the app's docker labels must be OFF, otherwise the same
+# Host rule is served by two providers at equal priority and routing becomes
+# nondeterministic. Set TRAEFIK_ENABLE=false in the app's .env.
+#
+# Note on middleware names: inside a file-provider config, middlewares defined
+# in the file provider are referenced bare (globalHeaders), NOT globalHeaders@file.
+# Only middlewares defined on docker labels keep the @docker suffix.
+http:
+  routers:
+    aiops-http:
+      entryPoints:
+        - "web"
+      rule: "Host(`aiops.example.com`)"
+      middlewares:
+        - globalHeaders
+        - redirect-to-https@docker
+        - cloudflarewarp@docker
+      service: "aiops"
+
+    aiops:
+      entryPoints:
+        - "websecure"
+      rule: "Host(`aiops.example.com`)"
+      middlewares:
+        - globalHeaders
+        - secureHeaders
+        # Restores the real client IP. AIOps is the only authentication in
+        # front of a tool that runs shell commands, and its sign-in lockout is
+        # per-IP, so this must stay.
+        - cloudflarewarp@docker
+        - gzip@docker
+      service: "aiops"
+      tls:
+        certResolver: cfdns
+        # Safe here because this router matches a single Host; sniStrict only
+        # causes trouble with HostRegexp rules that have no matching cert.
+        options: securetls
+
+  services:
+    aiops:
+      loadBalancer:
+        # Addressed by container name rather than the IP used elsewhere in
+        # /opt/traefik: traefik and this container share the `saltbox` network,
+        # and the container's IP changes every time it is recreated.
+        servers:
+          - url: "http://aiops-app-1:8000"

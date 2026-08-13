@@ -22,6 +22,9 @@ class NormalizedEvent:
     # Set when the message came from a subagent rather than the main loop.
     parent_tool_use_id: str | None = None
     agent_name: str | None = None
+    # On a tool call that spawns a subagent, the id later messages point back at.
+    # Lets the runner label a subagent's steps with the name it was launched as.
+    spawns_tool_use_id: str | None = None
     # Token counters from the final result event, for the usage panel.
     usage: dict[str, int] | None = None
     # True when the provider says the account is out of quota, so the runner

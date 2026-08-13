@@ -304,6 +304,7 @@ class Runner:
         seq = (
             await db.scalar(select(func.max(Event.seq)).where(Event.run_id == run.id))
         ) or 0
+        spawn_names: dict[str, str] = {}
         while True:
             try:
                 raw_line = await proc.stdout.readline()
@@ -320,6 +321,13 @@ class Runner:
             event = provider.parse_line(line)
             if event is None:
                 continue
+
+            # Label a subagent's steps with the name it was spawned as; only the
+            # spawning tool call carries it, the child messages do not.
+            if event.spawns_tool_use_id and event.agent_name:
+                spawn_names[event.spawns_tool_use_id] = event.agent_name
+            if event.parent_tool_use_id and not event.agent_name:
+                event.agent_name = spawn_names.get(event.parent_tool_use_id)
 
             if event.provider_session_id and event.provider_session_id != sess.provider_session_id:
                 sess.provider_session_id = event.provider_session_id
