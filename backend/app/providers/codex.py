@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from ..config import settings
@@ -41,9 +42,14 @@ class CodexProvider(Provider):
 
         if model:
             argv += ["--model", model]
+        # `codex exec` is already non-interactive, so there is no approval flag
+        # here — the interactive `codex` command has --ask-for-approval, but
+        # passing it to `exec` is rejected outright.
         argv += ["--sandbox", permission_mode or "workspace-write"]
-        # Nothing can answer an approval prompt in a headless run.
-        argv += ["--ask-for-approval", "never"]
+        # Codex refuses to run outside a git repository unless told otherwise.
+        # AIOps workspaces are operator-chosen directories that often are not
+        # repos, so without this every run in one would fail before starting.
+        argv.append("--skip-git-repo-check")
         argv += self.split_args(extra_args)
 
         # Codex has no --append-system-prompt; fold any preset instructions into
@@ -57,26 +63,63 @@ class CodexProvider(Provider):
         try:
             data: dict[str, Any] = json.loads(line)
         except json.JSONDecodeError:
+            # The CLI prints a notice about stdin before the stream begins.
+            if "additional input from stdin" in line:
+                return None
             return NormalizedEvent(kind="system", text=line, raw={"stdout": line})
 
         session_id = _find_session_id(data)
-        # Older builds nest the payload under "msg"; newer ones are flat.
+        # Older builds nested the payload under "msg"; current ones are flat.
         body = data.get("msg") if isinstance(data.get("msg"), dict) else data
         etype = str(body.get("type") or data.get("type") or "event")
 
-        if etype in ("session.created", "session_configured", "thread.started", "task_started"):
+        if etype in ("thread.started", "session.created", "session_configured", "task_started"):
             return NormalizedEvent(
                 kind="system", text="session started", raw=data, provider_session_id=session_id
             )
 
-        if etype in ("agent_message", "assistant_message", "item.completed", "message"):
-            text = _extract_text(body)
-            if text:
-                return NormalizedEvent(
-                    kind="assistant", text=text, raw=data, provider_session_id=session_id
-                )
-            return None
+        # The main carrier in current builds: one envelope, many item types.
+        if etype in ("item.completed", "item.started", "item.updated"):
+            item = body.get("item") if isinstance(body.get("item"), dict) else {}
+            return self._parse_item(item, data, session_id, started=etype == "item.started")
 
+        if etype in ("turn.completed", "task_complete", "turn_complete"):
+            usage = body.get("usage") or {}
+            return NormalizedEvent(
+                kind="result",
+                text=_extract_text(body) or "completed",
+                raw=data,
+                provider_session_id=session_id,
+                cost_usd=_find_cost(body),
+                usage={
+                    "input_tokens": int(usage.get("input_tokens") or 0),
+                    "output_tokens": int(usage.get("output_tokens") or 0),
+                    "cache_read_tokens": int(usage.get("cached_input_tokens") or 0),
+                    "cache_write_tokens": int(usage.get("cache_write_input_tokens") or 0),
+                }
+                if usage
+                else None,
+            )
+
+        if etype in ("turn.failed", "error", "stream_error"):
+            text = _stringify(body.get("error") or body.get("message") or body)
+            return NormalizedEvent(
+                kind="error",
+                text=text,
+                raw=data,
+                is_error=True,
+                rate_limited=_looks_rate_limited(text),
+                provider_session_id=session_id,
+            )
+
+        # Pre-item-envelope builds emitted these directly.
+        if etype in ("agent_message", "assistant_message", "message"):
+            text = _extract_text(body)
+            return (
+                NormalizedEvent(kind="assistant", text=text, raw=data, provider_session_id=session_id)
+                if text
+                else None
+            )
         if etype in ("agent_reasoning", "reasoning"):
             text = _extract_text(body)
             return (
@@ -85,44 +128,89 @@ class CodexProvider(Provider):
                 else None
             )
 
-        if "command" in etype or etype in ("exec_command_begin", "shell_call"):
-            return NormalizedEvent(
-                kind="tool_use",
-                tool_name="shell",
-                text=_stringify(body.get("command") or body.get("input")),
-                raw=data,
-                provider_session_id=session_id,
-            )
-
-        if etype in ("exec_command_end", "shell_call_output", "patch_apply_end"):
-            return NormalizedEvent(
-                kind="tool_result",
-                text=_stringify(body.get("stdout") or body.get("output") or body.get("aggregated_output")),
-                raw=data,
-                is_error=bool(body.get("exit_code")),
-                provider_session_id=session_id,
-            )
-
-        if etype in ("error", "stream_error"):
-            return NormalizedEvent(
-                kind="error",
-                text=_stringify(body.get("message") or body),
-                raw=data,
-                is_error=True,
-                provider_session_id=session_id,
-            )
-
-        if etype in ("task_complete", "turn.completed", "turn_complete"):
-            return NormalizedEvent(
-                kind="result",
-                text=_extract_text(body) or "completed",
-                raw=data,
-                provider_session_id=session_id,
-                cost_usd=_find_cost(body),
-            )
+        if etype == "turn.started":
+            return None  # no information beyond the status we already track
 
         return NormalizedEvent(
             kind="system", text=etype, raw=data, provider_session_id=session_id
+        )
+
+    @staticmethod
+    def _parse_item(
+        item: dict[str, Any], data: dict[str, Any], session_id: str | None, started: bool
+    ) -> NormalizedEvent | None:
+        itype = str(item.get("type") or "")
+
+        if itype in ("agent_message", "assistant_message"):
+            if started:
+                return None  # the completed event carries the text
+            text = _extract_text(item)
+            return (
+                NormalizedEvent(kind="assistant", text=text, raw=data, provider_session_id=session_id)
+                if text
+                else None
+            )
+
+        if itype == "reasoning":
+            text = _extract_text(item)
+            return (
+                NormalizedEvent(kind="thinking", text=text, raw=data, provider_session_id=session_id)
+                if text
+                else None
+            )
+
+        if itype in ("command_execution", "local_shell_call", "shell_call"):
+            command = _stringify(item.get("command") or item.get("input"))
+            if started:
+                return NormalizedEvent(
+                    kind="tool_use", tool_name="shell", text=command, raw=data,
+                    provider_session_id=session_id,
+                )
+            exit_code = item.get("exit_code")
+            output = _stringify(
+                item.get("aggregated_output") or item.get("output") or item.get("stdout")
+            )
+            return NormalizedEvent(
+                kind="tool_result",
+                text=output or command,
+                raw=data,
+                is_error=bool(exit_code),
+                provider_session_id=session_id,
+            )
+
+        if itype in ("file_change", "patch_apply"):
+            changes = item.get("changes") or item.get("files") or item
+            return NormalizedEvent(
+                kind="tool_use", tool_name="edit", text=_stringify(changes), raw=data,
+                provider_session_id=session_id,
+            )
+
+        if itype in ("mcp_tool_call", "web_search"):
+            return NormalizedEvent(
+                kind="tool_use",
+                tool_name=itype,
+                text=_stringify(item.get("query") or item.get("arguments") or item),
+                raw=data,
+                provider_session_id=session_id,
+            )
+
+        if itype == "error":
+            text = _stringify(item.get("message") or item)
+            return NormalizedEvent(
+                kind="error", text=text, raw=data, is_error=True,
+                rate_limited=_looks_rate_limited(text), provider_session_id=session_id,
+            )
+
+        if itype == "todo_list":
+            return NormalizedEvent(
+                kind="system", text=_stringify(item.get("items") or item), raw=data,
+                provider_session_id=session_id,
+            )
+
+        if started:
+            return None
+        return NormalizedEvent(
+            kind="system", text=itype or "item", raw=data, provider_session_id=session_id
         )
 
 
@@ -141,6 +229,18 @@ def _find_session_id(data: dict[str, Any]) -> str | None:
             if isinstance(value, str) and value:
                 return value
     return None
+
+
+#: Codex wording when a plan's quota is exhausted, so the runner can fail over.
+_LIMIT_PATTERNS = re.compile(
+    r"(usage limit|rate limit|rate_limit|quota|too many requests|429"
+    r"|limit reached|try again (?:later|in))",
+    re.IGNORECASE,
+)
+
+
+def _looks_rate_limited(text: str) -> bool:
+    return bool(text) and bool(_LIMIT_PATTERNS.search(text))
 
 
 def _find_cost(body: dict[str, Any]) -> float | None:
