@@ -103,10 +103,14 @@ async def _out(account: ProviderAccount, user: User) -> AccountOut:
 async def list_accounts(
     user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
-    rows = await db.scalars(
-        select(ProviderAccount).order_by(ProviderAccount.provider, ProviderAccount.name)
+    rows = list(
+        await db.scalars(
+            select(ProviderAccount).order_by(ProviderAccount.provider, ProviderAccount.name)
+        )
     )
-    return [await _out(a, user) for a in rows]
+    # Each _out shells out to the CLI to read sign-in state. Serially that is
+    # one 15s timeout per account in the worst case, on a page that polls.
+    return list(await asyncio.gather(*(_out(a, user) for a in rows)))
 
 
 @router.post("", response_model=AccountOut, status_code=status.HTTP_201_CREATED)
@@ -261,6 +265,11 @@ async def clear_limit(
     """Forget a recorded usage limit so this account is eligible again."""
     account = await _get(db, account_id)
     account.limited_until = None
+    # Clear the reported window too, otherwise the UI keeps showing the old
+    # "limit hit" banner until some later run happens to overwrite it.
+    account.limit_status = None
+    account.limit_window = None
+    account.limit_resets_at = None
     await db.commit()
     await db.refresh(account)
     return await _out(account, user)

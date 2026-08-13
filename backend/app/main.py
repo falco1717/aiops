@@ -86,6 +86,7 @@ async def reap_orphaned_runs() -> None:
             log.info("Reaped %d interrupted run(s) after restart", len(orphans))
 
 
+@contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     await run_migrations()
@@ -146,11 +147,18 @@ async def health():
 if STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
+    _STATIC_ROOT = STATIC_DIR.resolve()
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
-        candidate = STATIC_DIR / full_path
-        if full_path and candidate.is_file():
-            return FileResponse(candidate)
+        if full_path:
+            # `full_path` is attacker-controlled and arrives percent-decoded, so
+            # it can contain `..`. Resolve it and require the result to stay
+            # inside the static root, or this route serves arbitrary files to
+            # anyone — it is deliberately reachable before login.
+            candidate = (STATIC_DIR / full_path).resolve()
+            if candidate.is_file() and candidate.is_relative_to(_STATIC_ROOT):
+                return FileResponse(candidate)
         return FileResponse(STATIC_DIR / "index.html")

@@ -93,8 +93,8 @@ def _scan_commands(root: Path, source: str) -> list[Capability]:
     return out
 
 
-def _scan_codex_prompts(home: Path) -> list[Capability]:
-    base = home / ".codex" / "prompts"
+def _scan_codex_prompts(codex_home: Path) -> list[Capability]:
+    base = codex_home / "prompts"
     if not base.is_dir():
         return []
     return [
@@ -174,6 +174,7 @@ def discover(
     provider: str,
     workspace_path: str | None,
     reported_commands: list[str] | None = None,
+    config_dir: str | None = None,
 ) -> list[Capability]:
     """Skills and commands available to a session, most specific first.
 
@@ -189,7 +190,10 @@ def discover(
             root = Path(workspace_path)
             found += _scan_skills(root, "workspace")
             found += _scan_commands(root, "workspace")
-        claude_home = home / ".claude"
+        # User-level skills live in the account's own credential directory when
+        # the session runs under a named account (CLAUDE_CONFIG_DIR), not in
+        # the container's default home.
+        claude_home = Path(config_dir) if config_dir else home / ".claude"
         found += _scan_skills(claude_home, "user")
         found += _scan_commands(claude_home, "user")
         if reported_commands:
@@ -207,7 +211,7 @@ def discover(
         else:
             found += CLAUDE_BUILTINS
     elif provider == "codex":
-        found += _scan_codex_prompts(home)
+        found += _scan_codex_prompts(Path(config_dir) if config_dir else home / ".codex")
 
     # A workspace definition shadows a user-level one of the same name.
     seen: set[tuple[str, str]] = set()

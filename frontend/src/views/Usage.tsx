@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { formatUtc, isFuture } from "../time";
 import type { Account, Usage as UsageData } from "../types";
 
 const fmt = (n: number) =>
@@ -61,7 +62,7 @@ export default function Usage() {
                   </div>
                   <div className="stat-sub">
                     {a.limit_resets_at
-                      ? `resets ${new Date(a.limit_resets_at + "Z").toLocaleString()}`
+                      ? `resets ${formatUtc(a.limit_resets_at)}`
                       : "reset time not reported"}
                   </div>
                 </div>
@@ -110,8 +111,7 @@ export default function Usage() {
               </thead>
               <tbody>
                 {data.by_account.map((a) => {
-                  const limited =
-                    a.limited_until && new Date(a.limited_until + "Z") > new Date();
+                  const limited = isFuture(a.limited_until);
                   return (
                     <tr key={a.account_id}>
                       <td data-label="Account">{a.name}</td>

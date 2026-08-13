@@ -2,7 +2,8 @@ import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import type { Preset, ProviderInfo, Schedule, Workspace } from "../types";
+import { formatUtc } from "../time";
+import type { Account, Preset, ProviderInfo, Schedule, Workspace } from "../types";
 
 const EMPTY = {
   name: "",
@@ -11,6 +12,7 @@ const EMPTY = {
   prompt: "",
   provider: "claude",
   model: "",
+  account_id: "",
   preset_id: "",
   workspace_id: "",
   session_mode: "new",
@@ -24,21 +26,24 @@ export default function Schedules() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [s, p, pr, w] = await Promise.all([
+    const [s, p, pr, w, a] = await Promise.all([
       api.schedules(),
       api.providers(),
       api.presets(),
       api.workspaces(),
+      api.accounts().catch(() => [] as Account[]),
     ]);
     setItems(s);
     setProviders(p);
     setPresets(pr);
     setWorkspaces(w);
+    setAccounts(a);
   }, []);
 
   useEffect(() => {
@@ -65,6 +70,7 @@ export default function Schedules() {
       prompt: s.prompt,
       provider: s.provider,
       model: s.model ?? "",
+      account_id: s.account_id ? String(s.account_id) : "",
       preset_id: s.preset_id ? String(s.preset_id) : "",
       workspace_id: s.workspace_id ? String(s.workspace_id) : "",
       session_mode: s.session_mode,
@@ -82,6 +88,7 @@ export default function Schedules() {
       prompt: draft.prompt,
       provider: draft.provider,
       model: draft.model || null,
+      account_id: draft.account_id ? Number(draft.account_id) : null,
       preset_id: draft.preset_id ? Number(draft.preset_id) : null,
       workspace_id: draft.workspace_id ? Number(draft.workspace_id) : null,
       session_mode: draft.session_mode,
@@ -114,6 +121,11 @@ export default function Schedules() {
   };
 
   const availablePresets = presets.filter((p) => p.provider === draft.provider);
+  // Only accounts this user may actually run against — a schedule pointed at a
+  // restricted account would be rejected at fire time, not here.
+  const availableAccounts = accounts.filter(
+    (a) => a.provider === draft.provider && a.usable_by_me,
+  );
 
   return (
     <div className="main">
@@ -161,11 +173,24 @@ export default function Schedules() {
               onChange={(e) => {
                 set("provider", e.target.value);
                 set("preset_id", "");
+                set("account_id", "");
               }}
             >
               {providers.map((p) => (
                 <option key={p.name} value={p.name}>
                   {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Account</span>
+            <select value={draft.account_id} onChange={(e) => set("account_id", e.target.value)}>
+              <option value="">Default for this provider</option>
+              {availableAccounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                  {a.is_default ? " (default)" : ""}
                 </option>
               ))}
             </select>
@@ -223,7 +248,12 @@ export default function Schedules() {
           <button className="primary" type="submit">
             {editingId ? "Save changes" : "Create schedule"}
           </button>
-          {editingId && <button onClick={reset}>Cancel</button>}
+          {editingId && (
+            // Without type="button" this submits the form it sits in.
+            <button type="button" onClick={reset}>
+              Cancel
+            </button>
+          )}
         </div>
       </form>
 
@@ -250,6 +280,9 @@ export default function Schedules() {
                   <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
                     {s.provider}
                     {s.model ? ` · ${s.model}` : ""}
+                    {s.account_id
+                      ? ` · ${accounts.find((a) => a.id === s.account_id)?.name ?? "account"}`
+                      : ""}
                   </div>
                 </td>
                 <td className="mono" data-label="Cron">
@@ -257,10 +290,10 @@ export default function Schedules() {
                   <div style={{ color: "var(--text-dim)" }}>{s.timezone_name}</div>
                 </td>
                 <td className="mono" data-label="Next run">
-                  {fmt(s.next_run_at)}
+                  {formatUtc(s.next_run_at)}
                 </td>
                 <td className="mono" data-label="Last run">
-                  {fmt(s.last_run_at)}
+                  {formatUtc(s.last_run_at)}
                 </td>
                 <td data-label="Session">
                   {s.target_session_id ? (
@@ -283,12 +316,4 @@ export default function Schedules() {
       )}
     </div>
   );
-}
-
-function fmt(iso: string | null): string {
-  if (!iso) return "—";
-  // The backend always stores UTC, but SQLite (used in development) hands back a
-  // naive string, which JS would otherwise read as local time.
-  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/.test(iso);
-  return new Date(hasZone ? iso : `${iso}Z`).toLocaleString();
 }

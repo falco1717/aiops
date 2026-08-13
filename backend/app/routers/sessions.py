@@ -16,9 +16,15 @@ from ..schemas import (
     SessionPatch,
     TranscriptOut,
 )
+from ..runner import runner
 from ..security import current_user
+from ..services import (
+    ValidationError,
+    build_session,
+    queue_run,
+    validate_session_targets,
+)
 from ..skills import discover
-from ..services import ValidationError, build_session, queue_run
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -85,11 +91,28 @@ async def get_session(
 async def patch_session(
     session_id: str,
     payload: SessionPatch,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
     sess = await _get(db, session_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    # Re-point fields go through the same validation as creation. Without this
+    # a user could create a session on an account they may use and then patch
+    # it onto a restricted one, and a bad id would surface as a 500 from the
+    # foreign key rather than a 400.
+    try:
+        await validate_session_targets(
+            db,
+            provider=sess.provider,
+            account_id=data.get("account_id", sess.account_id),
+            preset_id=data.get("preset_id", sess.preset_id),
+            workspace_id=data.get("workspace_id", sess.workspace_id),
+            user=user,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    for key, value in data.items():
         setattr(sess, key, value)
     await db.commit()
     await db.refresh(sess)
@@ -101,6 +124,18 @@ async def delete_session(
     session_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
     sess = await _get(db, session_id)
+    # Stop the agent first. Deleting the row out from under a running process
+    # leaves it writing events against a session that no longer exists, which
+    # fails on the foreign key and orphans the subprocess.
+    active = list(
+        await db.scalars(
+            select(Run.id).where(
+                Run.session_id == session_id, Run.status.in_(("queued", "running"))
+            )
+        )
+    )
+    for run_id in active:
+        await runner.cancel(run_id)
     await db.delete(sess)
     await db.commit()
 
@@ -187,7 +222,12 @@ async def capabilities(
     workspace_path = sess.workspace.path if sess.workspace else None
     return [
         CapabilityOut(**vars(cap))
-        for cap in discover(sess.provider, workspace_path, sess.available_commands)
+        for cap in discover(
+            sess.provider,
+            workspace_path,
+            sess.available_commands,
+            sess.account.config_dir if sess.account else None,
+        )
     ]
 
 

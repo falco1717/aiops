@@ -40,9 +40,26 @@ class LoginThrottle:
                 worst = max(worst, bucket.locked_until - now)
         return int(worst) + 1 if worst else 0
 
+    def _prune(self, now: float) -> None:
+        """Drop buckets that are neither locked nor holding recent failures.
+
+        Without this the map grows one entry per distinct username tried, which
+        an attacker rotating usernames can inflate without bound.
+        """
+        window = settings.login_failure_window_seconds
+        for key, bucket in list(self._buckets.items()):
+            if bucket.locked_until > now:
+                continue
+            if bucket.failures and now - bucket.failures[-1] <= window:
+                continue
+            del self._buckets[key]
+
     def record_failure(self, username: str, client_ip: str | None) -> None:
         now = time.monotonic()
         window = settings.login_failure_window_seconds
+        # Cheap and bounded: only runs on a failed sign-in, which is rare.
+        if len(self._buckets) > 512:
+            self._prune(now)
         for key in self._keys(username, client_ip):
             bucket = self._buckets[key]
             bucket.failures.append(now)

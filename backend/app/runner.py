@@ -90,13 +90,22 @@ class Runner:
         """Run one turn, failing over to another account if a limit is hit."""
         attempted: list[int] = []
         previous: ProviderAccount | None = None
+        # Tokens and cost from an abandoned attempt were still spent, so they
+        # carry forward rather than being lost when a limit forces a retry.
+        carried: dict[str, int] = {}
+        carried_cost = 0.0
 
         while True:
             outcome = await self._attempt(run_id, attempted, previous)
             if outcome is None:
                 return  # already finalized
             status, exit_code, state, account, next_account = outcome
+            for key, value in state.usage.items():
+                state.usage[key] = value + carried.get(key, 0)
+            state.cost_usd = (state.cost_usd or 0) + carried_cost
             if status == "rate_limited" and next_account is not None:
+                carried = dict(state.usage)
+                carried_cost = state.cost_usd or 0.0
                 log.info(
                     "run %s: %s is limited, failing over to %s",
                     run_id,
@@ -190,6 +199,9 @@ class Runner:
                     "command": _redact(spec.argv),
                     "account": account.name if account else None,
                     "failed_over_from": previous.name if previous else None,
+                    # A retry after failover is a continuation, not a new turn;
+                    # the UI must not clear what the first attempt streamed.
+                    "attempt": len(attempted) + 1,
                 },
             )
 
@@ -216,8 +228,8 @@ class Runner:
 
             self._procs[run_id] = proc
             state = _RunState()
+            stderr_task = asyncio.create_task(_drain(proc.stderr, state))
             try:
-                stderr_task = asyncio.create_task(_drain(proc.stderr, state))
                 await asyncio.wait_for(
                     self._pump_stdout(db, run, sess, provider, proc, state, account),
                     timeout=settings.run_timeout_seconds,
@@ -246,6 +258,17 @@ class Runner:
                         f"Run exceeded {settings.run_timeout_seconds}s and was terminated"
                     )
             finally:
+                # Any exit from here — a DB error in the pump, a cancellation
+                # landing before the process was registered, an unexpected
+                # crash — must still reap the agent. Dropping it from _procs
+                # without signalling it leaves a subprocess running that
+                # nothing can reach any more.
+                if proc.returncode is None:
+                    _terminate(proc)
+                    await _wait_quietly(proc)
+                stderr_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await stderr_task
                 self._procs.pop(run_id, None)
                 self._cancelled.discard(run_id)
 
@@ -520,14 +543,21 @@ def _apply_limit_info(account: ProviderAccount, info: dict) -> None:
     account.limit_status = status or None
     account.limit_window = str(info.get("rateLimitType") or "") or None
     account.limit_seen_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
     resets = info.get("resetsAt")
     if isinstance(resets, (int, float)) and resets > 0:
         account.limit_resets_at = datetime.fromtimestamp(resets, tz=timezone.utc)
     # Anything other than "allowed" means the window is refusing work; hold the
     # account out until it resets so the next turn goes to the fallback.
     if status and status != "allowed":
-        account.limited_until = account.limit_resets_at or (
-            datetime.now(timezone.utc) + timedelta(seconds=settings.account_limit_cooldown_seconds)
+        resets_at = _aware(account.limit_resets_at)
+        # Only trust a reset time that is actually in the future. A stale one
+        # left by an earlier event would put limited_until in the past, which
+        # lets the exhausted account be picked again immediately.
+        account.limited_until = (
+            resets_at
+            if resets_at and resets_at > now
+            else now + timedelta(seconds=settings.account_limit_cooldown_seconds)
         )
 
 

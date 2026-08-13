@@ -5,7 +5,7 @@ import json
 import os
 import shutil
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 
 from ..config import settings
 from ..models import User

@@ -75,7 +75,16 @@ export default function Chat({
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const pinnedRef = useRef(true);
 
+  // Highest persisted event id we hold, so a reconnect can ask for just the
+  // gap instead of the whole transcript. Websocket frames carry no id, so this
+  // only advances on a fetch — worst case we refetch a few events we already
+  // have, which mergeEvents dedupes.
+  const lastEventIdRef = useRef(0);
+
   const mergeEvents = useCallback((incoming: ChatEvent[]) => {
+    for (const e of incoming) {
+      if (typeof e.id === "number" && e.id > lastEventIdRef.current) lastEventIdRef.current = e.id;
+    }
     setEvents((prev) => {
       const byKey = new Map(prev.map((e) => [eventKey(e), e]));
       for (const e of incoming) byKey.set(eventKey(e), { ...byKey.get(eventKey(e)), ...e });
@@ -85,19 +94,23 @@ export default function Chat({
     });
   }, []);
 
-  const reload = useCallback(async () => {
-    try {
-      const t = await api.transcript(sessionId);
-      setSession(t.session);
-      setRuns(t.runs);
-      mergeEvents(t.events);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }, [sessionId, mergeEvents]);
+  const reload = useCallback(
+    async (incremental = false) => {
+      try {
+        const t = await api.transcript(sessionId, incremental ? lastEventIdRef.current : 0);
+        setSession(t.session);
+        setRuns(t.runs);
+        mergeEvents(t.events);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [sessionId, mergeEvents],
+  );
 
   useEffect(() => {
+    lastEventIdRef.current = 0;
     void reload();
   }, [reload]);
 
@@ -115,10 +128,17 @@ export default function Chat({
     let socket: WebSocket | null = null;
     let retry: number | undefined;
     let closed = false;
+    let everConnected = false;
 
     const connect = () => {
       socket = openSocket(sessionId);
-      socket.onopen = () => setConnected(true);
+      socket.onopen = () => {
+        setConnected(true);
+        // Anything the agent emitted while the socket was down never arrived,
+        // so pull the gap. Skipped on the first open — the initial load has it.
+        if (everConnected) void reload(true);
+        everConnected = true;
+      };
       socket.onclose = () => {
         setConnected(false);
         if (!closed) retry = window.setTimeout(connect, 2000);

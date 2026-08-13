@@ -31,7 +31,9 @@ class EventHub:
             self._subscribers.pop(topic, None)
 
     def publish(self, topic: str, message: dict[str, Any]) -> None:
-        for target in (topic, "*"):
+        # dict.fromkeys keeps order while collapsing the duplicate when the
+        # caller publishes to "*" directly.
+        for target in dict.fromkeys((topic, "*")):
             for queue in list(self._subscribers.get(target, ())):
                 try:
                     queue.put_nowait(message)

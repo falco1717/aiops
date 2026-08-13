@@ -61,6 +61,7 @@ export type Session = {
   title: string;
   provider: string;
   model: string | null;
+  account_id: number | null;
   preset_id: number | null;
   workspace_id: number | null;
   provider_session_id: string | null;
@@ -183,6 +184,7 @@ export type Schedule = {
   prompt: string;
   provider: string;
   model: string | null;
+  account_id: number | null;
   preset_id: number | null;
   workspace_id: number | null;
   session_mode: string;
@@ -216,6 +218,10 @@ export type WsMessage =
       run_id: number;
       prompt: string;
       command: string[];
+      /** Which named account served this attempt, and what it fell back from. */
+      account?: string | null;
+      failed_over_from?: string | null;
+      attempt?: number;
     }
   | {
       type: "event";

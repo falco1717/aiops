@@ -133,7 +133,8 @@ class AgentPreset(Base):
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # claude: default|acceptEdits|plan|dontAsk|bypassPermissions
+    # Validated against the provider adapter's list, not this comment:
+    # claude: default|acceptEdits|plan|auto|dontAsk|bypassPermissions
     # codex:  read-only|workspace-write|danger-full-access
     permission_mode: Mapped[str | None] = mapped_column(String(64), nullable=True)
     allowed_tools: Mapped[str | None] = mapped_column(Text, nullable=True)  # claude only

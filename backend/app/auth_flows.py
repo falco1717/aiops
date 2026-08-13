@@ -49,6 +49,7 @@ class LoginFlow:
     message: str | None = None
     started_at: float = field(default_factory=time.monotonic)
     _proc: asyncio.subprocess.Process | None = None
+    _pump_task: "asyncio.Task | None" = None
     _output: str = ""
 
     @property
@@ -110,7 +111,10 @@ class LoginManager:
                 return flow
 
             self._flows[key] = flow
-            asyncio.create_task(self._pump(flow), name=f"login-{key}")
+            # Held on the flow: the loop keeps only a weak reference to a task,
+            # so an unreferenced one can be collected mid-flight and the sign-in
+            # would sit at "starting" forever with no error.
+            flow._pump_task = asyncio.create_task(self._pump(flow), name=f"login-{key}")
             # Give the CLI a moment to emit its URL so the first response is useful.
             for _ in range(60):
                 await asyncio.sleep(0.1)
@@ -170,7 +174,13 @@ class LoginManager:
             )
         except FileNotFoundError:
             return False, f"{argv[0]} is not installed."
-        out, _ = await proc.communicate()
+        try:
+            # Bounded like every other CLI call here; a wedged binary would
+            # otherwise hold this request worker open indefinitely.
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return False, "The CLI did not respond to the logout request."
         self._flows.pop(key, None)
         return proc.returncode == 0, _clean(out.decode("utf-8", "replace"))[:500]
 

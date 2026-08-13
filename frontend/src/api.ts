@@ -148,7 +148,11 @@ export const api = {
   patchSession: (id: string, data: Partial<Session>) =>
     request<Session>(`/api/sessions/${id}`, { method: "PATCH", body: body(data) }),
   deleteSession: (id: string) => request<void>(`/api/sessions/${id}`, { method: "DELETE" }),
-  transcript: (id: string) => request<Transcript>(`/api/sessions/${id}/transcript`),
+  /** `sinceEventId` returns only events newer than that id — used on reconnect. */
+  transcript: (id: string, sinceEventId = 0) =>
+    request<Transcript>(
+      `/api/sessions/${id}/transcript${sinceEventId ? `?since_event_id=${sinceEventId}` : ""}`,
+    ),
   capabilities: (id: string) => request<Capability[]>(`/api/sessions/${id}/capabilities`),
   renameSession: (id: string, title: string) =>
     request<Session>(`/api/sessions/${id}`, { method: "PATCH", body: body({ title }) }),

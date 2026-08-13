@@ -1,6 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { formatUtc, isFuture } from "../time";
 import type { Account, LoginFlow, ProviderInfo, User } from "../types";
 
 export default function Accounts({ me }: { me: User }) {
@@ -225,8 +226,7 @@ function AccountCard({
   };
 
   const active = flow && ["starting", "awaiting_user", "completing"].includes(flow.status);
-  const limited = account.limited_until ? new Date(account.limited_until + "Z") : null;
-  const isLimited = limited !== null && limited > new Date();
+  const isLimited = isFuture(account.limited_until);
   const siblings = accounts.filter((a) => a.provider === account.provider && a.id !== account.id);
   const fallback = accounts.find((a) => a.id === account.fallback_account_id);
 
@@ -262,7 +262,7 @@ function AccountCard({
           {account.limit_window ? account.limit_window.replace(/_/g, "-") : "unknown"}:{" "}
           {account.limit_status}
           {account.limit_resets_at &&
-            ` · resets ${new Date(account.limit_resets_at + "Z").toLocaleString()}`}
+            ` · resets ${formatUtc(account.limit_resets_at)}`}
           <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 4 }}>
             Reported by the CLI on the last run.
           </div>
@@ -271,7 +271,7 @@ function AccountCard({
 
       {isLimited && (
         <div className="warn-banner">
-          Held out of rotation until {limited!.toLocaleString()}.{" "}
+          Held out of rotation until {formatUtc(account.limited_until)}.{" "}
           {fallback ? `Work moves to ${fallback.name}.` : "No fallback is set, so runs will fail."}
         </div>
       )}

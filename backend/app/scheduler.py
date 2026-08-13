@@ -109,7 +109,11 @@ async def _tick() -> None:
                 log.info("fired schedule %s", schedule.name)
             except Exception as exc:  # noqa: BLE001
                 log.exception("schedule %s failed to fire", schedule.name)
-                schedule.last_status = f"error: {exc}"[:32]
+                # The failure may have left the session needing a rollback; if
+                # so, the recovery commit below would itself raise and abort
+                # every remaining due schedule in this tick.
+                await db.rollback()
+                schedule.last_status = f"error: {type(exc).__name__}"[:32]
                 await db.commit()
 
 

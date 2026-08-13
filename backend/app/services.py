@@ -13,18 +13,20 @@ class ValidationError(ValueError):
     pass
 
 
-async def build_session(
+async def validate_session_targets(
     db: AsyncSession,
     *,
     provider: str,
-    title: str | None,
-    model: str | None,
+    account_id: int | None,
     preset_id: int | None,
     workspace_id: int | None,
-    account_id: int | None = None,
     user: User | None = None,
-) -> Session:
-    """Create (but do not commit) a session, resolving preset and workspace."""
+) -> AgentPreset | None:
+    """Check that an account/preset/workspace may be used with this provider.
+
+    Shared by session creation and by re-pointing an existing session, so both
+    paths enforce account access identically.
+    """
     if provider not in PROVIDERS:
         raise ValidationError(f"Unknown provider {provider!r}. Known: {', '.join(PROVIDERS)}")
 
@@ -54,6 +56,30 @@ async def build_session(
 
     if workspace_id is not None and await db.get(Workspace, workspace_id) is None:
         raise ValidationError("Workspace not found")
+
+    return preset
+
+
+async def build_session(
+    db: AsyncSession,
+    *,
+    provider: str,
+    title: str | None,
+    model: str | None,
+    preset_id: int | None,
+    workspace_id: int | None,
+    account_id: int | None = None,
+    user: User | None = None,
+) -> Session:
+    """Create (but do not commit) a session, resolving preset and workspace."""
+    preset = await validate_session_targets(
+        db,
+        provider=provider,
+        account_id=account_id,
+        preset_id=preset_id,
+        workspace_id=workspace_id,
+        user=user,
+    )
 
     sess = Session(
         title=(title or "Untitled").strip()[:255] or "Untitled",

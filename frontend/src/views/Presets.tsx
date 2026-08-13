@@ -188,7 +188,12 @@ export default function Presets() {
           <button className="primary" type="submit">
             {editingId ? "Save changes" : "Create agent"}
           </button>
-          {editingId && <button onClick={reset}>Cancel</button>}
+          {editingId && (
+            // Without type="button" this submits the form it sits in.
+            <button type="button" onClick={reset}>
+              Cancel
+            </button>
+          )}
         </div>
       </form>
 

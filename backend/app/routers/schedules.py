@@ -10,11 +10,12 @@ from ..providers import PROVIDERS
 from ..scheduler import compute_next_run, fire_schedule, validate_cron
 from ..schemas import ScheduleIn, ScheduleOut
 from ..security import current_user
+from ..services import ValidationError, validate_session_targets
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 
 
-def _validate(payload: ScheduleIn) -> None:
+async def _validate(payload: ScheduleIn, db: AsyncSession, user: User) -> None:
     if payload.provider not in PROVIDERS:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -26,6 +27,20 @@ def _validate(payload: ScheduleIn) -> None:
         validate_cron(payload.cron, payload.timezone_name)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    # A schedule runs unattended, so the account/preset/workspace it points at
+    # has to pass the same access checks a session would — otherwise it only
+    # fails at fire time, hours later, in the scheduler log.
+    try:
+        await validate_session_targets(
+            db,
+            provider=payload.provider,
+            account_id=payload.account_id,
+            preset_id=payload.preset_id,
+            workspace_id=payload.workspace_id,
+            user=user,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 @router.get("", response_model=list[ScheduleOut])
@@ -35,9 +50,9 @@ async def list_schedules(_: User = Depends(current_user), db: AsyncSession = Dep
 
 @router.post("", response_model=ScheduleOut, status_code=status.HTTP_201_CREATED)
 async def create_schedule(
-    payload: ScheduleIn, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    payload: ScheduleIn, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
-    _validate(payload)
+    await _validate(payload, db, user)
     if await db.scalar(select(Schedule).where(Schedule.name == payload.name)):
         raise HTTPException(status.HTTP_409_CONFLICT, "A schedule with that name already exists")
     sched = Schedule(**payload.model_dump())
@@ -52,10 +67,10 @@ async def create_schedule(
 async def update_schedule(
     schedule_id: int,
     payload: ScheduleIn,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    _validate(payload)
+    await _validate(payload, db, user)
     sched = await db.get(Schedule, schedule_id)
     if sched is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Schedule not found")
