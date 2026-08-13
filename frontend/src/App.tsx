@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError, api } from "./api";
-import Logo from "./components/Logo";
+import Logo, { Mark } from "./components/Logo";
 import type { User } from "./types";
 import Account, { ChangePassword } from "./views/Account";
 import Login from "./views/Login";
@@ -11,9 +11,19 @@ import Schedules from "./views/Schedules";
 import Sessions from "./views/Sessions";
 import Workspaces from "./views/Workspaces";
 
+const NAV = [
+  { to: "/sessions", label: "Sessions" },
+  { to: "/schedules", label: "Schedules" },
+  { to: "/presets", label: "Agents" },
+  { to: "/workspaces", label: "Workspaces" },
+  { to: "/providers", label: "Providers" },
+];
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
+  const location = useLocation();
 
   const refresh = useCallback(async () => {
     try {
@@ -30,6 +40,12 @@ export default function App() {
     void refresh();
   }, [refresh]);
 
+  // The drawer must not survive a navigation, or you land on the new page with
+  // the menu still covering it.
+  useEffect(() => {
+    setNavOpen(false);
+  }, [location.pathname]);
+
   if (!ready) return <div className="empty">Loading…</div>;
   if (!user) return <Login onAuthenticated={refresh} />;
 
@@ -43,13 +59,11 @@ export default function App() {
   if (user.must_change_password) {
     return (
       <div className="login-wrap">
-        <div style={{ width: 460 }}>
+        <div className="forced-change">
           <div style={{ marginBottom: 18 }}>
             <Logo size={40} />
           </div>
-          <p className="subtitle">
-            Your password must be changed before you can use AIOps.
-          </p>
+          <p className="subtitle">Your password must be changed before you can use AIOps.</p>
           <ChangePassword forced onChanged={refresh} />
           <button onClick={logout} style={{ marginTop: 12 }}>
             Sign out instead
@@ -60,26 +74,31 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app${navOpen ? " nav-open" : ""}`}>
+      <header className="topbar">
+        <button
+          className="icon-btn"
+          onClick={() => setNavOpen((v) => !v)}
+          aria-label={navOpen ? "Close menu" : "Open menu"}
+          aria-expanded={navOpen}
+        >
+          {navOpen ? "✕" : "☰"}
+        </button>
+        <Mark size={26} />
+        <span className="topbar-title">AIOps</span>
+      </header>
+
+      <div className="nav-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />
+
       <nav className="sidebar">
         <div className="brand">
           <Logo size={34} />
         </div>
-        <NavLink to="/sessions" className="nav-link">
-          Sessions
-        </NavLink>
-        <NavLink to="/schedules" className="nav-link">
-          Schedules
-        </NavLink>
-        <NavLink to="/presets" className="nav-link">
-          Agents
-        </NavLink>
-        <NavLink to="/workspaces" className="nav-link">
-          Workspaces
-        </NavLink>
-        <NavLink to="/providers" className="nav-link">
-          Providers
-        </NavLink>
+        {NAV.map((item) => (
+          <NavLink key={item.to} to={item.to} className="nav-link">
+            {item.label}
+          </NavLink>
+        ))}
         <div className="sidebar-foot">
           <NavLink to="/account" className="nav-link">
             {user.username}
@@ -90,6 +109,7 @@ export default function App() {
           </button>
         </div>
       </nav>
+
       <Routes>
         <Route path="/" element={<Navigate to="/sessions" replace />} />
         <Route path="/sessions" element={<Sessions />} />

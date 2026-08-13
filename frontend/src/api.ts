@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  Capability,
   LoginFlow,
   Preset,
   ProviderInfo,
@@ -123,6 +124,9 @@ export const api = {
     request<Session>(`/api/sessions/${id}`, { method: "PATCH", body: body(data) }),
   deleteSession: (id: string) => request<void>(`/api/sessions/${id}`, { method: "DELETE" }),
   transcript: (id: string) => request<Transcript>(`/api/sessions/${id}/transcript`),
+  capabilities: (id: string) => request<Capability[]>(`/api/sessions/${id}/capabilities`),
+  renameSession: (id: string, title: string) =>
+    request<Session>(`/api/sessions/${id}`, { method: "PATCH", body: body({ title }) }),
   prompt: (id: string, prompt: string) =>
     request<Run>(`/api/sessions/${id}/prompt`, { method: "POST", body: body({ prompt }) }),
   events: (id: string) => request<AgentEvent[]>(`/api/sessions/${id}/events`),

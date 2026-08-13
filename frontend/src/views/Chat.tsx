@@ -1,7 +1,8 @@
 import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { api, openSocket } from "../api";
-import type { AgentEvent, Run, Session, WsMessage } from "../types";
+import type { AgentEvent, Capability, Run, Session, WsMessage } from "../types";
 
 type ChatEvent = Pick<AgentEvent, "run_id" | "seq" | "kind" | "text" | "tool_name"> & {
   id?: number;
@@ -28,8 +29,14 @@ export default function Chat({
   const [prompt, setPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const [capabilities, setCapabilities] = useState<Capability[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
+  const navigate = useNavigate();
   const bodyRef = useRef<HTMLDivElement>(null);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
   const pinnedRef = useRef(true);
 
   const mergeEvents = useCallback((incoming: ChatEvent[]) => {
@@ -57,6 +64,15 @@ export default function Chat({
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // Skills and slash commands depend on the session's workspace, so they are
+  // fetched per session rather than globally.
+  useEffect(() => {
+    api
+      .capabilities(sessionId)
+      .then(setCapabilities)
+      .catch(() => setCapabilities([]));
+  }, [sessionId]);
 
   // Live feed. Reconnects on drop and refetches so nothing is missed.
   useEffect(() => {
@@ -162,6 +178,56 @@ export default function Chat({
     }
   };
 
+  const saveTitle = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const title = draftTitle.trim();
+    if (!title) return;
+    setRenaming(false);
+    try {
+      setSession(await api.renameSession(sessionId, title));
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const remove = async () => {
+    if (
+      !confirm(
+        `Delete "${session?.title ?? "this session"}"?\n\n` +
+          "The transcript and its run history go with it. The agent's work on " +
+          "disk is left untouched.",
+      )
+    )
+      return;
+    try {
+      await api.deleteSession(sessionId);
+      onChanged();
+      navigate("/sessions");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /** Insert a `/name ` token at the caret. */
+  const insertCapability = (name: string) => {
+    const el = promptRef.current;
+    const token = `/${name} `;
+    if (!el) {
+      setPrompt((p) => (p ? `${p}\n${token}` : token));
+    } else {
+      const start = el.selectionStart ?? prompt.length;
+      const end = el.selectionEnd ?? start;
+      setPrompt(prompt.slice(0, start) + token + prompt.slice(end));
+      window.setTimeout(() => {
+        el.focus();
+        const at = start + token.length;
+        el.setSelectionRange(at, at);
+      }, 0);
+    }
+    setPickerOpen(false);
+  };
+
   const eventsByRun = useMemo(() => {
     const map = new Map<number, ChatEvent[]>();
     for (const e of events) {
@@ -175,8 +241,38 @@ export default function Chat({
   return (
     <div className="chat">
       <div className="chat-head">
-        <h1>{session?.title ?? "…"}</h1>
-        {session && (
+        <Link to="/sessions" className="back-link" aria-label="Back to sessions">
+          ←
+        </Link>
+        {renaming ? (
+          <form className="rename-form" onSubmit={saveTitle}>
+            <input
+              value={draftTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setRenaming(false)}
+              autoFocus
+              maxLength={255}
+            />
+            <button className="primary" type="submit">
+              Save
+            </button>
+            <button type="button" onClick={() => setRenaming(false)}>
+              Cancel
+            </button>
+          </form>
+        ) : (
+          <h1
+            className="session-title"
+            title="Click to rename"
+            onClick={() => {
+              setDraftTitle(session?.title ?? "");
+              setRenaming(true);
+            }}
+          >
+            {session?.title ?? "…"}
+          </h1>
+        )}
+        {session && !renaming && (
           <>
             <span className="pill">{session.provider}</span>
             {session.model && <span className="pill">{session.model}</span>}
@@ -189,6 +285,11 @@ export default function Chat({
         {activeRun && (
           <button className="danger" onClick={cancel}>
             Stop
+          </button>
+        )}
+        {!renaming && (
+          <button className="danger" onClick={remove} title="Delete this session">
+            Delete
           </button>
         )}
       </div>
@@ -227,18 +328,59 @@ export default function Chat({
             )}
 
             {run.cost_usd != null && (
-              <div className="msg system">cost ${run.cost_usd.toFixed(4)}</div>
+              <div
+                className="msg system"
+                title={
+                  "What these tokens would cost at pay-as-you-go API rates. " +
+                  "When the CLI is signed in with a Claude subscription, this is " +
+                  "not an additional charge — usage counts against your plan."
+                }
+              >
+                ≈ ${run.cost_usd.toFixed(4)} at API rates
+              </div>
             )}
           </div>
         ))}
       </div>
 
       <form className="chat-foot" onSubmit={send}>
+        {pickerOpen && (
+          <div className="picker">
+            <div className="picker-head">
+              <strong>Skills &amp; commands</strong>
+              <button type="button" onClick={() => setPickerOpen(false)}>
+                Close
+              </button>
+            </div>
+            {capabilities.length === 0 ? (
+              <div className="empty" style={{ padding: 14 }}>
+                Nothing found. Skills live in <code>.claude/skills/</code> in the workspace or in
+                the container's <code>~/.claude/</code>.
+              </div>
+            ) : (
+              <ul>
+                {capabilities.map((c) => (
+                  <li key={`${c.kind}:${c.name}`}>
+                    <button type="button" onClick={() => insertCapability(c.name)}>
+                      <span className="cap-name">/{c.name}</span>
+                      <span className={`pill ${c.kind === "skill" ? "ok" : ""}`}>{c.kind}</span>
+                      <span className="cap-src">{c.source}</span>
+                      {c.description && <span className="cap-desc">{c.description}</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
         <textarea
+          ref={promptRef}
           rows={3}
           value={prompt}
           placeholder={
-            activeRun ? "Agent is working — stop it or wait…" : "Describe the task…  (Ctrl+Enter to send)"
+            activeRun
+              ? "Agent is working — stop it or wait…"
+              : "Describe the task…  (Ctrl+Enter to send, / for skills)"
           }
           disabled={!!activeRun}
           onChange={(e) => setPrompt(e.target.value)}
@@ -250,8 +392,18 @@ export default function Chat({
           <button className="primary" type="submit" disabled={!!activeRun || sending || !prompt.trim()}>
             {sending ? "Sending…" : "Send"}
           </button>
+          <button
+            type="button"
+            onClick={() => setPickerOpen((v) => !v)}
+            title="Insert a skill or slash command"
+          >
+            / Skills
+            {capabilities.length > 0 && (
+              <span className="pill" style={{ marginLeft: 6 }}>{capabilities.length}</span>
+            )}
+          </button>
           {session?.provider_session_id && (
-            <span className="mono" style={{ color: "var(--text-dim)" }}>
+            <span className="mono session-id" style={{ color: "var(--text-dim)" }}>
               {session.provider} session {session.provider_session_id.slice(0, 12)}…
             </span>
           )}

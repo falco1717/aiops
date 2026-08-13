@@ -95,6 +95,14 @@ export type AgentEvent = {
   created_at: string;
 };
 
+/** A skill or slash command the session can use by typing `/name`. */
+export type Capability = {
+  name: string;
+  kind: "skill" | "command" | "builtin";
+  description: string;
+  source: string;
+};
+
 export type Transcript = {
   session: Session;
   runs: Run[];

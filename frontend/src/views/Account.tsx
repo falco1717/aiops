@@ -247,7 +247,7 @@ function UserAdmin({ me }: { me: User }) {
         <tbody>
           {users.map((u) => (
             <tr key={u.id}>
-              <td>
+              <td data-label="User">
                 {u.username}
                 {u.id === me.id && <span className="pill" style={{ marginLeft: 8 }}>you</span>}
                 {u.must_change_password && (
@@ -256,13 +256,15 @@ function UserAdmin({ me }: { me: User }) {
                   </span>
                 )}
               </td>
-              <td>
+              <td data-label="Role">
                 <span className={`pill ${u.is_admin ? "ok" : ""}`}>
                   {u.is_admin ? "administrator" : "user"}
                 </span>
               </td>
-              <td className="mono">{u.last_login_at ? fmt(u.last_login_at) : "never"}</td>
-              <td className="row">
+              <td className="mono" data-label="Last sign-in">
+                {u.last_login_at ? fmt(u.last_login_at) : "never"}
+              </td>
+              <td className="row actions">
                 <button onClick={() => resetPassword(u)} disabled={busy}>
                   Reset password
                 </button>

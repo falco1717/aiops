@@ -157,6 +157,13 @@ class EventOut(ORM):
     created_at: datetime
 
 
+class CapabilityOut(BaseModel):
+    name: str
+    kind: str
+    description: str
+    source: str
+
+
 class TranscriptOut(BaseModel):
     session: SessionOut
     runs: list[RunOut]

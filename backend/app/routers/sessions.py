@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..models import Event, Run, Session, User
 from ..schemas import (
+    CapabilityOut,
     EventOut,
     PromptIn,
     RunOut,
@@ -16,6 +17,7 @@ from ..schemas import (
     TranscriptOut,
 )
 from ..security import current_user
+from ..skills import discover
 from ..services import ValidationError, build_session, queue_run
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -166,6 +168,22 @@ async def list_events(
         stmt = stmt.where(Event.run_id == run_id)
     rows = await db.scalars(stmt.order_by(Event.id))
     return list(rows)
+
+
+@router.get("/{session_id}/capabilities", response_model=list[CapabilityOut])
+async def capabilities(
+    session_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    """Skills and slash commands this session can use.
+
+    These already work by typing `/name` into the prompt; this endpoint just
+    lets the composer show what exists rather than relying on memory.
+    """
+    sess = await _get(db, session_id)
+    workspace_path = sess.workspace.path if sess.workspace else None
+    return [
+        CapabilityOut(**vars(cap)) for cap in discover(sess.provider, workspace_path)
+    ]
 
 
 @router.get("/{session_id}/events/{event_id}/raw")

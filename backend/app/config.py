@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     # Stream token-level deltas over the websocket (not persisted to the DB).
     stream_partial_messages: bool = True
 
+    # --- sign-in throttling -------------------------------------------
+    # AIOps may be the only thing between the internet and an agent that runs
+    # shell commands, so the login endpoint locks out after repeated failures.
+    login_max_failures: int = 5
+    login_failure_window_seconds: int = 900
+    login_lockout_seconds: int = 900
+
     # --- scheduler -----------------------------------------------------
     scheduler_enabled: bool = True
     scheduler_tick_seconds: int = 20

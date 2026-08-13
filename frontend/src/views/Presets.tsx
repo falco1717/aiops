@@ -208,16 +208,20 @@ export default function Presets() {
           <tbody>
             {items.map((p) => (
               <tr key={p.id}>
-                <td>
+                <td data-label="Name">
                   {p.name}
                   {p.description && (
                     <div style={{ color: "var(--text-dim)", fontSize: 12 }}>{p.description}</div>
                   )}
                 </td>
-                <td>{p.provider}</td>
-                <td className="mono">{p.model ?? "—"}</td>
-                <td className="mono">{p.permission_mode ?? "—"}</td>
-                <td className="row">
+                <td data-label="Provider">{p.provider}</td>
+                <td className="mono" data-label="Model">
+                  {p.model ?? "—"}
+                </td>
+                <td className="mono" data-label="Permissions">
+                  {p.permission_mode ?? "—"}
+                </td>
+                <td className="row actions">
                   <button onClick={() => edit(p)}>Edit</button>
                   <button className="danger" onClick={() => remove(p)}>
                     Delete

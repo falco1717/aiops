@@ -58,6 +58,7 @@ function ProviderCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [popupBlocked, setPopupBlocked] = useState(false);
   const pollRef = useRef<number | undefined>(undefined);
 
   const stopPolling = () => {
@@ -92,13 +93,40 @@ function ProviderCard({
 
   useEffect(() => stopPolling, []);
 
+  /** Point a tab at the provider's sign-in page. */
+  const openAuthTab = (url: string, prepared?: Window | null) => {
+    const target = prepared && !prepared.closed ? prepared : window.open("", "_blank");
+    if (!target || target.closed) {
+      setPopupBlocked(true);
+      return;
+    }
+    // Sever the opener before navigating so the provider's page cannot reach
+    // back into AIOps; window.open("…","noopener") would return null and leave
+    // us nothing to navigate.
+    try {
+      target.opener = null;
+    } catch {
+      /* some browsers make opener read-only; the navigation still works */
+    }
+    target.location.href = url;
+    setPopupBlocked(false);
+  };
+
   const start = async () => {
+    // Opened synchronously inside the click: a window.open that happens later,
+    // after the await, is treated as an unsolicited popup and blocked.
+    const prepared = window.open("", "_blank");
     setBusy(true);
     setError(null);
+    setPopupBlocked(false);
     setCode("");
     try {
-      setFlow(await api.startProviderLogin(provider.name));
+      const next = await api.startProviderLogin(provider.name);
+      setFlow(next);
+      if (next.verification_url) openAuthTab(next.verification_url, prepared);
+      else prepared?.close();
     } catch (err) {
+      prepared?.close();
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
@@ -198,23 +226,39 @@ function ProviderCard({
         <div className="login-flow">
           <ol>
             <li>
-              <div className="step-head">Open this link and approve the sign-in</div>
+              <div className="step-head">Approve the sign-in on {provider.label}</div>
               {flow!.verification_url ? (
-                <div className="row">
-                  <a
-                    className="linkbox"
-                    href={flow!.verification_url}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                  >
-                    {flow!.verification_url.length > 78
-                      ? flow!.verification_url.slice(0, 78) + "…"
-                      : flow!.verification_url}
-                  </a>
-                  <button onClick={() => copy(flow!.verification_url!, "url")}>
-                    {copied === "url" ? "Copied" : "Copy link"}
-                  </button>
-                </div>
+                <>
+                  <div className="row">
+                    <button
+                      className="primary big"
+                      onClick={() => openAuthTab(flow!.verification_url!)}
+                    >
+                      Open sign-in page ↗
+                    </button>
+                    <button onClick={() => copy(flow!.verification_url!, "url")}>
+                      {copied === "url" ? "Copied" : "Copy link"}
+                    </button>
+                  </div>
+                  {popupBlocked && (
+                    <div className="error-banner" style={{ margin: "10px 0 0" }}>
+                      Your browser blocked the new tab. Use the link below, or allow pop-ups for
+                      this site.
+                    </div>
+                  )}
+                  {/* Kept visible so you can finish on a phone while AIOps is open on a desktop. */}
+                  <details className="linkfallback">
+                    <summary>Open it somewhere else</summary>
+                    <a
+                      className="linkbox"
+                      href={flow!.verification_url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                    >
+                      {flow!.verification_url}
+                    </a>
+                  </details>
+                </>
               ) : (
                 <span className="subtitle">Waiting for the CLI to produce a link…</span>
               )}
@@ -279,7 +323,15 @@ function ProviderCard({
           {provider.account && (
             <tr>
               <th>Account</th>
-              <td className="mono">{provider.account}</td>
+              <td>
+                <span className="mono">{provider.account}</span>
+                {/^.*subscription$/i.test(provider.account) && (
+                  <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 4 }}>
+                    Runs draw on this plan. Per-run costs shown in a session are
+                    API-rate estimates, not extra charges.
+                  </div>
+                )}
+              </td>
             </tr>
           )}
           <tr>

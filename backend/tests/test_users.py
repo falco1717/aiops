@@ -172,6 +172,45 @@ with TestClient(app) as c:
         f"{r.status_code} {r.text[:160]}",
     )
 
+    # --- skills / slash command discovery -----------------------------
+    ws = c.post("/api/workspaces", json={"name": "skilldemo", "path": "skilldemo"}).json()
+    sess = c.post(
+        "/api/sessions", json={"provider": "claude", "workspace_id": ws["id"]}
+    ).json()
+    skill_dir = os.path.join(ws["path"], ".claude", "skills", "release-notes")
+    os.makedirs(skill_dir, exist_ok=True)
+    with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
+        fh.write("---\nname: release-notes\ndescription: Draft release notes\n---\n\n# Notes\n")
+    cmd_dir = os.path.join(ws["path"], ".claude", "commands")
+    os.makedirs(cmd_dir, exist_ok=True)
+    with open(os.path.join(cmd_dir, "deploy.md"), "w", encoding="utf-8") as fh:
+        fh.write("Ship the current branch\n")
+
+    caps = c.get(f"/api/sessions/{sess['id']}/capabilities").json()
+    by_name = {x["name"]: x for x in caps}
+    check("workspace skill discovered", "release-notes" in by_name, str(sorted(by_name))[:200])
+    check(
+        "skill description read from frontmatter",
+        by_name.get("release-notes", {}).get("description") == "Draft release notes",
+        str(by_name.get("release-notes")),
+    )
+    check("workspace command discovered", "deploy" in by_name, str(sorted(by_name))[:200])
+    check("built-in /goal offered", "goal" in by_name, str(sorted(by_name))[:200])
+
+    # --- sign-in throttling -------------------------------------------
+    c.post("/api/auth/logout")
+    codes = []
+    for _ in range(7):
+        codes.append(
+            c.post("/api/auth/login", json={"username": "admin", "password": "nope"}).status_code
+        )
+    check("repeated bad passwords eventually lock out", 429 in codes, str(codes))
+    check("lockout kicks in after a few tries, not immediately",
+          codes[0] == 401 and codes.count(401) >= 3, str(codes))
+    r = c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
+    check("correct password is refused while locked out", r.status_code == 429, str(r.status_code))
+    check("Retry-After advertised", "retry-after" in {k.lower() for k in r.headers}, str(dict(r.headers))[:200])
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {failures}")

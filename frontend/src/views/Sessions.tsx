@@ -28,7 +28,9 @@ export default function Sessions() {
 
   return (
     <div className="main flush">
-      <div className="sessions">
+      {/* On a phone the list and the conversation are separate screens; the
+          class tells the stylesheet which one is in front. */}
+      <div className={`sessions${sessionId || creating ? " showing-detail" : ""}`}>
         <div className="session-list">
           <div className="session-list-head">
             <button className="primary" style={{ width: "100%" }} onClick={() => setCreating(true)}>

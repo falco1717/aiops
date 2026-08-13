@@ -244,7 +244,7 @@ export default function Schedules() {
           <tbody>
             {items.map((s) => (
               <tr key={s.id}>
-                <td>
+                <td data-label="Name">
                   {s.name}{" "}
                   {!s.enabled && <span className="pill cancelled">disabled</span>}
                   <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
@@ -252,20 +252,24 @@ export default function Schedules() {
                     {s.model ? ` · ${s.model}` : ""}
                   </div>
                 </td>
-                <td className="mono">
+                <td className="mono" data-label="Cron">
                   {s.cron}
                   <div style={{ color: "var(--text-dim)" }}>{s.timezone_name}</div>
                 </td>
-                <td className="mono">{fmt(s.next_run_at)}</td>
-                <td className="mono">{fmt(s.last_run_at)}</td>
-                <td>
+                <td className="mono" data-label="Next run">
+                  {fmt(s.next_run_at)}
+                </td>
+                <td className="mono" data-label="Last run">
+                  {fmt(s.last_run_at)}
+                </td>
+                <td data-label="Session">
                   {s.target_session_id ? (
                     <Link to={`/sessions/${s.target_session_id}`}>open</Link>
                   ) : (
                     <span style={{ color: "var(--text-dim)" }}>per run</span>
                   )}
                 </td>
-                <td className="row">
+                <td className="row actions">
                   <button onClick={() => runNow(s)}>Run now</button>
                   <button onClick={() => edit(s)}>Edit</button>
                   <button className="danger" onClick={() => remove(s)}>

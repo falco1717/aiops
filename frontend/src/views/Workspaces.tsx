@@ -108,14 +108,16 @@ export default function Workspaces() {
               const st = statuses[w.id];
               return (
                 <tr key={w.id}>
-                  <td>
+                  <td data-label="Name">
                     {w.name}
                     {w.description && (
                       <div style={{ color: "var(--text-dim)", fontSize: 12 }}>{w.description}</div>
                     )}
                   </td>
-                  <td className="mono">{w.path}</td>
-                  <td>
+                  <td className="mono" data-label="Path">
+                    {w.path}
+                  </td>
+                  <td data-label="Git">
                     {!st ? (
                       "…"
                     ) : !st.exists ? (
@@ -128,8 +130,10 @@ export default function Workspaces() {
                       <span className="pill">not a repo</span>
                     )}
                   </td>
-                  <td>{st?.dirty_files.length ? `${st.dirty_files.length} file(s)` : "clean"}</td>
-                  <td className="row">
+                  <td data-label="Changes">
+                    {st?.dirty_files.length ? `${st.dirty_files.length} file(s)` : "clean"}
+                  </td>
+                  <td className="row actions">
                     {st?.is_git && <button onClick={() => showDiff(w)}>Diff</button>}
                     <button className="danger" onClick={() => remove(w)}>
                       Remove

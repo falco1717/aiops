@@ -48,22 +48,23 @@ services:
       traefik.enable: "true"
       traefik.docker.network: "${TRAEFIK_NETWORK:-saltbox}"
 
-      # HTTPS router. The middleware chain matches the house convention for
-      # Authelia-protected apps on this host: shared headers, real client IP
-      # from Cloudflare, then forward-auth.
+      # HTTPS router. AIOps authenticates on its own (session cookie + login
+      # lockout), so the default chain is headers and real-client-IP only.
+      # Add a forward-auth entry to TRAEFIK_MIDDLEWARES to put SSO in front.
       traefik.http.routers.aiops.rule: "Host(`${PUBLIC_HOSTNAME}`)"
       traefik.http.routers.aiops.entrypoints: "websecure"
-      traefik.http.routers.aiops.middlewares: "${TRAEFIK_MIDDLEWARES:-globalHeaders@file,secureHeaders@file,cloudflarewarp@docker,authelia@docker}"
+      traefik.http.routers.aiops.middlewares: "${TRAEFIK_MIDDLEWARES:-globalHeaders@file,secureHeaders@file,cloudflarewarp@docker}"
       traefik.http.routers.aiops.service: "aiops"
       traefik.http.routers.aiops.tls: "true"
       traefik.http.routers.aiops.tls.certresolver: "${TRAEFIK_CERTRESOLVER:-cfdns}"
       traefik.http.routers.aiops.tls.options: "securetls@file"
 
-      # Plain HTTP just redirects; it is still behind Authelia so an
-      # unauthenticated probe cannot reach the app on either entrypoint.
+      # Plain HTTP only redirects to HTTPS. Whatever chain you set above, set
+      # the matching one here — protecting one entrypoint and not the other
+      # leaves an open path to the same service.
       traefik.http.routers.aiops-http.rule: "Host(`${PUBLIC_HOSTNAME}`)"
       traefik.http.routers.aiops-http.entrypoints: "web"
-      traefik.http.routers.aiops-http.middlewares: "${TRAEFIK_MIDDLEWARES_HTTP:-globalHeaders@file,redirect-to-https@docker,cloudflarewarp@docker,authelia@docker}"
+      traefik.http.routers.aiops-http.middlewares: "${TRAEFIK_MIDDLEWARES_HTTP:-globalHeaders@file,redirect-to-https@docker,cloudflarewarp@docker}"
       traefik.http.routers.aiops-http.service: "aiops"
 
       traefik.http.services.aiops.loadbalancer.server.port: "8000"

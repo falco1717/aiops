@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
 from ..models import User
+from ..ratelimit import client_address, throttle
 from ..schemas import LoginIn, PasswordChangeIn, UserOut
 from ..security import create_token, current_user, hash_password, verify_password
 
@@ -16,10 +17,29 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 @router.post("/login", response_model=UserOut)
-async def login(payload: LoginIn, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(
+    payload: LoginIn,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    client_ip = client_address(request)
+    wait = throttle.retry_after(payload.username, client_ip)
+    if wait:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"Too many failed sign-in attempts. Try again in {wait // 60 + 1} minute(s).",
+            headers={"Retry-After": str(wait)},
+        )
+
     user = await db.scalar(select(User).where(User.username == payload.username))
     if not user or not verify_password(payload.password, user.password_hash):
+        throttle.record_failure(payload.username, client_ip)
+        # Deliberately identical for unknown user and wrong password, so the
+        # endpoint does not confirm which usernames exist.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid username or password")
+
+    throttle.record_success(payload.username, client_ip)
     user.last_login_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(user)

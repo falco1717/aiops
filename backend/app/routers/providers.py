@@ -71,7 +71,15 @@ async def _describe(name: str) -> ProviderOut:
             try:
                 data = json.loads(out)
                 authenticated = bool(data.get("loggedIn"))
-                account = data.get("account") or data.get("authMethod")
+                # Surface *how* it is authenticated: a subscription login means
+                # usage counts against the plan, not pay-as-you-go API billing.
+                bits = [b for b in (data.get("email"), data.get("orgName")) if b]
+                plan = data.get("subscriptionType")
+                if plan:
+                    bits.append(f"{plan} subscription")
+                elif data.get("authMethod") == "apiKey":
+                    bits.append("API key (metered)")
+                account = " · ".join(bits) or data.get("authMethod")
                 detail = json.dumps(data, indent=2)
             except (json.JSONDecodeError, AttributeError):
                 authenticated = code == 0
