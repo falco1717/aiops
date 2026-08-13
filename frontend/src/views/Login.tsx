@@ -1,6 +1,7 @@
 import type * as React from "react";
 import { useState } from "react";
 import { api } from "../api";
+import Logo from "../components/Logo";
 
 export default function Login({ onAuthenticated }: { onAuthenticated: () => void }) {
   const [username, setUsername] = useState("");
@@ -25,7 +26,9 @@ export default function Login({ onAuthenticated }: { onAuthenticated: () => void
   return (
     <div className="login-wrap">
       <form className="card login-card" onSubmit={submit}>
-        <h1>AIOps</h1>
+        <div className="login-logo">
+          <Logo size={44} />
+        </div>
         <p className="subtitle">Sign in to run agents.</p>
         {error && <div className="error-banner">{error}</div>}
         <label>

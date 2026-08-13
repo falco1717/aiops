@@ -18,11 +18,32 @@ class LoginIn(BaseModel):
 class UserOut(ORM):
     id: int
     username: str
+    is_admin: bool
+    must_change_password: bool
+    created_at: datetime
+    last_login_at: datetime | None
 
 
 class PasswordChangeIn(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8)
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=8)
+    is_admin: bool = False
+    must_change_password: bool = True
+
+
+class UserPatch(BaseModel):
+    is_admin: bool | None = None
+    must_change_password: bool | None = None
+
+
+class UserPasswordReset(BaseModel):
+    new_password: str = Field(min_length=8)
+    must_change_password: bool = True
 
 
 # --- workspaces --------------------------------------------------------
@@ -177,10 +198,26 @@ class ScheduleOut(ORM):
 # --- providers ---------------------------------------------------------
 class ProviderOut(BaseModel):
     name: str
+    label: str
     models: list[str]
     permission_modes: list[str]
     binary: str
     available: bool
     version: str | None = None
     authenticated: bool | None = None
+    account: str | None = None
     detail: str | None = None
+
+
+class LoginFlowOut(BaseModel):
+    provider: str
+    status: str
+    verification_url: str | None = None
+    user_code: str | None = None
+    needs_code: bool = False
+    message: str | None = None
+    expires_in: int = 0
+
+
+class LoginCodeIn(BaseModel):
+    code: str = Field(min_length=1)

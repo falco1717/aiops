@@ -165,7 +165,7 @@ export default function Schedules() {
             >
               {providers.map((p) => (
                 <option key={p.name} value={p.name}>
-                  {p.name}
+                  {p.label}
                 </option>
               ))}
             </select>

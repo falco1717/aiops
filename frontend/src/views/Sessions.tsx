@@ -152,7 +152,7 @@ function NewSession({
             <select value={provider} onChange={(e) => setProvider(e.target.value)}>
               {providers.map((p) => (
                 <option key={p.name} value={p.name}>
-                  {p.name}
+                  {p.label}
                 </option>
               ))}
             </select>

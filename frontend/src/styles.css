@@ -68,8 +68,24 @@ label > span { display: block; color: var(--text-dim); font-size: 12px; margin-b
   gap: 4px;
   overflow-y: auto;
 }
-.brand { font-weight: 700; letter-spacing: .5px; padding: 4px 8px 14px; font-size: 16px; }
-.brand small { display: block; font-weight: 400; color: var(--text-dim); font-size: 11px; }
+.brand { padding: 2px 6px 16px; }
+
+/* ---- identity ---- */
+.logo { display: inline-flex; align-items: center; gap: 10px; }
+.logo svg { flex: none; display: block; }
+.wordmark { display: flex; flex-direction: column; line-height: 1; }
+.wordmark-name { font-weight: 700; font-size: 17px; letter-spacing: -.3px; }
+.wordmark-ai {
+  background: linear-gradient(90deg, #5AA9FF, #A45BFF);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.wordmark-tagline {
+  margin-top: 4px; font-size: 8.5px; letter-spacing: 1.6px;
+  text-transform: uppercase; color: var(--text-dim); white-space: nowrap;
+}
+.login-logo { display: flex; justify-content: center; margin-bottom: 6px; }
+.login-logo .wordmark-name { font-size: 22px; }
+.login-logo .wordmark-tagline { font-size: 9.5px; }
 .nav-link {
   display: block; padding: 7px 10px; border-radius: 6px; color: var(--text-dim);
 }
@@ -112,6 +128,37 @@ td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
 .error-banner {
   background: #33191c; border: 1px solid var(--err); color: #ffd9dc;
   padding: 9px 12px; border-radius: 6px; margin-bottom: 14px; font-size: 13px;
+}
+.ok-banner {
+  background: #12291d; border: 1px solid var(--ok); color: #ccf7dd;
+  padding: 9px 12px; border-radius: 6px; margin: 12px 0; font-size: 13px;
+}
+.field-hint { font-size: 12px; margin: -6px 0 12px; }
+.field-hint.err { color: var(--err); }
+
+label.check { display: inline-flex; align-items: center; gap: 7px; margin: 0; }
+label.check input { width: 15px; height: 15px; }
+label.check span { margin: 0; color: var(--text); font-size: 13px; }
+
+/* ---- provider sign-in ---- */
+.provider-card { margin-top: 14px; }
+.login-flow {
+  margin-top: 14px; padding: 14px 16px;
+  border: 1px solid var(--accent); border-radius: 8px; background: #121a26;
+}
+.login-flow ol { margin: 0; padding-left: 20px; }
+.login-flow li { margin-bottom: 14px; }
+.login-flow li:last-child { margin-bottom: 4px; }
+.step-head { margin-bottom: 6px; }
+.linkbox {
+  font-family: var(--mono); font-size: 12px; word-break: break-all;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 10px; flex: 1; min-width: 240px;
+}
+.devicecode {
+  font-family: var(--mono); font-size: 26px; font-weight: 700; letter-spacing: 4px;
+  background: var(--bg); border: 1px solid var(--accent); border-radius: 8px;
+  padding: 8px 16px; color: var(--accent);
 }
 .empty { color: var(--text-dim); padding: 28px 0; text-align: center; }
 

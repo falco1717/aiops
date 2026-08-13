@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +20,9 @@ async def login(payload: LoginIn, response: Response, db: AsyncSession = Depends
     user = await db.scalar(select(User).where(User.username == payload.username))
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid username or password")
+    user.last_login_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(user)
     response.set_cookie(
         settings.cookie_name,
         create_token(user),
@@ -48,5 +53,11 @@ async def change_password(
 ):
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect")
+    if verify_password(payload.new_password, user.password_hash):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "New password must differ from the current one"
+        )
     user.password_hash = hash_password(payload.new_password)
+    # Clears any admin-forced change, which is what unblocks the rest of the API.
+    user.must_change_password = False
     await db.commit()

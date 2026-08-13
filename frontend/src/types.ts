@@ -1,4 +1,30 @@
-export type User = { id: number; username: string };
+export type User = {
+  id: number;
+  username: string;
+  is_admin: boolean;
+  must_change_password: boolean;
+  created_at: string;
+  last_login_at: string | null;
+};
+
+/** An in-progress provider sign-in driven from the browser. */
+export type LoginFlow = {
+  provider: string;
+  status:
+    | "idle"
+    | "starting"
+    | "awaiting_user"
+    | "completing"
+    | "success"
+    | "failed"
+    | "cancelled"
+    | "expired";
+  verification_url: string | null;
+  user_code: string | null;
+  needs_code: boolean;
+  message: string | null;
+  expires_in: number;
+};
 
 export type Workspace = {
   id: number;
@@ -95,12 +121,14 @@ export type Schedule = {
 
 export type ProviderInfo = {
   name: string;
+  label: string;
   models: string[];
   permission_modes: string[];
   binary: string;
   available: boolean;
   version: string | null;
   authenticated: boolean | null;
+  account: string | null;
   detail: string | null;
 };
 

@@ -1,3 +1,5 @@
+<img src="frontend/public/logo.svg" alt="AIOps — Make Thing Intelligent" width="360">
+
 # AIOps
 
 A self-hosted web control plane for coding agents. It runs the real `claude` and
@@ -106,29 +108,30 @@ docker compose logs app | grep -i password
 
 ### Sign the agent CLIs in
 
-This is the step people miss — a fresh container has both CLIs installed but
-logged out, and every run will fail instantly until you do it. Each login is
-interactive and only needs doing once; credentials persist in the
-`claude-home` / `codex-home` volumes.
+A fresh container has both CLIs installed but logged out, and every run fails
+instantly until you fix that. Do it from the **Providers** page in the UI — no
+shell needed. Sign-in requires an administrator account.
+
+Your password never passes through AIOps. It spawns the CLI, relays what the
+provider prints, and you authenticate on the provider's own site:
+
+- **Codex** prints a link and a one-time device code. Open the link, enter the
+  code, and the CLI completes by itself.
+- **Claude** prints an authorize link, then waits for the authorization code
+  that page gives you back — paste it into the box and AIOps hands it to the
+  waiting process on stdin.
+
+The page also reports, per provider, whether the binary is present, its version,
+and whether it is signed in. Check it first whenever runs fail immediately.
+
+Credentials persist in the `claude-home` / `codex-home` volumes, so this is a
+one-time step per provider. The equivalent shell commands still work if you
+prefer them:
 
 ```bash
 docker compose exec -it app claude auth login
-docker compose exec -it app codex login
-```
-
-On a headless server with no browser, use the device/no-browser flows:
-
-```bash
-docker compose exec -it app claude auth login   # prints a URL to open elsewhere
 docker compose exec -it app codex login --device-auth
 ```
-
-For Claude you can alternatively mint a long-lived token on a machine with a
-browser (`claude setup-token`) and pass it in as `CLAUDE_CODE_OAUTH_TOKEN`.
-
-The **Providers** page in the UI shows, per provider, whether the binary is
-present, its version, and whether it is signed in. Check it first whenever runs
-fail immediately.
 
 ### Behind Traefik + a forward-auth
 
@@ -173,6 +176,26 @@ proxy's docker network (`TRAEFIK_NETWORK`).
 4. **Schedules** — cron entries that hand a prompt to an agent. Times are
    evaluated in the schedule's own timezone, so a 09:00 job stays at 09:00 across
    DST. "Run now" fires one immediately without disturbing the cron timing.
+5. **Account** — change your own password, and (as an admin) add, promote,
+   reset, and remove users.
+
+### Accounts and roles
+
+Two roles. Everyone who can sign in can drive agents; **admins** additionally
+manage users and sign the provider CLIs in. The first account is created at
+first boot from `AIOPS_ADMIN_*` and is an admin.
+
+New users default to *must change password at first sign-in*. That is enforced
+in the API, not just the UI: until the password is changed, every endpoint
+outside `/api/auth/*` returns 403, so it cannot be skipped by calling the API
+directly.
+
+A few guard rails exist because locking yourself out of a box that runs agents is
+unpleasant: you cannot delete your own account, drop your own admin rights, or
+remove the last remaining admin.
+
+Remember that an AIOps account is effectively shell access to the server through
+an agent. Add accounts sparingly.
 
 ### Permission modes
 

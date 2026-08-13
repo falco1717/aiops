@@ -1,4 +1,14 @@
-from . import auth, presets, providers, runs, schedules, sessions, workspaces, ws
+from . import (
+    auth,
+    presets,
+    providers,
+    runs,
+    schedules,
+    sessions,
+    users,
+    workspaces,
+    ws,
+)
 
 __all__ = [
     "auth",
@@ -7,6 +17,7 @@ __all__ = [
     "runs",
     "schedules",
     "sessions",
+    "users",
     "workspaces",
     "ws",
 ]

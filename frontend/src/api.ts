@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  LoginFlow,
   Preset,
   ProviderInfo,
   Run,
@@ -55,8 +56,39 @@ export const api = {
       body: body({ current_password, new_password }),
     }),
 
+  // users (admin)
+  users: () => request<User[]>("/api/users"),
+  createUser: (data: {
+    username: string;
+    password: string;
+    is_admin: boolean;
+    must_change_password: boolean;
+  }) => request<User>("/api/users", { method: "POST", body: body(data) }),
+  patchUser: (id: number, data: { is_admin?: boolean; must_change_password?: boolean }) =>
+    request<User>(`/api/users/${id}`, { method: "PATCH", body: body(data) }),
+  resetUserPassword: (id: number, new_password: string, must_change_password: boolean) =>
+    request<void>(`/api/users/${id}/password`, {
+      method: "POST",
+      body: body({ new_password, must_change_password }),
+    }),
+  deleteUser: (id: number) => request<void>(`/api/users/${id}`, { method: "DELETE" }),
+
   // providers
   providers: () => request<ProviderInfo[]>("/api/providers"),
+  startProviderLogin: (name: string) =>
+    request<LoginFlow>(`/api/providers/${name}/login`, { method: "POST" }),
+  providerLoginStatus: (name: string) => request<LoginFlow>(`/api/providers/${name}/login`),
+  submitProviderLoginCode: (name: string, code: string) =>
+    request<LoginFlow>(`/api/providers/${name}/login/code`, {
+      method: "POST",
+      body: body({ code }),
+    }),
+  cancelProviderLogin: (name: string) =>
+    request<void>(`/api/providers/${name}/login`, { method: "DELETE" }),
+  providerLogout: (name: string) =>
+    request<{ status: string; detail: string }>(`/api/providers/${name}/logout`, {
+      method: "POST",
+    }),
 
   // workspaces
   workspaces: () => request<Workspace[]>("/api/workspaces"),

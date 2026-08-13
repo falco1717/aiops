@@ -17,7 +17,18 @@ from sqlalchemy import func, select
 from .config import settings
 from .db import SessionLocal, init_db
 from .models import Run, Session, User
-from .routers import auth, presets, providers, runs, schedules, sessions, workspaces, ws
+from .migrate import run_migrations
+from .routers import (
+    auth,
+    presets,
+    providers,
+    runs,
+    schedules,
+    sessions,
+    users,
+    workspaces,
+    ws,
+)
 from .runner import runner
 from .scheduler import backfill_next_runs, scheduler_loop
 from .security import hash_password
@@ -36,7 +47,13 @@ async def bootstrap_admin() -> None:
         if await db.scalar(select(func.count(User.id))):
             return
         password = settings.admin_password or secrets.token_urlsafe(18)
-        db.add(User(username=settings.admin_username, password_hash=hash_password(password)))
+        db.add(
+            User(
+                username=settings.admin_username,
+                password_hash=hash_password(password),
+                is_admin=True,
+            )
+        )
         await db.commit()
         if settings.admin_password:
             log.info("Created admin user %r from AIOPS_ADMIN_PASSWORD", settings.admin_username)
@@ -69,6 +86,7 @@ async def reap_orphaned_runs() -> None:
 
 async def lifespan(app: FastAPI):
     await init_db()
+    await run_migrations()
     await bootstrap_admin()
     await reap_orphaned_runs()
     await backfill_next_runs()
@@ -100,7 +118,7 @@ if settings.cors_origin_list:
         allow_headers=["*"],
     )
 
-for module in (auth, providers, workspaces, presets, sessions, runs, schedules, ws):
+for module in (auth, users, providers, workspaces, presets, sessions, runs, schedules, ws):
     app.include_router(module.router)
 
 
