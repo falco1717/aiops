@@ -391,7 +391,10 @@ class Runner:
             run.status = status
             run.exit_code = exit_code
             run.finished_at = datetime.now(timezone.utc)
-            if error:
+            # stderr is collected for diagnostics, but the CLIs also write
+            # harmless notices there. Recording it on a successful run makes a
+            # working turn look broken.
+            if error and status != "succeeded":
                 run.error = error[:8000]
             if cost_usd is not None:
                 run.cost_usd = cost_usd

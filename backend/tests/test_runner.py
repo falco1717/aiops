@@ -119,6 +119,10 @@ with TestClient(app) as c:
     run_row = c.get(f"/api/runs/{run['id']}").json()
     check("cost persisted on the run", run_row["cost_usd"] == 0.0123, str(run_row["cost_usd"]))
     check("exit code recorded", run_row["exit_code"] == 0, str(run_row["exit_code"]))
+    # The CLIs write harmless notices to stderr; a successful run must not be
+    # decorated with one and look broken.
+    check("a succeeded run carries no error text", not run_row["error"], str(run_row["error"]))
+    check("token counts persisted", (run_row["input_tokens"] or 0) > 0, str(run_row["input_tokens"]))
 
     # --- second turn resumes rather than starting fresh ---------------
     prior_session = after["provider_session_id"]
