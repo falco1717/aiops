@@ -13,10 +13,10 @@ from ..security import current_user
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
 
-# The provider CLIs expose no headless way to read a plan's 5-hour or weekly
-# allowance, so these windows are measured from what AIOps itself has run.
-# They answer "how hard have I been leaning on this account lately", not "how
-# much of my plan is left".
+# These windows are measured from what AIOps has run — "how hard have I leaned
+# on this account here". The authoritative plan allowance is separate: Claude
+# Code emits a rate_limit_event carrying the real window state, which is stored
+# on the account and surfaced alongside these figures.
 WINDOWS = [
     ("Last 5 hours", timedelta(hours=5)),
     ("Last 24 hours", timedelta(days=1)),
@@ -24,10 +24,10 @@ WINDOWS = [
 ]
 
 NOTE = (
-    "Measured from runs AIOps executed. Neither CLI exposes plan limits "
-    "headlessly, so this is not a percentage of your 5-hour or weekly "
-    "allowance. Token costs are API-rate estimates and are not billed "
-    "separately on a subscription."
+    "Counted from runs AIOps executed, so it covers this server only — work you "
+    "do in a terminal elsewhere on the same account is not included. Plan "
+    "windows above come from the CLI itself and are authoritative. Token costs "
+    "are API-rate estimates and are not billed separately on a subscription."
 )
 
 

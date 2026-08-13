@@ -219,7 +219,7 @@ class Runner:
             try:
                 stderr_task = asyncio.create_task(_drain(proc.stderr, state))
                 await asyncio.wait_for(
-                    self._pump_stdout(db, run, sess, provider, proc, state),
+                    self._pump_stdout(db, run, sess, provider, proc, state, account),
                     timeout=settings.run_timeout_seconds,
                 )
                 exit_code = await asyncio.wait_for(proc.wait(), timeout=30)
@@ -295,7 +295,9 @@ class Runner:
             return None
         return candidate
 
-    async def _pump_stdout(self, db, run: Run, sess: Session, provider, proc, state) -> None:
+    async def _pump_stdout(
+        self, db, run: Run, sess: Session, provider, proc, state, account=None
+    ) -> None:
         # Continue the run's existing sequence: a failover attempt writes more
         # events for the same run, and restarting at 1 collides with the events
         # the first attempt already stored.
@@ -329,6 +331,12 @@ class Runner:
                     state.usage[key] = state.usage.get(key, 0) + value
             if event.rate_limited:
                 state.rate_limited = True
+            if event.rate_limit_info and account is not None:
+                _apply_limit_info(account, event.rate_limit_info)
+                await db.commit()
+            if event.available_commands and not sess.available_commands:
+                sess.available_commands = event.available_commands
+                await db.commit()
             if event.is_error and event.kind in ("result", "error"):
                 state.saw_error = True
                 state.error = state.error or event.text
@@ -496,6 +504,23 @@ async def _wait_quietly(proc: asyncio.subprocess.Process) -> int | None:
     except asyncio.TimeoutError:
         _signal_group(proc, _SIGKILL)
         return await proc.wait()
+
+
+def _apply_limit_info(account: ProviderAccount, info: dict) -> None:
+    """Record the plan window the CLI reported against this account."""
+    status = str(info.get("status") or "").lower()
+    account.limit_status = status or None
+    account.limit_window = str(info.get("rateLimitType") or "") or None
+    account.limit_seen_at = datetime.now(timezone.utc)
+    resets = info.get("resetsAt")
+    if isinstance(resets, (int, float)) and resets > 0:
+        account.limit_resets_at = datetime.fromtimestamp(resets, tz=timezone.utc)
+    # Anything other than "allowed" means the window is refusing work; hold the
+    # account out until it resets so the next turn goes to the fallback.
+    if status and status != "allowed":
+        account.limited_until = account.limit_resets_at or (
+            datetime.now(timezone.utc) + timedelta(seconds=settings.account_limit_cooldown_seconds)
+        )
 
 
 def _aware(value: datetime | None) -> datetime | None:

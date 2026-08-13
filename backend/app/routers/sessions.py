@@ -186,7 +186,8 @@ async def capabilities(
     sess = await _get(db, session_id)
     workspace_path = sess.workspace.path if sess.workspace else None
     return [
-        CapabilityOut(**vars(cap)) for cap in discover(sess.provider, workspace_path)
+        CapabilityOut(**vars(cap))
+        for cap in discover(sess.provider, workspace_path, sess.available_commands)
     ]
 
 

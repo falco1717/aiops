@@ -267,6 +267,9 @@ class AccountOut(BaseModel):
     is_default: bool
     fallback_account_id: int | None
     limited_until: datetime | None
+    limit_status: str | None
+    limit_window: str | None
+    limit_resets_at: datetime | None
     config_dir: str
     signed_in: bool | None
     account_detail: str | None

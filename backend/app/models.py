@@ -92,6 +92,16 @@ class ProviderAccount(Base):
     limited_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Plan-limit state reported by the CLI itself (Claude emits a
+    # rate_limit_event carrying the window type, status and reset time).
+    limit_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    limit_window: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    limit_resets_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    limit_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     # Stored rather than derived, so an account can adopt a credential
@@ -154,6 +164,9 @@ class Session(Base):
     provider_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="idle")  # idle|running|error
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Slash commands the CLI reported for this session at startup — the
+    # authoritative list, better than anything we could hardcode.
+    available_commands: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

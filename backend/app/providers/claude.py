@@ -85,6 +85,23 @@ class ClaudeProvider(Provider):
 
         etype = data.get("type")
 
+        if etype == "rate_limit_event":
+            # The CLI's own view of the plan window — the only headless source
+            # of "how much of your 5-hour/weekly allowance is left".
+            info = data.get("rate_limit_info") or {}
+            window = str(info.get("rateLimitType") or "").replace("_", "-")
+            state = str(info.get("status") or "unknown")
+            return NormalizedEvent(
+                kind="system",
+                text=f"plan limit ({window or 'window'}): {state}",
+                raw=data,
+                provider_session_id=data.get("session_id"),
+                rate_limit_info=info,
+                # "allowed" is the healthy state; anything else means the
+                # window is exhausted or refusing work.
+                rate_limited=state not in ("allowed", "", "unknown"),
+            )
+
         if etype == "system":
             subtype = data.get("subtype")
             text = f"session started ({data.get('model', 'unknown model')})"
@@ -97,12 +114,14 @@ class ClaudeProvider(Provider):
                 rate_limited = data.get("error") == "rate_limit"
             elif subtype != "init":
                 text = subtype or "system"
+            commands = data.get("slash_commands") if subtype == "init" else None
             return NormalizedEvent(
                 kind="system",
                 text=text,
                 raw=data,
                 provider_session_id=data.get("session_id"),
                 rate_limited=rate_limited,
+                available_commands=commands if isinstance(commands, list) else None,
             )
 
         if etype == "stream_event":

@@ -256,9 +256,22 @@ function AccountCard({
         <div className="error-banner" style={{ marginTop: 12 }}>{flow.message}</div>
       )}
 
+      {account.limit_status && (
+        <div className={account.limit_status === "allowed" ? "note-banner" : "warn-banner"}>
+          <strong>Plan window</strong>{" "}
+          {account.limit_window ? account.limit_window.replace(/_/g, "-") : "unknown"}:{" "}
+          {account.limit_status}
+          {account.limit_resets_at &&
+            ` · resets ${new Date(account.limit_resets_at + "Z").toLocaleString()}`}
+          <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 4 }}>
+            Reported by the CLI on the last run.
+          </div>
+        </div>
+      )}
+
       {isLimited && (
         <div className="warn-banner">
-          Usage limit recorded until {limited!.toLocaleString()}.{" "}
+          Held out of rotation until {limited!.toLocaleString()}.{" "}
           {fallback ? `Work moves to ${fallback.name}.` : "No fallback is set, so runs will fail."}
         </div>
       )}

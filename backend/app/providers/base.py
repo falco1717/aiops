@@ -27,6 +27,10 @@ class NormalizedEvent:
     # True when the provider says the account is out of quota, so the runner
     # can fail over to another account instead of surfacing an error.
     rate_limited: bool = False
+    # Plan-limit state the CLI reported (window, status, reset time).
+    rate_limit_info: dict[str, Any] | None = None
+    # Slash commands the CLI advertised for this session.
+    available_commands: list[str] | None = None
 
 
 @dataclass

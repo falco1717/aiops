@@ -113,6 +113,49 @@ resume = p.build_run(
 check("a follow-up turn resumes the thread",
       resume.argv[1:3] == ["exec", "resume"] and "abc123" in resume.argv, " ".join(resume.argv))
 
+# --- Claude: plan-limit + slash-command discovery, captured from a live run ---
+from app.providers.claude import ClaudeProvider  # noqa: E402
+from app.skills import discover  # noqa: E402
+
+cp = ClaudeProvider()
+
+limit = cp.parse_line(
+    '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1786667400,'
+    '"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false},'
+    '"session_id":"s1"}'
+)
+check("plan window is parsed from rate_limit_event",
+      limit and limit.rate_limit_info and limit.rate_limit_info["rateLimitType"] == "five_hour",
+      str(limit and limit.rate_limit_info))
+check("an allowed window is not treated as a limit", limit and limit.rate_limited is False,
+      str(limit and limit.rate_limited))
+
+exhausted = cp.parse_line(
+    '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1786667400,'
+    '"rateLimitType":"weekly"}}'
+)
+check("an exhausted window triggers failover", exhausted and exhausted.rate_limited is True,
+      str(exhausted and exhausted.rate_limited))
+
+init = cp.parse_line(
+    '{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-5[1m]",'
+    '"slash_commands":["goal","usage","context","login","clear","security-review"]}'
+)
+check("the CLI's own slash-command list is captured",
+      init and init.available_commands and "goal" in init.available_commands,
+      str(init and init.available_commands))
+
+caps = {c.name: c for c in discover("claude", None, init.available_commands)}
+check("/goal is offered from the reported list", "goal" in caps, str(sorted(caps))[:160])
+check("terminal-only commands are filtered out",
+      "login" not in caps and "clear" not in caps, str(sorted(caps))[:160])
+check("reported commands are marked as coming from the CLI",
+      caps["goal"].source == "CLI", str(caps.get("goal")))
+
+fallback = {c.name for c in discover("claude", None, None)}
+check("a session with nothing reported still offers the built-ins",
+      "goal" in fallback and "model" in fallback, str(sorted(fallback))[:160])
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {failures}")

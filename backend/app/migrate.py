@@ -22,6 +22,13 @@ COLUMNS: dict[str, dict[str, str]] = {
     },
     "sessions": {
         "account_id": "INTEGER",
+        "available_commands": "JSON",
+    },
+    "provider_accounts": {
+        "limit_status": "VARCHAR(32)",
+        "limit_window": "VARCHAR(32)",
+        "limit_resets_at": "TIMESTAMP WITH TIME ZONE",
+        "limit_seen_at": "TIMESTAMP WITH TIME ZONE",
     },
     "schedules": {
         "account_id": "INTEGER",

@@ -108,8 +108,16 @@ def _scan_codex_prompts(home: Path) -> list[Capability]:
     ]
 
 
-# Built-ins worth surfacing that are known to accept an argument in headless
-# runs. Anything terminal-only (/login and friends) is deliberately absent.
+# Commands that only make sense in an interactive terminal; filtered out of the
+# CLI-reported list so the composer does not offer something that cannot work.
+TERMINAL_ONLY = {
+    "login", "logout", "clear", "exit", "quit", "help", "vim", "terminal-setup",
+    "heapdump", "doctor", "install-github-app", "bug", "release-notes", "resume",
+    "upgrade", "privacy-settings", "theme", "color", "statusline",
+}
+
+# Fallback descriptions, and the list used when the CLI has not reported one yet
+# (a brand-new session that has not run a turn).
 CLAUDE_BUILTINS = [
     Capability(
         name="goal",
@@ -129,11 +137,50 @@ CLAUDE_BUILTINS = [
         description="Set reasoning effort, e.g. /effort xhigh",
         source="built-in",
     ),
+    Capability(
+        name="context",
+        kind="builtin",
+        description="Report what is currently filling the context window",
+        source="built-in",
+    ),
+    Capability(
+        name="usage",
+        kind="builtin",
+        description="Show plan usage and limits for the signed-in account",
+        source="built-in",
+    ),
+    Capability(
+        name="compact",
+        kind="builtin",
+        description="Summarise the conversation so far to free up context",
+        source="built-in",
+    ),
+    Capability(
+        name="init",
+        kind="builtin",
+        description="Write a CLAUDE.md describing this codebase",
+        source="built-in",
+    ),
+    Capability(
+        name="security-review",
+        kind="builtin",
+        description="Review the pending changes for security problems",
+        source="built-in",
+    ),
 ]
 
 
-def discover(provider: str, workspace_path: str | None) -> list[Capability]:
-    """Skills and commands available to a session, most specific first."""
+def discover(
+    provider: str,
+    workspace_path: str | None,
+    reported_commands: list[str] | None = None,
+) -> list[Capability]:
+    """Skills and commands available to a session, most specific first.
+
+    `reported_commands` is the list the CLI itself advertised in its startup
+    event. It is authoritative — it reflects the installed version, plugins and
+    skills — so it is preferred over the hardcoded fallback below.
+    """
     home = Path(os.path.expanduser("~"))
     found: list[Capability] = []
 
@@ -145,7 +192,20 @@ def discover(provider: str, workspace_path: str | None) -> list[Capability]:
         claude_home = home / ".claude"
         found += _scan_skills(claude_home, "user")
         found += _scan_commands(claude_home, "user")
-        found += CLAUDE_BUILTINS
+        if reported_commands:
+            described = {c.name: c.description for c in CLAUDE_BUILTINS}
+            found += [
+                Capability(
+                    name=name,
+                    kind="builtin",
+                    description=described.get(name, ""),
+                    source="CLI",
+                )
+                for name in reported_commands
+                if name not in TERMINAL_ONLY
+            ]
+        else:
+            found += CLAUDE_BUILTINS
     elif provider == "codex":
         found += _scan_codex_prompts(home)
 

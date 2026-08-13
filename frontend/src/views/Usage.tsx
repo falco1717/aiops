@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { Usage as UsageData } from "../types";
+import type { Account, Usage as UsageData } from "../types";
 
 const fmt = (n: number) =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}k` : String(n);
 
 export default function Usage() {
   const [data, setData] = useState<UsageData | null>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setData(await api.usage());
+      const [u, a] = await Promise.all([api.usage(), api.accounts().catch(() => [])]);
+      setData(u);
+      setAccounts(a);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -34,8 +37,42 @@ export default function Usage() {
       </p>
       {error && <div className="error-banner">{error}</div>}
 
+      {/* Plan windows come from the CLI itself, so they reflect the real
+          allowance rather than anything AIOps measured. */}
+      {accounts.some((a) => a.limit_status) && (
+        <>
+          <h2 style={{ marginTop: 0 }}>Plan limits</h2>
+          <div className="stat-row" style={{ marginBottom: 18 }}>
+            {accounts
+              .filter((a) => a.limit_status)
+              .map((a) => (
+                <div className="stat" key={a.id}>
+                  <div className="stat-label">
+                    {a.name} · {(a.limit_window ?? "window").replace(/_/g, "-")}
+                  </div>
+                  <div
+                    className="stat-value"
+                    style={{
+                      fontSize: 20,
+                      color: a.limit_status === "allowed" ? "var(--ok)" : "var(--warn)",
+                    }}
+                  >
+                    {a.limit_status}
+                  </div>
+                  <div className="stat-sub">
+                    {a.limit_resets_at
+                      ? `resets ${new Date(a.limit_resets_at + "Z").toLocaleString()}`
+                      : "reset time not reported"}
+                  </div>
+                </div>
+              ))}
+          </div>
+        </>
+      )}
+
       {data && (
         <>
+          <h2 style={{ marginTop: 0 }}>Measured by AIOps</h2>
           <div className="stat-row">
             {data.windows.map((w) => (
               <div className="stat" key={w.label}>

@@ -187,7 +187,10 @@ with TestClient(app) as c:
     check("usage counts real tokens", u["windows"][0]["total_tokens"] > 0,
           str(u["windows"][0]))
     check("usage is attributed per account", len(u["by_account"]) >= 2, str(u["by_account"])[:200])
-    check("usage carries an honest caveat", "plan limits" in u["note"], u["note"][:120])
+    # The measured figures cover this server only; the authoritative plan window
+    # comes from the CLI. The note must say so rather than implying otherwise.
+    check("usage says what it does and does not cover",
+          "this server only" in u["note"], u["note"][:160])
 
     su = c.get(f"/api/usage/session/{s1['id']}").json()
     check("per-session context reported", (su["last_context_tokens"] or 0) > 0, str(su))

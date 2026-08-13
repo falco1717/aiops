@@ -113,6 +113,10 @@ export type Account = {
   is_default: boolean;
   fallback_account_id: number | null;
   limited_until: string | null;
+  /** Plan-window state the CLI reported (e.g. five_hour / allowed). */
+  limit_status: string | null;
+  limit_window: string | null;
+  limit_resets_at: string | null;
   config_dir: string;
   signed_in: boolean | null;
   account_detail: string | null;
