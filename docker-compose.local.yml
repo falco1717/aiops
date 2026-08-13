@@ -1,0 +1,20 @@
+# Standalone overlay: publish a host port and drop the Traefik/Authelia wiring.
+# Use when there is no reverse proxy in front of AIOps.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+#
+# Set AIOPS_COOKIE_SECURE=false in .env if you are serving over plain HTTP,
+# otherwise the browser will discard the session cookie.
+services:
+  app:
+    ports:
+      - "${AIOPS_BIND:-127.0.0.1:8080}:8000"
+    labels:
+      traefik.enable: "false"
+
+networks:
+  # Replaces the external Traefik network with a throwaway local one, so the
+  # stack comes up on a host that has no proxy network at all.
+  proxy:
+    external: false
+    name: aiops_local_proxy

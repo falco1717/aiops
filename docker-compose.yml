@@ -1,0 +1,83 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aiops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-aiops}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aiops} -d ${POSTGRES_DB:-aiops}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aiops:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      AIOPS_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aiops}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-aiops}
+      AIOPS_JWT_SECRET: ${AIOPS_JWT_SECRET:?set AIOPS_JWT_SECRET in .env}
+      AIOPS_ADMIN_USERNAME: ${AIOPS_ADMIN_USERNAME:-admin}
+      AIOPS_ADMIN_PASSWORD: ${AIOPS_ADMIN_PASSWORD:-}
+      AIOPS_WORKSPACE_ROOT: /workspaces
+      AIOPS_MAX_CONCURRENT_RUNS: ${AIOPS_MAX_CONCURRENT_RUNS:-4}
+      AIOPS_RUN_TIMEOUT_SECONDS: ${AIOPS_RUN_TIMEOUT_SECONDS:-3600}
+      AIOPS_COOKIE_SECURE: ${AIOPS_COOKIE_SECURE:-true}
+      AIOPS_SCHEDULER_ENABLED: ${AIOPS_SCHEDULER_ENABLED:-true}
+    volumes:
+      # Agent working directories. Point this at wherever your repos live.
+      - ${AIOPS_WORKSPACES_HOST_PATH:-./workspaces}:/workspaces
+      # CLI credentials, so you only sign in once per provider.
+      - claude-home:/home/node/.claude
+      - codex-home:/home/node/.codex
+    networks:
+      - internal
+      - proxy
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "${TRAEFIK_NETWORK:-saltbox}"
+
+      # HTTPS router. The middleware chain matches the house convention for
+      # Authelia-protected apps on this host: shared headers, real client IP
+      # from Cloudflare, then forward-auth.
+      traefik.http.routers.aiops.rule: "Host(`${PUBLIC_HOSTNAME}`)"
+      traefik.http.routers.aiops.entrypoints: "websecure"
+      traefik.http.routers.aiops.middlewares: "${TRAEFIK_MIDDLEWARES:-globalHeaders@file,secureHeaders@file,cloudflarewarp@docker,authelia@docker}"
+      traefik.http.routers.aiops.service: "aiops"
+      traefik.http.routers.aiops.tls: "true"
+      traefik.http.routers.aiops.tls.certresolver: "${TRAEFIK_CERTRESOLVER:-cfdns}"
+      traefik.http.routers.aiops.tls.options: "securetls@file"
+
+      # Plain HTTP just redirects; it is still behind Authelia so an
+      # unauthenticated probe cannot reach the app on either entrypoint.
+      traefik.http.routers.aiops-http.rule: "Host(`${PUBLIC_HOSTNAME}`)"
+      traefik.http.routers.aiops-http.entrypoints: "web"
+      traefik.http.routers.aiops-http.middlewares: "${TRAEFIK_MIDDLEWARES_HTTP:-globalHeaders@file,redirect-to-https@docker,cloudflarewarp@docker,authelia@docker}"
+      traefik.http.routers.aiops-http.service: "aiops"
+
+      traefik.http.services.aiops.loadbalancer.server.port: "8000"
+
+volumes:
+  db-data:
+  claude-home:
+  codex-home:
+
+networks:
+  # Private network for app <-> database. Postgres is never on the proxy net.
+  internal:
+    name: aiops_internal
+  # The existing Traefik network, created outside this stack.
+  proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK:-saltbox}

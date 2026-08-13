@@ -1,0 +1,49 @@
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """All settings are read from AIOPS_-prefixed environment variables."""
+
+    model_config = SettingsConfigDict(env_prefix="AIOPS_", env_file=".env", extra="ignore")
+
+    # --- storage -------------------------------------------------------
+    database_url: str = "postgresql+asyncpg://aiops:aiops@db:5432/aiops"
+
+    # --- auth ----------------------------------------------------------
+    jwt_secret: str = "change-me-please"
+    jwt_ttl_hours: int = 24 * 30
+    # Bootstrap account, created on first startup if no users exist.
+    admin_username: str = "admin"
+    admin_password: str = ""
+
+    # --- agent execution ----------------------------------------------
+    workspace_root: str = "/workspaces"
+    claude_bin: str = "claude"
+    codex_bin: str = "codex"
+    max_concurrent_runs: int = 4
+    run_timeout_seconds: int = 3600
+    # Stream token-level deltas over the websocket (not persisted to the DB).
+    stream_partial_messages: bool = True
+
+    # --- scheduler -----------------------------------------------------
+    scheduler_enabled: bool = True
+    scheduler_tick_seconds: int = 20
+
+    # --- http ----------------------------------------------------------
+    cors_origins: str = ""
+    cookie_secure: bool = True
+    cookie_name: str = "aiops_session"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
