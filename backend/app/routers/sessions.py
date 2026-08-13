@@ -48,7 +48,9 @@ async def list_sessions(
 
 @router.post("", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
 async def create_session(
-    payload: SessionIn, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    payload: SessionIn,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     try:
         sess = await build_session(
@@ -58,6 +60,8 @@ async def create_session(
             model=payload.model,
             preset_id=payload.preset_id,
             workspace_id=payload.workspace_id,
+            account_id=payload.account_id,
+            user=user,
         )
         await db.commit()
         await db.refresh(sess)

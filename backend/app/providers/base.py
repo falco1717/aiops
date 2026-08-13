@@ -19,6 +19,14 @@ class NormalizedEvent:
     is_error: bool = False
     # Deltas are streamed live but never written to the database.
     persist: bool = True
+    # Set when the message came from a subagent rather than the main loop.
+    parent_tool_use_id: str | None = None
+    agent_name: str | None = None
+    # Token counters from the final result event, for the usage panel.
+    usage: dict[str, int] | None = None
+    # True when the provider says the account is out of quota, so the runner
+    # can fail over to another account instead of surfacing an error.
+    rate_limited: bool = False
 
 
 @dataclass
@@ -51,6 +59,7 @@ class Provider:
         allowed_tools: str | None,
         extra_args: list[str],
         stream_partials: bool,
+        account_env: dict[str, str] | None = None,
     ) -> RunSpec:
         raise NotImplementedError
 

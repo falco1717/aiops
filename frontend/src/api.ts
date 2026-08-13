@@ -1,8 +1,11 @@
 import type {
+  Account,
   AgentEvent,
   Capability,
   LoginFlow,
   Preset,
+  SessionContext,
+  Usage,
   ProviderInfo,
   Run,
   Schedule,
@@ -76,20 +79,41 @@ export const api = {
 
   // providers
   providers: () => request<ProviderInfo[]>("/api/providers"),
-  startProviderLogin: (name: string) =>
-    request<LoginFlow>(`/api/providers/${name}/login`, { method: "POST" }),
-  providerLoginStatus: (name: string) => request<LoginFlow>(`/api/providers/${name}/login`),
-  submitProviderLoginCode: (name: string, code: string) =>
-    request<LoginFlow>(`/api/providers/${name}/login/code`, {
-      method: "POST",
-      body: body({ code }),
-    }),
-  cancelProviderLogin: (name: string) =>
-    request<void>(`/api/providers/${name}/login`, { method: "DELETE" }),
-  providerLogout: (name: string) =>
-    request<{ status: string; detail: string }>(`/api/providers/${name}/logout`, {
-      method: "POST",
-    }),
+
+  // provider accounts
+  accounts: () => request<Account[]>("/api/accounts"),
+  createAccount: (data: {
+    name: string;
+    provider: string;
+    description?: string | null;
+    is_default?: boolean;
+  }) => request<Account>("/api/accounts", { method: "POST", body: body(data) }),
+  patchAccount: (
+    id: number,
+    data: {
+      name?: string;
+      description?: string | null;
+      is_default?: boolean;
+      fallback_account_id?: number | null;
+      allowed_user_ids?: number[];
+    },
+  ) => request<Account>(`/api/accounts/${id}`, { method: "PATCH", body: body(data) }),
+  deleteAccount: (id: number) => request<void>(`/api/accounts/${id}`, { method: "DELETE" }),
+  clearAccountLimit: (id: number) =>
+    request<Account>(`/api/accounts/${id}/clear-limit`, { method: "POST" }),
+  startAccountLogin: (id: number) =>
+    request<LoginFlow>(`/api/accounts/${id}/login`, { method: "POST" }),
+  accountLoginStatus: (id: number) => request<LoginFlow>(`/api/accounts/${id}/login`),
+  submitAccountLoginCode: (id: number, code: string) =>
+    request<LoginFlow>(`/api/accounts/${id}/login/code`, { method: "POST", body: body({ code }) }),
+  cancelAccountLogin: (id: number) =>
+    request<void>(`/api/accounts/${id}/login`, { method: "DELETE" }),
+  accountLogout: (id: number) =>
+    request<{ status: string; detail: string }>(`/api/accounts/${id}/logout`, { method: "POST" }),
+
+  // usage
+  usage: () => request<Usage>("/api/usage"),
+  sessionUsage: (id: string) => request<SessionContext>(`/api/usage/session/${id}`),
 
   // workspaces
   workspaces: () => request<Workspace[]>("/api/workspaces"),
@@ -115,6 +139,7 @@ export const api = {
     title?: string;
     provider: string;
     model?: string | null;
+    account_id?: number | null;
     preset_id?: number | null;
     workspace_id?: number | null;
     prompt?: string;

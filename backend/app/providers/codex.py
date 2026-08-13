@@ -32,6 +32,7 @@ class CodexProvider(Provider):
         allowed_tools: str | None,
         extra_args: list[str],
         stream_partials: bool,
+        account_env: dict[str, str] | None = None,
     ) -> RunSpec:
         argv = [settings.codex_bin, "exec"]
         if provider_session_id:
@@ -50,7 +51,7 @@ class CodexProvider(Provider):
         full_prompt = f"{system_prompt.strip()}\n\n---\n\n{prompt}" if system_prompt else prompt
         argv.append(full_prompt)
 
-        return RunSpec(argv=argv)
+        return RunSpec(argv=argv, env=dict(account_env or {}))
 
     def parse_line(self, line: str) -> NormalizedEvent | None:
         try:

@@ -38,9 +38,13 @@ services:
     volumes:
       # Agent working directories. Point this at wherever your repos live.
       - ${AIOPS_WORKSPACES_HOST_PATH:-./workspaces}:/workspaces
-      # CLI credentials, so you only sign in once per provider.
+      # CLI credentials. The first two are the default accounts adopted from a
+      # pre-accounts install; every named account lives under accounts/.
+      # Pointing CLAUDE_CONFIG_DIR at these also keeps ~/.claude.json inside a
+      # volume — by default the CLI writes it to $HOME, which is not persisted.
       - claude-home:/home/node/.claude
       - codex-home:/home/node/.codex
+      - agent-accounts:/home/node/accounts
     networks:
       - internal
       - proxy
@@ -73,6 +77,7 @@ volumes:
   db-data:
   claude-home:
   codex-home:
+  agent-accounts:
 
 networks:
   # Private network for app <-> database. Postgres is never on the proxy net.

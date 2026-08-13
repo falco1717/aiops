@@ -83,9 +83,12 @@ class LoginManager:
                 self._kill(flow)
         return flow
 
-    async def start(self, provider: str) -> LoginFlow:
+    async def start(
+        self, provider: str, key: str, account_env: dict[str, str] | None = None
+    ) -> LoginFlow:
+        """Begin a sign-in. `key` scopes the flow to one account."""
         async with self._lock:
-            existing = self.get(provider)
+            existing = self.get(key)
             if existing and existing.status in ("starting", "awaiting_user", "completing"):
                 return existing
 
@@ -97,17 +100,17 @@ class LoginManager:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
-                    env=self._env(),
+                    env=self._env(account_env),
                     start_new_session=True,
                 )
             except FileNotFoundError:
                 flow.status = "failed"
                 flow.message = f"{argv[0]} is not installed in this container."
-                self._flows[provider] = flow
+                self._flows[key] = flow
                 return flow
 
-            self._flows[provider] = flow
-            asyncio.create_task(self._pump(flow), name=f"login-{provider}")
+            self._flows[key] = flow
+            asyncio.create_task(self._pump(flow), name=f"login-{key}")
             # Give the CLI a moment to emit its URL so the first response is useful.
             for _ in range(60):
                 await asyncio.sleep(0.1)
@@ -115,14 +118,14 @@ class LoginManager:
                     break
             return flow
 
-    async def submit_code(self, provider: str, code: str) -> LoginFlow:
+    async def submit_code(self, key: str, code: str) -> LoginFlow:
         """Feed Claude's authorization code to the waiting process."""
-        flow = self.get(provider)
+        flow = self.get(key)
         if flow is None or flow.status != "awaiting_user":
             raise ValueError("No sign-in is waiting for a code. Start one first.")
         if not flow.needs_code:
             raise ValueError(
-                f"{provider} completes in the browser — there is no code to paste here."
+                f"{flow.provider} completes in the browser — there is no code to paste here."
             )
         proc = flow._proc
         if proc is None or proc.stdin is None or proc.returncode is not None:
@@ -141,8 +144,8 @@ class LoginManager:
         flow.message = "Verifying with the provider…"
         return flow
 
-    async def cancel(self, provider: str) -> None:
-        flow = self._flows.get(provider)
+    async def cancel(self, key: str) -> None:
+        flow = self._flows.get(key)
         if flow is None:
             return
         self._kill(flow)
@@ -150,7 +153,9 @@ class LoginManager:
             flow.status = "cancelled"
             flow.message = "Sign-in cancelled."
 
-    async def logout(self, provider: str) -> tuple[bool, str]:
+    async def logout(
+        self, provider: str, key: str, account_env: dict[str, str] | None = None
+    ) -> tuple[bool, str]:
         argv = [settings.claude_bin, "auth", "logout"] if provider == "claude" else [
             settings.codex_bin,
             "logout",
@@ -161,12 +166,12 @@ class LoginManager:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env=self._env(),
+                env=self._env(account_env),
             )
         except FileNotFoundError:
             return False, f"{argv[0]} is not installed."
         out, _ = await proc.communicate()
-        self._flows.pop(provider, None)
+        self._flows.pop(key, None)
         return proc.returncode == 0, _clean(out.decode("utf-8", "replace"))[:500]
 
     # -- internals -----------------------------------------------------
@@ -181,12 +186,15 @@ class LoginManager:
         raise ValueError(f"Unknown provider {provider!r}")
 
     @staticmethod
-    def _env() -> dict[str, str]:
+    def _env(account_env: dict[str, str] | None = None) -> dict[str, str]:
         import os
 
         # Force the non-graphical path; there is no browser in the container.
+        # account_env carries CLAUDE_CONFIG_DIR / CODEX_HOME so the credentials
+        # land in the right account's directory.
         return {
             **os.environ,
+            **(account_env or {}),
             "NO_COLOR": "1",
             "FORCE_COLOR": "0",
             "TERM": "dumb",

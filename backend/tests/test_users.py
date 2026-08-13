@@ -140,8 +140,10 @@ with TestClient(app) as c:
     # --- non-admin is still locked out of admin surfaces --------------
     r = c.get("/api/users")
     check("non-admin cannot list users", r.status_code == 403, str(r.status_code))
-    r = c.post("/api/providers/claude/login")
-    check("non-admin cannot start a provider sign-in", r.status_code == 403, str(r.status_code))
+    r = c.post("/api/accounts", json={"name": "Sneaky", "provider": "claude"})
+    check("non-admin cannot create accounts", r.status_code == 403, str(r.status_code))
+    r = c.get("/api/accounts")
+    check("but everyone can see which accounts exist", r.status_code == 200, str(r.status_code))
 
     # --- last-admin protection ----------------------------------------
     c.post("/api/auth/logout")
@@ -159,18 +161,28 @@ with TestClient(app) as c:
     check("admin can delete a user", r.status_code == 204, r.text[:160])
 
     # --- provider login flow surface ----------------------------------
-    r = c.get("/api/providers/claude/login")
+    acct = c.post("/api/accounts", json={"name": "Test Claude", "provider": "claude"})
+    check("admin can create a named account", acct.status_code == 201, acct.text[:220])
+    aid = acct.json()["id"] if acct.status_code == 201 else None
+    check("account gets an isolated credential dir",
+          aid and "claude-test-claude" in acct.json()["config_dir"], str(acct.json().get("config_dir")))
+    check("new account starts signed out", acct.json().get("signed_in") in (False, None),
+          str(acct.json().get("signed_in")))
+
+    r = c.get(f"/api/accounts/{aid}/login")
     check("login status is idle before starting", r.json().get("status") == "idle", r.text[:160])
-    r = c.get("/api/providers/nope/login")
-    check("unknown provider rejected", r.status_code == 404, str(r.status_code))
-    r = c.post("/api/providers/claude/login/code", json={"code": "abc"})
+    r = c.get("/api/accounts/999999/login")
+    check("unknown account rejected", r.status_code == 404, str(r.status_code))
+    r = c.post(f"/api/accounts/{aid}/login/code", json={"code": "abc"})
     check("submitting a code with no flow is a clean 400", r.status_code == 400, r.text[:160])
-    r = c.post("/api/providers/claude/login")
+    r = c.post(f"/api/accounts/{aid}/login")
     check(
         "starting a sign-in with no CLI installed fails cleanly",
         r.status_code == 400 and "not installed" in r.text.lower(),
         f"{r.status_code} {r.text[:160]}",
     )
+    r = c.patch(f"/api/accounts/{aid}", json={"fallback_account_id": aid})
+    check("an account cannot fall back to itself", r.status_code == 400, r.text[:160])
 
     # --- skills / slash command discovery -----------------------------
     ws = c.post("/api/workspaces", json={"name": "skilldemo", "path": "skilldemo"}).json()

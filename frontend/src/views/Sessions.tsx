@@ -2,7 +2,7 @@ import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
-import type { Preset, ProviderInfo, Session, Workspace } from "../types";
+import type { Account, Preset, ProviderInfo, Session, Workspace } from "../types";
 import Chat from "./Chat";
 
 export default function Sessions() {
@@ -84,8 +84,10 @@ function NewSession({
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
   const [provider, setProvider] = useState("claude");
   const [model, setModel] = useState("");
+  const [accountId, setAccountId] = useState("");
   const [presetId, setPresetId] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -94,21 +96,29 @@ function NewSession({
 
   useEffect(() => {
     void (async () => {
-      const [p, pr, w] = await Promise.all([api.providers(), api.presets(), api.workspaces()]);
+      const [p, pr, w, a] = await Promise.all([
+        api.providers(),
+        api.presets(),
+        api.workspaces(),
+        api.accounts().catch(() => [] as Account[]),
+      ]);
       setProviders(p);
       setPresets(pr);
       setWorkspaces(w);
+      setAccounts(a);
     })();
   }, []);
 
-  // A preset belongs to one provider; clear it when the provider changes.
+  // Presets and accounts belong to one provider; clear them when it changes.
   useEffect(() => {
     setPresetId("");
+    setAccountId("");
     setModel("");
   }, [provider]);
 
   const current = providers.find((p) => p.name === provider);
   const availablePresets = presets.filter((p) => p.provider === provider);
+  const availableAccounts = accounts.filter((a) => a.provider === provider);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -119,6 +129,7 @@ function NewSession({
         await api.createSession({
           provider,
           model: model || null,
+          account_id: accountId ? Number(accountId) : null,
           preset_id: presetId ? Number(presetId) : null,
           workspace_id: workspaceId ? Number(workspaceId) : null,
           prompt: prompt.trim() || undefined,
@@ -172,6 +183,19 @@ function NewSession({
                 <option key={m} value={m} />
               ))}
             </datalist>
+          </label>
+          <label>
+            <span>Account</span>
+            <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+              <option value="">Default for {provider}</option>
+              {availableAccounts.map((a) => (
+                <option key={a.id} value={a.id} disabled={!a.usable_by_me}>
+                  {a.name}
+                  {a.signed_in ? "" : " — signed out"}
+                  {a.usable_by_me ? "" : " — no access"}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
             <span>Agent preset</span>

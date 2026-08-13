@@ -78,6 +78,11 @@ export type Run = {
   status: string;
   exit_code: number | null;
   error: string | null;
+  account_id: number | null;
+  failed_over_from_id: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  context_tokens: number | null;
   cost_usd: number | null;
   command: string[];
   created_at: string;
@@ -92,7 +97,64 @@ export type AgentEvent = {
   kind: string;
   text: string | null;
   tool_name: string | null;
+  /** Set when the message came from a subagent: the tool call that spawned it. */
+  parent_tool_use_id: string | null;
+  agent_name: string | null;
   created_at: string;
+};
+
+/** One named provider sign-in — "Walt's Claude", "Jordan's Claude". */
+export type Account = {
+  id: number;
+  name: string;
+  provider: string;
+  slug: string;
+  description: string | null;
+  is_default: boolean;
+  fallback_account_id: number | null;
+  limited_until: string | null;
+  config_dir: string;
+  signed_in: boolean | null;
+  account_detail: string | null;
+  allowed_user_ids: number[];
+  usable_by_me: boolean;
+};
+
+export type UsageWindow = {
+  label: string;
+  since: string;
+  runs: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+};
+
+export type AccountUsage = {
+  account_id: number;
+  name: string;
+  provider: string;
+  limited_until: string | null;
+  runs: number;
+  total_tokens: number;
+  cost_usd: number;
+};
+
+export type Usage = {
+  windows: UsageWindow[];
+  by_account: AccountUsage[];
+  note: string;
+};
+
+export type SessionContext = {
+  session_id: string;
+  last_context_tokens: number | null;
+  peak_context_tokens: number | null;
+  total_tokens: number;
+  runs: number;
+  cost_usd: number;
 };
 
 /** A skill or slash command the session can use by typing `/name`. */
@@ -159,6 +221,8 @@ export type WsMessage =
       text: string | null;
       tool_name: string | null;
       is_error: boolean;
+      parent_tool_use_id?: string | null;
+      agent_name?: string | null;
       seq?: number;
     }
   | {

@@ -54,6 +54,64 @@ class Workspace(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class AccountAccess(Base):
+    """Which users may drive which provider accounts."""
+
+    __tablename__ = "account_access"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("provider_accounts.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    __table_args__ = (UniqueConstraint("account_id", "user_id", name="uq_account_user"),)
+
+
+class ProviderAccount(Base):
+    """One named sign-in for a provider — "Walt's Claude", "Jordan's Claude".
+
+    Each account gets its own credential directory, handed to the CLI through
+    CLAUDE_CONFIG_DIR / CODEX_HOME, so several subscriptions coexist in one
+    container without seeing each other.
+    """
+
+    __tablename__ = "provider_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    slug: Mapped[str] = mapped_column(String(64), unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # When this account is rate-limited, the runner retries the turn here.
+    fallback_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    # Set while a limit is known to be in effect, so we skip it proactively.
+    limited_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # Stored rather than derived, so an account can adopt a credential
+    # directory that already exists — such as the pre-existing ~/.claude login.
+    config_dir: Mapped[str] = mapped_column(String(512))
+
+    grants: Mapped[list[AccountAccess]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    def env(self) -> dict[str, str]:
+        if self.provider == "claude":
+            # Also keeps ~/.claude.json inside the volume; by default the CLI
+            # writes it to $HOME, which is not persisted across recreates.
+            return {"CLAUDE_CONFIG_DIR": self.config_dir}
+        if self.provider == "codex":
+            return {"CODEX_HOME": self.config_dir}
+        return {}
+
+
 class AgentPreset(Base):
     """A named (provider, model, permissions, prompt) bundle — 'which agent to use'."""
 
@@ -83,6 +141,9 @@ class Session(Base):
     title: Mapped[str] = mapped_column(String(255), default="Untitled")
     provider: Mapped[str] = mapped_column(String(32))
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_accounts.id", ondelete="SET NULL"), nullable=True
+    )
     preset_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_presets.id", ondelete="SET NULL"), nullable=True
     )
@@ -100,6 +161,9 @@ class Session(Base):
 
     preset: Mapped[AgentPreset | None] = relationship(lazy="joined")
     workspace: Mapped[Workspace | None] = relationship(lazy="joined")
+    account: Mapped[ProviderAccount | None] = relationship(
+        lazy="joined", foreign_keys=[account_id]
+    )
 
 
 class Run(Base):
@@ -120,6 +184,21 @@ class Run(Base):
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Which account actually served the turn — may differ from the session's
+    # when a limit triggered failover.
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    failed_over_from_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    # Token counters lifted from the provider's final result event, so usage can
+    # be totalled without re-reading every raw payload.
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_write_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     command: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -141,6 +220,10 @@ class Event(Base):
     # system | assistant | user | tool_use | tool_result | thinking | result | error | stderr
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Set when the message came from a subagent: the id of the tool call that
+    # spawned it. Lets the UI nest a subagent's steps under its parent.
+    parent_tool_use_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    agent_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     raw: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -159,6 +242,9 @@ class Schedule(Base):
     prompt: Mapped[str] = mapped_column(Text)
     provider: Mapped[str] = mapped_column(String(32))
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_accounts.id", ondelete="SET NULL"), nullable=True
+    )
     preset_id: Mapped[int | None] = mapped_column(
         ForeignKey("agent_presets.id", ondelete="SET NULL"), nullable=True
     )

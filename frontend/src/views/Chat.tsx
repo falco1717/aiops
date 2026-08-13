@@ -4,10 +4,46 @@ import { Link, useNavigate } from "react-router-dom";
 import { api, openSocket } from "../api";
 import type { AgentEvent, Capability, Run, Session, WsMessage } from "../types";
 
-type ChatEvent = Pick<AgentEvent, "run_id" | "seq" | "kind" | "text" | "tool_name"> & {
+type ChatEvent = Pick<
+  AgentEvent,
+  "run_id" | "seq" | "kind" | "text" | "tool_name" | "parent_tool_use_id" | "agent_name"
+> & {
   id?: number;
   is_error?: boolean;
 };
+
+/**
+ * Main-loop messages carry a null parent_tool_use_id; a subagent's carry the id
+ * of the Agent tool call that spawned it. Consecutive events sharing a parent
+ * are folded into one collapsible group, which reads the same as the nesting
+ * Claude Code shows without needing to resolve tool-call ids.
+ */
+type Row =
+  | { type: "event"; event: ChatEvent }
+  | { type: "subagent"; parentId: string; name: string; events: ChatEvent[] };
+
+function groupSubagents(events: ChatEvent[]): Row[] {
+  const rows: Row[] = [];
+  for (const e of events) {
+    if (!e.parent_tool_use_id) {
+      rows.push({ type: "event", event: e });
+      continue;
+    }
+    const last = rows[rows.length - 1];
+    if (last?.type === "subagent" && last.parentId === e.parent_tool_use_id) {
+      last.events.push(e);
+      if (!last.name && e.agent_name) last.name = e.agent_name;
+    } else {
+      rows.push({
+        type: "subagent",
+        parentId: e.parent_tool_use_id,
+        name: e.agent_name ?? "",
+        events: [e],
+      });
+    }
+  }
+  return rows;
+}
 
 const eventKey = (e: ChatEvent) => `${e.run_id}:${e.seq}`;
 
@@ -111,6 +147,8 @@ export default function Chat({
                 text: msg.text,
                 tool_name: msg.tool_name,
                 is_error: msg.is_error,
+                parent_tool_use_id: msg.parent_tool_use_id ?? null,
+                agent_name: msg.agent_name ?? null,
               },
             ]);
           }
@@ -306,9 +344,17 @@ export default function Chat({
               <pre>{run.prompt}</pre>
             </div>
 
-            {(eventsByRun.get(run.id) ?? []).map((e) => (
-              <Bubble key={eventKey(e)} event={e} />
-            ))}
+            {groupSubagents(eventsByRun.get(run.id) ?? []).map((row) =>
+              row.type === "event" ? (
+                <Bubble key={eventKey(row.event)} event={row.event} />
+              ) : (
+                <SubagentGroup
+                  key={`sub:${row.parentId}:${eventKey(row.events[0])}`}
+                  name={row.name}
+                  events={row.events}
+                />
+              ),
+            )}
 
             {live[run.id] && (
               <div className="msg assistant live">
@@ -409,6 +455,32 @@ export default function Chat({
           )}
         </div>
       </form>
+    </div>
+  );
+}
+
+function SubagentGroup({ name, events }: { name: string; events: ChatEvent[] }) {
+  // Open while the subagent is still working, so you can watch it think; the
+  // reader can collapse it once it has finished.
+  const [open, setOpen] = useState(true);
+  const tools = events.filter((e) => e.kind === "tool_use").length;
+  return (
+    <div className="subagent">
+      <button className="subagent-head" onClick={() => setOpen((v) => !v)}>
+        <span className="subagent-caret">{open ? "▾" : "▸"}</span>
+        <span className="subagent-name">{name || "subagent"}</span>
+        <span className="subagent-meta">
+          {events.length} step{events.length === 1 ? "" : "s"}
+          {tools > 0 && ` · ${tools} tool call${tools === 1 ? "" : "s"}`}
+        </span>
+      </button>
+      {open && (
+        <div className="subagent-body">
+          {events.map((e) => (
+            <Bubble key={eventKey(e)} event={e} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

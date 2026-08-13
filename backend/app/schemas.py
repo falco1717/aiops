@@ -101,6 +101,7 @@ class SessionIn(BaseModel):
     title: str | None = None
     provider: str
     model: str | None = None
+    account_id: int | None = None
     preset_id: int | None = None
     workspace_id: int | None = None
     prompt: str | None = None  # optional first turn
@@ -110,6 +111,7 @@ class SessionPatch(BaseModel):
     title: str | None = None
     archived: bool | None = None
     model: str | None = None
+    account_id: int | None = None
     preset_id: int | None = None
     workspace_id: int | None = None
 
@@ -119,6 +121,7 @@ class SessionOut(ORM):
     title: str
     provider: str
     model: str | None
+    account_id: int | None
     preset_id: int | None
     workspace_id: int | None
     provider_session_id: str | None
@@ -140,6 +143,11 @@ class RunOut(ORM):
     status: str
     exit_code: int | None
     error: str | None
+    account_id: int | None
+    failed_over_from_id: int | None
+    input_tokens: int | None
+    output_tokens: int | None
+    context_tokens: int | None
     cost_usd: float | None
     command: list[str]
     created_at: datetime
@@ -154,6 +162,8 @@ class EventOut(ORM):
     kind: str
     text: str | None
     tool_name: str | None
+    parent_tool_use_id: str | None
+    agent_name: str | None
     created_at: datetime
 
 
@@ -178,6 +188,7 @@ class ScheduleIn(BaseModel):
     prompt: str = Field(min_length=1)
     provider: str
     model: str | None = None
+    account_id: int | None = None
     preset_id: int | None = None
     workspace_id: int | None = None
     session_mode: str = "new"  # new | continue
@@ -192,6 +203,7 @@ class ScheduleOut(ORM):
     prompt: str
     provider: str
     model: str | None
+    account_id: int | None
     preset_id: int | None
     workspace_id: int | None
     session_mode: str
@@ -228,3 +240,63 @@ class LoginFlowOut(BaseModel):
 
 class LoginCodeIn(BaseModel):
     code: str = Field(min_length=1)
+
+
+# --- provider accounts -------------------------------------------------
+class AccountIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    provider: str
+    description: str | None = None
+    is_default: bool = False
+
+
+class AccountPatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    is_default: bool | None = None
+    fallback_account_id: int | None = None
+    allowed_user_ids: list[int] | None = None
+
+
+class AccountOut(BaseModel):
+    id: int
+    name: str
+    provider: str
+    slug: str
+    description: str | None
+    is_default: bool
+    fallback_account_id: int | None
+    limited_until: datetime | None
+    config_dir: str
+    signed_in: bool | None
+    account_detail: str | None
+    allowed_user_ids: list[int]
+    usable_by_me: bool
+
+
+# --- usage -------------------------------------------------------------
+class UsageWindow(BaseModel):
+    label: str
+    since: datetime
+    runs: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    total_tokens: int
+    cost_usd: float
+
+
+class SessionContextOut(BaseModel):
+    session_id: str
+    last_context_tokens: int | None
+    peak_context_tokens: int | None
+    total_tokens: int
+    runs: int
+    cost_usd: float
+
+
+class UsageOut(BaseModel):
+    windows: list[UsageWindow]
+    by_account: list[dict]
+    note: str

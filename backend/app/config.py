@@ -20,8 +20,15 @@ class Settings(BaseSettings):
 
     # --- agent execution ----------------------------------------------
     workspace_root: str = "/workspaces"
+    # Per-account credential directories live here, inside the persisted home
+    # volume, so several provider sign-ins coexist and survive a recreate.
+    accounts_root: str = "/home/node/accounts"
     claude_bin: str = "claude"
     codex_bin: str = "codex"
+    # Show subagent text and thinking, not just their tool calls.
+    forward_subagent_text: bool = True
+    # How long to avoid an account after it reports a usage limit.
+    account_limit_cooldown_seconds: int = 3600
     max_concurrent_runs: int = 4
     run_timeout_seconds: int = 3600
     # Stream token-level deltas over the websocket (not persisted to the DB).

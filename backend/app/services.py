@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import AgentPreset, Run, Session, Workspace
+from .models import AgentPreset, ProviderAccount, Run, Session, User, Workspace
 from .providers import PROVIDERS
 from .runner import runner
 
@@ -21,10 +21,26 @@ async def build_session(
     model: str | None,
     preset_id: int | None,
     workspace_id: int | None,
+    account_id: int | None = None,
+    user: User | None = None,
 ) -> Session:
     """Create (but do not commit) a session, resolving preset and workspace."""
     if provider not in PROVIDERS:
         raise ValidationError(f"Unknown provider {provider!r}. Known: {', '.join(PROVIDERS)}")
+
+    if account_id is not None:
+        account = await db.get(ProviderAccount, account_id)
+        if account is None:
+            raise ValidationError("Account not found")
+        if account.provider != provider:
+            raise ValidationError(
+                f"Account {account.name!r} is for {account.provider!r}, not {provider!r}"
+            )
+        # An ungranted account is open to everyone; once anyone is granted, only
+        # they (and admins) may use it.
+        if user is not None and not user.is_admin and account.grants:
+            if not any(g.user_id == user.id for g in account.grants):
+                raise ValidationError(f"You do not have access to the account {account.name!r}")
 
     preset = None
     if preset_id is not None:
@@ -45,6 +61,7 @@ async def build_session(
         model=model or (preset.model if preset else None),
         preset_id=preset_id,
         workspace_id=workspace_id,
+        account_id=account_id,
     )
     db.add(sess)
     return sess

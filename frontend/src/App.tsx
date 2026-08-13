@@ -4,7 +4,9 @@ import { ApiError, api } from "./api";
 import Logo, { Mark } from "./components/Logo";
 import type { User } from "./types";
 import Account, { ChangePassword } from "./views/Account";
+import Accounts from "./views/Accounts";
 import Login from "./views/Login";
+import Usage from "./views/Usage";
 import Presets from "./views/Presets";
 import Providers from "./views/Providers";
 import Schedules from "./views/Schedules";
@@ -15,7 +17,9 @@ const NAV = [
   { to: "/sessions", label: "Sessions" },
   { to: "/schedules", label: "Schedules" },
   { to: "/presets", label: "Agents" },
+  { to: "/accounts", label: "Accounts" },
   { to: "/workspaces", label: "Workspaces" },
+  { to: "/usage", label: "Usage" },
   { to: "/providers", label: "Providers" },
 ];
 
@@ -116,8 +120,10 @@ export default function App() {
         <Route path="/sessions/:sessionId" element={<Sessions />} />
         <Route path="/schedules" element={<Schedules />} />
         <Route path="/presets" element={<Presets />} />
+        <Route path="/accounts" element={<Accounts me={user} />} />
+        <Route path="/usage" element={<Usage />} />
         <Route path="/workspaces" element={<Workspaces />} />
-        <Route path="/providers" element={<Providers me={user} />} />
+        <Route path="/providers" element={<Providers />} />
         <Route path="/account" element={<Account me={user} onChanged={refresh} />} />
         <Route path="*" element={<Navigate to="/sessions" replace />} />
       </Routes>

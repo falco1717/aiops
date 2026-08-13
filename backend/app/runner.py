@@ -5,14 +5,14 @@ import contextlib
 import logging
 import os
 import signal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .config import settings
 from .db import SessionLocal
 from .events import hub
-from .models import Event, Run, Session
+from .models import Event, ProviderAccount, Run, Session
 from .providers import get_provider
 
 log = logging.getLogger("aiops.runner")
@@ -87,14 +87,61 @@ class Runner:
             self._cancelled.discard(run_id)
 
     async def _execute(self, run_id: int) -> None:
+        """Run one turn, failing over to another account if a limit is hit."""
+        attempted: list[int] = []
+        previous: ProviderAccount | None = None
+
+        while True:
+            outcome = await self._attempt(run_id, attempted, previous)
+            if outcome is None:
+                return  # already finalized
+            status, exit_code, state, account, next_account = outcome
+            if status == "rate_limited" and next_account is not None:
+                log.info(
+                    "run %s: %s is limited, failing over to %s",
+                    run_id,
+                    account.name if account else "default",
+                    next_account.name,
+                )
+                attempted.append(next_account.id)
+                previous = account
+                continue
+            if status == "rate_limited":
+                status = "failed"
+                # Keep the provider's own wording, but say what to do about it —
+                # the CLI's message alone doesn't mention that failover exists.
+                guidance = (
+                    "No fallback account is configured for this one. Set one on the "
+                    "Accounts page to have AIOps switch automatically, or wait for the "
+                    "limit to reset."
+                )
+                state.error = f"{state.error}\n\n{guidance}" if state.error else guidance
+            await self._finalize(
+                run_id,
+                status,
+                exit_code,
+                state.error,
+                state.cost_usd,
+                usage=state.usage,
+                account_id=account.id if account else None,
+                failed_over_from_id=previous.id if previous else None,
+            )
+            return
+
+    async def _attempt(
+        self,
+        run_id: int,
+        attempted: list[int],
+        previous: "ProviderAccount | None",
+    ):
         async with SessionLocal() as db:
             run = await db.get(Run, run_id)
-            if run is None or run.status != "queued":
-                return
+            if run is None or run.status not in ("queued", "running"):
+                return None
             sess = await db.get(Session, run.session_id)
             if sess is None:
                 await self._finalize(run_id, "failed", None, "Session no longer exists")
-                return
+                return None
 
             provider = get_provider(sess.provider)
             preset = sess.preset
@@ -102,7 +149,14 @@ class Runner:
             cwd = workspace.path if workspace else settings.workspace_root
             if not os.path.isdir(cwd):
                 await self._finalize(run_id, "failed", None, f"Workspace directory missing: {cwd}")
-                return
+                return None
+
+            account = await self._pick_account(db, sess, attempted)
+            next_account = await self._next_account(db, account, attempted)
+            account_env: dict[str, str] = {}
+            if account is not None:
+                os.makedirs(account.config_dir, exist_ok=True)
+                account_env = account.env()
 
             spec = provider.build_run(
                 prompt=run.prompt,
@@ -113,14 +167,16 @@ class Runner:
                 allowed_tools=preset.allowed_tools if preset else None,
                 extra_args=(preset.extra_args if preset else []) or [],
                 stream_partials=settings.stream_partial_messages,
+                account_env=account_env,
             )
 
             if spec.assigned_session_id and not sess.provider_session_id:
                 sess.provider_session_id = spec.assigned_session_id
 
             run.status = "running"
-            run.started_at = datetime.now(timezone.utc)
+            run.started_at = run.started_at or datetime.now(timezone.utc)
             run.command = spec.argv
+            run.account_id = account.id if account else None
             sess.status = "running"
             await db.commit()
 
@@ -132,6 +188,8 @@ class Runner:
                     "run_id": run.id,
                     "prompt": run.prompt,
                     "command": _redact(spec.argv),
+                    "account": account.name if account else None,
+                    "failed_over_from": previous.name if previous else None,
                 },
             )
 
@@ -167,6 +225,15 @@ class Runner:
                 exit_code = await asyncio.wait_for(proc.wait(), timeout=30)
                 await stderr_task
                 status = self._classify(run_id, exit_code, state)
+                if status == "failed" and state.rate_limited:
+                    status = "rate_limited"
+                    if account is not None:
+                        # Skip this account for a while rather than re-picking it
+                        # on the operator's next turn.
+                        account.limited_until = datetime.now(timezone.utc) + timedelta(
+                            seconds=settings.account_limit_cooldown_seconds
+                        )
+                        await db.commit()
             except asyncio.TimeoutError:
                 _terminate(proc)
                 exit_code = await _wait_quietly(proc)
@@ -182,10 +249,59 @@ class Runner:
                 self._procs.pop(run_id, None)
                 self._cancelled.discard(run_id)
 
-        await self._finalize(run_id, status, exit_code, state.error, state.cost_usd)
+        return status, exit_code, state, account, next_account
+
+    # -- account selection ---------------------------------------------
+    @staticmethod
+    async def _pick_account(db, sess: Session, attempted: list[int]):
+        """The account this attempt should use.
+
+        Returns None when no accounts are configured at all, which runs the CLI
+        against its ambient credentials — the behaviour before named accounts.
+        """
+        from .models import ProviderAccount
+
+        if attempted:
+            return await db.get(ProviderAccount, attempted[-1])
+        if sess.account_id:
+            chosen = await db.get(ProviderAccount, sess.account_id)
+            if chosen is not None:
+                return chosen
+        now = datetime.now(timezone.utc)
+        rows = list(
+            await db.scalars(
+                select(ProviderAccount)
+                .where(ProviderAccount.provider == sess.provider)
+                .order_by(ProviderAccount.is_default.desc(), ProviderAccount.id)
+            )
+        )
+        healthy = [a for a in rows if _aware(a.limited_until) is None or _aware(a.limited_until) <= now]
+        return (healthy or rows or [None])[0]
+
+    @staticmethod
+    async def _next_account(db, account, attempted: list[int]):
+        """The configured fallback, if it hasn't already been tried."""
+        from .models import ProviderAccount
+
+        if account is None or account.fallback_account_id is None:
+            return None
+        if account.fallback_account_id in attempted or account.fallback_account_id == account.id:
+            return None
+        candidate = await db.get(ProviderAccount, account.fallback_account_id)
+        if candidate is None:
+            return None
+        limited = _aware(candidate.limited_until)
+        if limited and limited > datetime.now(timezone.utc):
+            return None
+        return candidate
 
     async def _pump_stdout(self, db, run: Run, sess: Session, provider, proc, state) -> None:
-        seq = 0
+        # Continue the run's existing sequence: a failover attempt writes more
+        # events for the same run, and restarting at 1 collides with the events
+        # the first attempt already stored.
+        seq = (
+            await db.scalar(select(func.max(Event.seq)).where(Event.run_id == run.id))
+        ) or 0
         while True:
             try:
                 raw_line = await proc.stdout.readline()
@@ -208,6 +324,11 @@ class Runner:
                 await db.commit()
             if event.cost_usd is not None:
                 state.cost_usd = (state.cost_usd or 0) + event.cost_usd
+            if event.usage:
+                for key, value in event.usage.items():
+                    state.usage[key] = state.usage.get(key, 0) + value
+            if event.rate_limited:
+                state.rate_limited = True
             if event.is_error and event.kind in ("result", "error"):
                 state.saw_error = True
                 state.error = state.error or event.text
@@ -220,6 +341,8 @@ class Runner:
                 "text": event.text,
                 "tool_name": event.tool_name,
                 "is_error": event.is_error,
+                "parent_tool_use_id": event.parent_tool_use_id,
+                "agent_name": event.agent_name,
             }
 
             if event.persist:
@@ -233,6 +356,8 @@ class Runner:
                         text=event.text,
                         tool_name=event.tool_name,
                         raw=event.raw,
+                        parent_tool_use_id=event.parent_tool_use_id,
+                        agent_name=event.agent_name,
                     )
                 )
                 await db.commit()
@@ -255,6 +380,9 @@ class Runner:
         exit_code: int | None,
         error: str | None,
         cost_usd: float | None = None,
+        usage: dict[str, int] | None = None,
+        account_id: int | None = None,
+        failed_over_from_id: int | None = None,
     ) -> None:
         async with SessionLocal() as db:
             run = await db.get(Run, run_id)
@@ -267,6 +395,22 @@ class Runner:
                 run.error = error[:8000]
             if cost_usd is not None:
                 run.cost_usd = cost_usd
+            if account_id is not None:
+                run.account_id = account_id
+            if failed_over_from_id is not None:
+                run.failed_over_from_id = failed_over_from_id
+            if usage:
+                run.input_tokens = usage.get("input_tokens")
+                run.output_tokens = usage.get("output_tokens")
+                run.cache_read_tokens = usage.get("cache_read_tokens")
+                run.cache_write_tokens = usage.get("cache_write_tokens")
+                # What the model had to read this turn — the practical measure
+                # of context pressure.
+                run.context_tokens = (
+                    (usage.get("input_tokens") or 0)
+                    + (usage.get("cache_read_tokens") or 0)
+                    + (usage.get("cache_write_tokens") or 0)
+                )
             sess = await db.get(Session, run.session_id)
             if sess is not None:
                 still_busy = await db.scalar(
@@ -298,6 +442,8 @@ class _RunState:
         self.error: str | None = None
         self.cost_usd: float | None = None
         self.saw_error = False
+        self.rate_limited = False
+        self.usage: dict[str, int] = {}
 
 
 async def _drain(stream, state: _RunState) -> None:
@@ -347,6 +493,13 @@ async def _wait_quietly(proc: asyncio.subprocess.Process) -> int | None:
     except asyncio.TimeoutError:
         _signal_group(proc, _SIGKILL)
         return await proc.wait()
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    """SQLite hands back naive datetimes; Postgres returns aware ones."""
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _redact(argv: list[str]) -> list[str]:

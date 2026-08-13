@@ -7,12 +7,11 @@ import shutil
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..auth_flows import login_manager
 from ..config import settings
 from ..models import User
 from ..providers import PROVIDERS
-from ..schemas import LoginCodeIn, LoginFlowOut, ProviderOut
-from ..security import current_admin, current_user
+from ..schemas import ProviderOut
+from ..security import current_user
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
 
@@ -37,13 +36,6 @@ async def _run(argv: list[str], timeout: float = 15.0) -> tuple[int | None, str]
         return None, "timed out"
     return proc.returncode, out.decode("utf-8", errors="replace").strip()
 
-
-def _require_known(name: str) -> None:
-    if name not in PROVIDERS:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            f"Unknown provider {name!r}. Known: {', '.join(PROVIDERS)}",
-        )
 
 
 async def _describe(name: str) -> ProviderOut:
@@ -112,53 +104,3 @@ async def list_providers(_: User = Depends(current_user)):
     far the most common cause.
     """
     return [await _describe(name) for name in PROVIDERS]
-
-
-# --- sign-in flows -----------------------------------------------------
-# The operator authenticates on the provider's own site. AIOps only relays the
-# verification URL, the device code, and (for Claude) the short-lived
-# authorization code pasted back — never an account password.
-
-
-@router.post("/{name}/login", response_model=LoginFlowOut)
-async def start_login(name: str, _: User = Depends(current_admin)):
-    _require_known(name)
-    flow = await login_manager.start(name)
-    if flow.status == "failed" and flow.verification_url is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, flow.message or "Could not start sign-in")
-    return flow.public()
-
-
-@router.get("/{name}/login", response_model=LoginFlowOut)
-async def login_status(name: str, _: User = Depends(current_admin)):
-    _require_known(name)
-    flow = login_manager.get(name)
-    if flow is None:
-        return LoginFlowOut(provider=name, status="idle")
-    return flow.public()
-
-
-@router.post("/{name}/login/code", response_model=LoginFlowOut)
-async def submit_login_code(name: str, payload: LoginCodeIn, _: User = Depends(current_admin)):
-    """Claude prints an authorize URL then blocks on stdin for the code."""
-    _require_known(name)
-    try:
-        flow = await login_manager.submit_code(name, payload.code)
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    return flow.public()
-
-
-@router.delete("/{name}/login", status_code=status.HTTP_204_NO_CONTENT)
-async def cancel_login(name: str, _: User = Depends(current_admin)):
-    _require_known(name)
-    await login_manager.cancel(name)
-
-
-@router.post("/{name}/logout")
-async def provider_logout(name: str, _: User = Depends(current_admin)):
-    _require_known(name)
-    ok, message = await login_manager.logout(name)
-    if not ok:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, message or "Logout failed")
-    return {"status": "signed out", "detail": message}

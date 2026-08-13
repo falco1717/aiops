@@ -5,6 +5,7 @@ signed-in CLI. It sleeps between deltas so "session is busy" states are
 deterministic rather than racy.
 """
 import json
+import os
 import sys
 import time
 
@@ -17,6 +18,24 @@ def flag(name, default=None):
 
 session_id = flag("--session-id") or flag("--resume") or "fake-session-0001"
 model = flag("--model", "opus")
+
+# Failover rehearsal: any account whose credential directory is named in
+# FAKE_LIMITED_DIRS reports a usage limit instead of doing the work, so the
+# runner's account-switching path can be exercised without real quota.
+_limited = os.environ.get("FAKE_LIMITED_DIRS", "")
+_config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "")
+if _limited and _config_dir and _config_dir in _limited.split(","):
+    print(json.dumps({
+        "type": "system", "subtype": "init", "session_id": session_id, "model": model,
+    }), flush=True)
+    print(json.dumps({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "result": "You have reached your usage limit. Try again later.",
+        "session_id": session_id,
+    }), flush=True)
+    sys.exit(1)
 
 
 def emit(obj):

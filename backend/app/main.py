@@ -19,12 +19,14 @@ from .db import SessionLocal, init_db
 from .models import Run, Session, User
 from .migrate import run_migrations
 from .routers import (
+    accounts,
     auth,
     presets,
     providers,
     runs,
     schedules,
     sessions,
+    usage,
     users,
     workspaces,
     ws,
@@ -96,6 +98,7 @@ async def lifespan(app: FastAPI):
         task = asyncio.create_task(scheduler_loop(), name="scheduler")
 
     os.makedirs(settings.workspace_root, exist_ok=True)
+    os.makedirs(settings.accounts_root, exist_ok=True)
     log.info("AIOps ready. Workspace root: %s", settings.workspace_root)
     try:
         yield
@@ -118,7 +121,19 @@ if settings.cors_origin_list:
         allow_headers=["*"],
     )
 
-for module in (auth, users, providers, workspaces, presets, sessions, runs, schedules, ws):
+for module in (
+    auth,
+    users,
+    accounts,
+    providers,
+    usage,
+    workspaces,
+    presets,
+    sessions,
+    runs,
+    schedules,
+    ws,
+):
     app.include_router(module.router)
 
 
