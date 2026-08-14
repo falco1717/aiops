@@ -116,6 +116,26 @@ against a relay that generated perfect config and moved no bytes at all.
 
 It needs `httpx` as well as the app's own requirements.
 
+## `test_effort.py`
+
+Naming a session on creation, and reasoning effort from the API down to the
+argv. Both are easy to half-wire in opposite directions, so the suite walks the
+whole path rather than the endpoint: the title survives the first turn (which
+used to overwrite it) and a blank one still falls back to the opening prompt;
+the effort round-trips through the session, through a preset, and through the
+`session ?? preset` fallback the runner reads.
+
+The checks with teeth are the argv ones and the refusals. `claude --effort` only
+*warns* on a level it does not know and then uses its default, and Codex accepts
+`-c model_reasoning_effort=<anything>` at config-parse time and fails only once
+the turn is running — so a level the chosen model does not accept has to be
+refused by the API or it looks like it worked and silently runs at something
+else. `gpt-5.5` with `ultra` is the case that pins that.
+
+The model list is pinned against `codex debug models` on codex-cli 0.147.0.
+Before this, the hardcoded list named three models that catalog has never heard
+of; the UI offered them and every run using one failed.
+
 ## `test_users.py`
 
 Accounts, roles, and the schema migration. It builds a **pre-upgrade database**

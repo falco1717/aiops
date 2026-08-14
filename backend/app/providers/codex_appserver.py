@@ -102,6 +102,7 @@ class CodexAppServerAdapter:
         prompt: str,
         cwd: str,
         model: str | None = None,
+        effort: str | None = None,
         sandbox: str = "workspace-write",
         codex_home: str | None = None,
         on_approval: ApprovalCallback | None = None,
@@ -119,6 +120,7 @@ class CodexAppServerAdapter:
         self.prompt = prompt
         self.cwd = cwd
         self.model = model
+        self.effort = effort
         self.sandbox = sandbox
         self.codex_home = codex_home
         self.on_approval = on_approval
@@ -222,14 +224,7 @@ class CodexAppServerAdapter:
 
         yield await self._open_thread()
 
-        turn = self._call_async(
-            "turn/start",
-            {
-                "threadId": self.conversation_id,
-                "input": [{"type": "text", "text": self._full_prompt()}],
-                "approvalPolicy": self.approval_policy,
-            },
-        )
+        turn = self._call_async("turn/start", self.turn_params())
 
         # `turn/start` answers as soon as the turn is accepted, with the turn
         # still `inProgress`, so its response is not the end of the turn — the
@@ -329,6 +324,21 @@ class CodexAppServerAdapter:
             raw={"method": method, "result": result},
             provider_session_id=thread_id,
         )
+
+    def turn_params(self) -> dict[str, Any]:
+        """Parameters for `turn/start`. Pure, so a test can read it directly."""
+        params: dict[str, Any] = {
+            "threadId": self.conversation_id,
+            "input": [{"type": "text", "text": self._full_prompt()}],
+            "approvalPolicy": self.approval_policy,
+        }
+        if self.effort:
+            # `ThreadStartParams` has no effort field — only `TurnStartParams`
+            # does, described in the generated schema as "Override the reasoning
+            # effort for this turn and subsequent turns", which is exactly the
+            # scope a resumed AIOps session wants.
+            params["effort"] = self.effort
+        return params
 
     def _full_prompt(self) -> str:
         # Codex has no --append-system-prompt, and `developerInstructions` only

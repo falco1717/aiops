@@ -1,12 +1,14 @@
 import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { EFFORT_HINT, effortChoices } from "../effort";
 import type { Preset, ProviderInfo } from "../types";
 
 const EMPTY = {
   name: "",
   provider: "claude",
   model: "",
+  effort: "",
   description: "",
   system_prompt: "",
   permission_mode: "",
@@ -34,11 +36,21 @@ export default function Presets() {
   }, [load]);
 
   const current = providers.find((p) => p.name === draft.provider);
+  const efforts = effortChoices(current, draft.model || null);
 
   // The cast is needed because TypeScript widens a spread with a generic
   // computed key and can no longer see it as a Draft.
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft((d) => ({ ...d, [key]: value }) as Draft);
+
+  // Codex narrows the effort list per model, so a level the newly-typed model
+  // does not accept is dropped here rather than refused on save.
+  const pickModel = (next: string) =>
+    setDraft((d) => ({
+      ...d,
+      model: next,
+      effort: effortChoices(current, next || null).includes(d.effort) ? d.effort : "",
+    }));
 
   const reset = () => {
     setDraft(EMPTY);
@@ -51,6 +63,7 @@ export default function Presets() {
       name: p.name,
       provider: p.provider,
       model: p.model ?? "",
+      effort: p.effort ?? "",
       description: p.description ?? "",
       system_prompt: p.system_prompt ?? "",
       permission_mode: p.permission_mode ?? "",
@@ -66,6 +79,7 @@ export default function Presets() {
       name: draft.name,
       provider: draft.provider,
       model: draft.model || null,
+      effort: draft.effort || null,
       description: draft.description || null,
       system_prompt: draft.system_prompt || null,
       permission_mode: draft.permission_mode || null,
@@ -125,7 +139,7 @@ export default function Presets() {
             <input
               list="preset-models"
               value={draft.model}
-              onChange={(e) => set("model", e.target.value)}
+              onChange={(e) => pickModel(e.target.value)}
               placeholder="CLI default"
             />
             <datalist id="preset-models">
@@ -134,6 +148,20 @@ export default function Presets() {
               ))}
             </datalist>
           </label>
+          {efforts.length > 0 && (
+            <label>
+              <span>Reasoning effort</span>
+              <select value={draft.effort} onChange={(e) => set("effort", e.target.value)}>
+                <option value="">Model default</option>
+                {efforts.map((e) => (
+                  <option key={e} value={e}>
+                    {e}
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">{EFFORT_HINT}</span>
+            </label>
+          )}
           <label>
             <span>{draft.provider === "codex" ? "Sandbox" : "Permission mode"}</span>
             <select
@@ -222,6 +250,7 @@ export default function Presets() {
                 <td data-label="Provider">{p.provider}</td>
                 <td className="mono" data-label="Model">
                   {p.model ?? "—"}
+                  {p.effort && <div style={{ color: "var(--text-dim)" }}>effort: {p.effort}</div>}
                 </td>
                 <td className="mono" data-label="Permissions">
                   {p.permission_mode ?? "—"}

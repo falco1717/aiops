@@ -38,6 +38,11 @@ class ClaudeProvider(Provider):
         "dontAsk",
         "bypassPermissions",
     ]
+    # `claude --effort <level>`, quoted from `claude --help` on 2.1.232:
+    # "Effort level for the current session (low, medium, high, xhigh, max)".
+    # An unrecognised value is only warned about and then ignored, so the list
+    # is validated here rather than left to the CLI.
+    efforts = ["low", "medium", "high", "xhigh", "max"]
     supports_interactive_approval = True
 
     #: Permission mode implied by each AIOps approval mode, when a preset has
@@ -62,6 +67,7 @@ class ClaudeProvider(Provider):
         account_env: dict[str, str] | None = None,
         approval_mode: str = "ask",
         approval_token: str | None = None,
+        effort: str | None = None,
     ) -> RunSpec:
         argv = [
             settings.claude_bin,
@@ -87,6 +93,8 @@ class ClaudeProvider(Provider):
 
         if model:
             argv += ["--model", model]
+        if effort:
+            argv += ["--effort", effort]
 
         # A preset that pins a permission mode wins; otherwise the session's
         # approval mode chooses one.

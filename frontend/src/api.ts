@@ -163,6 +163,7 @@ export const api = {
     title?: string;
     provider: string;
     model?: string | null;
+    effort?: string | null;
     account_id?: number | null;
     preset_id?: number | null;
     workspace_id?: number | null;

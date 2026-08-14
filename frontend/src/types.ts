@@ -48,6 +48,8 @@ export type Preset = {
   name: string;
   provider: string;
   model: string | null;
+  /** Reasoning effort, from the provider's own list. Null = CLI default. */
+  effort: string | null;
   description: string | null;
   system_prompt: string | null;
   permission_mode: string | null;
@@ -81,6 +83,8 @@ export type Session = {
   title: string;
   provider: string;
   model: string | null;
+  /** Null falls back to the preset's, then to the CLI's own default. */
+  effort: string | null;
   account_id: number | null;
   approval_mode: ApprovalMode | null;
   preset_id: number | null;
@@ -264,6 +268,10 @@ export type ProviderInfo = {
   label: string;
   models: string[];
   permission_modes: string[];
+  /** Effort levels, weakest first. Empty when this CLI has no such control. */
+  efforts: string[];
+  /** Models accepting fewer levels than `efforts`, keyed by model name. */
+  efforts_by_model: Record<string, string[]>;
   binary: string;
   available: boolean;
   version: string | null;

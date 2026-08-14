@@ -2,6 +2,7 @@ import type * as React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
+import { EFFORT_HINT, effortChoices } from "../effort";
 import type { Account, Preset, ProviderInfo, Session, Team, User, Workspace } from "../types";
 import Chat from "./Chat";
 
@@ -145,8 +146,10 @@ function NewSession({
   const [presets, setPresets] = useState<Preset[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [title, setTitle] = useState("");
   const [provider, setProvider] = useState("claude");
   const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("");
   const [accountId, setAccountId] = useState("");
   const [presetId, setPresetId] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
@@ -175,11 +178,21 @@ function NewSession({
     setPresetId("");
     setAccountId("");
     setModel("");
+    setEffort("");
   }, [provider]);
 
   const current = providers.find((p) => p.name === provider);
   const availablePresets = presets.filter((p) => p.provider === provider);
   const availableAccounts = accounts.filter((a) => a.provider === provider);
+  const efforts = effortChoices(current, model || null);
+  const chosenWorkspace = workspaces.find((w) => String(w.id) === workspaceId);
+
+  // Codex narrows the effort list per model, so a level the newly-typed model
+  // does not accept is dropped here rather than refused on submit.
+  const pickModel = (next: string) => {
+    setModel(next);
+    if (effort && !effortChoices(current, next || null).includes(effort)) setEffort("");
+  };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -188,8 +201,11 @@ function NewSession({
     try {
       onCreated(
         await api.createSession({
+          // Left blank, the first task's opening line becomes the name.
+          title: title.trim() || undefined,
           provider,
           model: model || null,
+          effort: effort || null,
           account_id: accountId ? Number(accountId) : null,
           preset_id: presetId ? Number(presetId) : null,
           workspace_id: workspaceId ? Number(workspaceId) : null,
@@ -221,6 +237,15 @@ function NewSession({
             {provider} is installed but not signed in. See the Providers page for the login command.
           </div>
         )}
+        <label>
+          <span>Name</span>
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            maxLength={255}
+            placeholder="Leave blank to name it after the first task"
+          />
+        </label>
         <div className="grid-2">
           <label>
             <span>Provider</span>
@@ -237,7 +262,7 @@ function NewSession({
             <input
               list="model-options"
               value={model}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={(e) => pickModel(e.target.value)}
               placeholder={current?.models[0] ?? ""}
             />
             <datalist id="model-options">
@@ -246,6 +271,20 @@ function NewSession({
               ))}
             </datalist>
           </label>
+          {efforts.length > 0 && (
+            <label>
+              <span>Reasoning effort</span>
+              <select value={effort} onChange={(e) => setEffort(e.target.value)}>
+                <option value="">Model default</option>
+                {efforts.map((e) => (
+                  <option key={e} value={e}>
+                    {e}
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">{EFFORT_HINT}</span>
+            </label>
+          )}
           <label>
             <span>Account</span>
             <select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
@@ -271,15 +310,26 @@ function NewSession({
             </select>
           </label>
           <label>
-            <span>Workspace</span>
+            <span>Workspace — the directory the agent works in</span>
             <select value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
-              <option value="">None (workspace root)</option>
+              <option value="">None — no project</option>
               {workspaces.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name}
                 </option>
               ))}
             </select>
+            <span className="field-hint">
+              {chosenWorkspace ? (
+                <>
+                  The agent starts in <code className="mono">{chosenWorkspace.path}</code> and can
+                  read and edit the files there.
+                </>
+              ) : (
+                "With none picked, the agent starts in the workspace root with no project " +
+                "around it — fine for questions, no use for working on a repo."
+              )}
+            </span>
           </label>
           <label>
             <span>Team</span>
