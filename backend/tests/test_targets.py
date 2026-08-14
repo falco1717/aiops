@@ -82,8 +82,11 @@ with TestClient(app) as c:
     check("no key material comes back from the API",
           "BEGIN" not in body and KEY_CHUNK not in body and "PRIVATE" not in body,
           "LEAKED KEY MATERIAL" if "BEGIN" in body else "clean")
+    # Anchored on the opening quote: `has_private_key` legitimately contains
+    # `private_key"`, so an unanchored search flags the very boolean indicators
+    # that prove no secret field is present.
     check("the response has no field that could carry a secret",
-          not any(k in body for k in ("private_key\"", "password\"", "passphrase\"")),
+          not any(k in body for k in ('"private_key"', '"password"', '"passphrase"')),
           body[:200])
 
     # An edit that does not retype the key must not destroy it.
