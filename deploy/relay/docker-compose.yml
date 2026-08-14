@@ -1,0 +1,42 @@
+# AIOps relay node.
+#
+#   AIOPS_RELAY_URL=https://aiops.example.com \
+#   AIOPS_RELAY_TOKEN=<one-time enrolment token> \
+#     docker compose up -d --build
+#
+# Remove it with `docker compose down -v`. The -v matters: without it the
+# credential volume survives, and a node you thought was gone comes back the
+# next time this file is brought up.
+services:
+  relay-node:
+    build: .
+    image: aiops-relay-node:local
+    container_name: aiops-relay-node
+    # on-failure rather than unless-stopped: the agent exits 0 when AIOps says
+    # this node has been revoked, and restarting that puts a withdrawn node in a
+    # reconnect loop forever.
+    restart: on-failure
+    # The point of a node is the network it sits on, and a bridge network is a
+    # different one — anything the far side reaches by a private address, or
+    # anything listening on this machine's loopback, is invisible from behind
+    # NAT. Host networking gives the container the machine's own view.
+    network_mode: host
+    environment:
+      AIOPS_RELAY_URL: ${AIOPS_RELAY_URL:?set AIOPS_RELAY_URL}
+      # Only read on first start. Once the credential volume below holds a
+      # credential, the token is ignored — it was single-use anyway.
+      AIOPS_RELAY_TOKEN: ${AIOPS_RELAY_TOKEN:-}
+      # Set to 1 only for an AIOps with a self-signed certificate.
+      AIOPS_RELAY_INSECURE: ${AIOPS_RELAY_INSECURE:-0}
+    volumes:
+      - relay-state:/var/lib/aiops-relay
+    # Everything the node is asked to connect to is on stdout, so
+    # `docker logs -f aiops-relay-node` is the whole audit trail.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  relay-state:

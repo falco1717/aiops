@@ -2,18 +2,27 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 import stat
+import sys
 import tempfile
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .config import settings
 from .crypto import SecretUnavailable, decrypt
-from .models import Target, User
+from .models import RelayNode, Target, User
 from .access import level_for
+from . import relay
 
 log = logging.getLogger("aiops.ssh")
+
+#: The ProxyCommand helper, referenced where it is installed rather than copied
+#: into each run directory — it holds no secret, so there is nothing per-run
+#: about it.
+PROXY_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relay_connect.py")
 
 
 class SshContext:
@@ -30,12 +39,17 @@ class SshContext:
     with no flags, exactly as it would on a workstation.
     """
 
-    def __init__(self, root: str, env: dict[str, str], names: list[str]):
+    def __init__(
+        self, root: str, env: dict[str, str], names: list[str], relay_token: str | None = None
+    ):
         self.root = root
         self.env = env
         self.names = names
+        #: What this run may ask the relay forwarder for. Revoked with the rest.
+        self.relay_token = relay_token
 
     def cleanup(self) -> None:
+        relay.tokens.revoke(self.relay_token)
         shutil.rmtree(self.root, ignore_errors=True)
 
 
@@ -60,10 +74,20 @@ async def visible_targets(db: AsyncSession, user: User | None) -> list[Target]:
     return [t for t in rows if level_for(t, user) is not None]
 
 
-def prepare(targets: list[Target]) -> SshContext | None:
-    """Materialise an SSH config for one run. None when there is nothing to do."""
+def prepare(
+    targets: list[Target], nodes: dict[int, RelayNode] | None = None
+) -> SshContext | None:
+    """Materialise an SSH config for one run. None when there is nothing to do.
+
+    `nodes` are the relay nodes the given systems are bound to. A system bound
+    to one is never written as a direct connection, whatever state the node is
+    in: if the route cannot be made to work the connection has to fail, because
+    an ssh config that quietly reaches the host another way is exactly the
+    outcome someone bound it to a node to prevent.
+    """
     if not targets:
         return None
+    nodes = nodes or {}
 
     root = tempfile.mkdtemp(prefix="aiops-ssh-")
     os.chmod(root, stat.S_IRWXU)
@@ -82,6 +106,7 @@ def prepare(targets: list[Target]) -> SshContext | None:
     ]
     passwords: dict[str, str] = {}
     usable: list[str] = []
+    routes: set[tuple[str, str, int]] = set()
 
     for target in targets:
         try:
@@ -100,6 +125,25 @@ def prepare(targets: list[Target]) -> SshContext | None:
             f"    UserKnownHostsFile {known_hosts}",
             f"    StrictHostKeyChecking {'yes' if target.host_key_policy == 'strict' else 'accept-new'}",
         ]
+
+        if target.relay_node_id:
+            node = nodes.get(target.relay_node_id)
+            # "-" is the helper's own signal for a binding that no longer
+            # resolves. It refuses rather than falling back to a direct dial.
+            slug = node.slug if node is not None else "-"
+            if node is None:
+                log.warning(
+                    "target %s is bound to relay node %s, which no longer exists",
+                    target.slug,
+                    target.relay_node_id,
+                )
+            else:
+                routes.add((slug, target.hostname, target.port))
+            lines += [
+                f"    # Reached through relay node {slug}, not from this server.",
+                f"    ProxyCommand {shlex.quote(sys.executable)} {shlex.quote(PROXY_HELPER)} "
+                f"{shlex.quote(slug)} %h %p",
+            ]
 
         if target.auth_type == "key" and key:
             key_path = os.path.join(keys_dir, target.slug)
@@ -135,7 +179,19 @@ def prepare(targets: list[Target]) -> SshContext | None:
         # variable matching the host it was asked for.
         env[f"AIOPS_SSHPASS_{_env_key(slug)}"] = password
 
-    return SshContext(root, env, usable)
+    relay_token: str | None = None
+    if routes:
+        # In the environment rather than on the ProxyCommand line, for the same
+        # reason as the passwords above: an argument list is readable by anyone
+        # who can run `ps`. The token only ever authorises the connections
+        # already materialised for this run, and dies with it.
+        relay_token = relay.tokens.issue(routes)
+        env["AIOPS_RELAY_TOKEN"] = relay_token
+        env["AIOPS_RELAY_ADDR"] = (
+            f"{settings.relay_forwarder_host}:{relay.hub.forwarder_port or 0}"
+        )
+
+    return SshContext(root, env, usable, relay_token)
 
 
 def _env_key(slug: str) -> str:
@@ -176,13 +232,24 @@ exec "{real}" -F "$CONFIG" "$@"
     os.chmod(path, stat.S_IRWXU)
 
 
-def describe(targets: list[Target]) -> str:
-    """A line for the system prompt, so the agent knows what it can reach."""
+def describe(targets: list[Target], nodes: dict[int, RelayNode] | None = None) -> str:
+    """A line for the system prompt, so the agent knows what it can reach.
+
+    A relayed system is named as such: the agent connects to it the same way,
+    but knowing the hop exists is what lets it read "the relay node is not
+    connected" as an infrastructure problem rather than a broken credential.
+    """
     if not targets:
         return ""
+    nodes = nodes or {}
     listed = "\n".join(
         f"- `{t.slug}` — {t.username}@{t.hostname}:{t.port}"
         + (f" ({t.description.strip()})" if t.description else "")
+        + (
+            f" [via relay node {nodes[t.relay_node_id].name}]"
+            if t.relay_node_id and t.relay_node_id in nodes
+            else ""
+        )
         for t in targets
     )
     return (

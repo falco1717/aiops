@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import ColumnElement, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Session, SessionShare, Target, TeamMember, User
+from .models import RelayNode, Session, SessionShare, Target, TeamMember, User
 
 #: use  — agents in this user's sessions may connect through the system.
 #: manage — additionally edit it, replace the credential, and grant others.
@@ -27,6 +27,29 @@ def level_for(target: Target, user: User | None) -> str | None:
     if target.owner_id is not None and target.owner_id == user.id:
         return "owner"
     for grant in target.grants:
+        if grant.user_id == user.id:
+            return grant.level if grant.level in LEVELS else "use"
+    return None
+
+
+def node_level_for(node: RelayNode, user: User | None) -> str | None:
+    """The same rule again, for a relay node.
+
+    A node is a way into somebody's network, so it is owned and shared exactly
+    as a stored credential is — including administrators getting nothing they
+    were not given. Approving a node *is* an administrator's job, but that is a
+    separate question from being allowed to send traffic through it, and the
+    router keeps the two apart.
+
+    Written out rather than sharing a generic helper with `level_for`: the two
+    happen to agree today, and if the rule for one ever changes it must be
+    possible to change it without silently moving the other.
+    """
+    if user is None:
+        return None
+    if node.owner_id is not None and node.owner_id == user.id:
+        return "owner"
+    for grant in node.grants:
         if grant.user_id == user.id:
             return grant.level if grant.level in LEVELS else "use"
     return None

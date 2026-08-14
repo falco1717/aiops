@@ -94,6 +94,28 @@ are gone. SQLite does not enforce `ON DELETE` and reuses integer ids, so a
 leftover row there is a grant waiting to be inherited by the next account
 created.
 
+## `test_relay.py`
+
+Relay nodes, in two halves. The first drives the API and asserts the rules: an
+enrolment token works once and never again, an unapproved node is refused its
+control channel, a revoked one is refused immediately and told *why*, the
+credential is re-checked on every reconnect rather than trusted after
+enrolment, and access matches the stored-systems model — an admin sees nothing
+they were not given, and approving a node does not hand them the route through
+it. It also asserts what a run's ssh config actually says: a bound system gets a
+`ProxyCommand` naming its node, an unbound one does not, and a system whose node
+has vanished fails rather than silently dialling direct.
+
+The second half is the one with teeth. It runs the app under a real uvicorn on a
+real port, starts the **actual agent from `deploy/relay`** as a subprocess, and
+pushes bytes end to end: the ProxyCommand helper, the loopback forwarder, the
+node's websocket, and a TCP listener the agent has to open on its side. It then
+checks the agent cannot be pointed at an address the run was not given, and that
+revoking a node mid-flight drops it. Everything in the first half would pass
+against a relay that generated perfect config and moved no bytes at all.
+
+It needs `httpx` as well as the app's own requirements.
+
 ## `test_users.py`
 
 Accounts, roles, and the schema migration. It builds a **pre-upgrade database**

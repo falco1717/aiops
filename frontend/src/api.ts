@@ -5,7 +5,9 @@ import type {
   Attachment,
   Capability,
   LoginFlow,
+  NodeEnrolment,
   Preset,
+  RelayNode,
   SessionContext,
   SessionFiles,
   Usage,
@@ -212,6 +214,22 @@ export const api = {
   updateTarget: (id: number, data: Record<string, unknown>) =>
     request<Target>(`/api/targets/${id}`, { method: "PATCH", body: body(data) }),
   deleteTarget: (id: number) => request<void>(`/api/targets/${id}`, { method: "DELETE" }),
+
+  // relay nodes — jump points on other networks
+  nodes: () => request<RelayNode[]>("/api/nodes"),
+  /** Admin-only: what has enrolled and is waiting to be let in. */
+  pendingNodes: () => request<RelayNode[]>("/api/nodes/pending"),
+  // The only two calls that ever return a readable enrolment token.
+  createNode: (data: Record<string, unknown>) =>
+    request<NodeEnrolment>("/api/nodes", { method: "POST", body: body(data) }),
+  reissueNodeToken: (id: number) =>
+    request<NodeEnrolment>(`/api/nodes/${id}/token`, { method: "POST" }),
+  updateNode: (id: number, data: Record<string, unknown>) =>
+    request<RelayNode>(`/api/nodes/${id}`, { method: "PATCH", body: body(data) }),
+  approveNode: (id: number) =>
+    request<RelayNode>(`/api/nodes/${id}/approve`, { method: "POST" }),
+  revokeNode: (id: number) => request<RelayNode>(`/api/nodes/${id}/revoke`, { method: "POST" }),
+  deleteNode: (id: number) => request<void>(`/api/nodes/${id}`, { method: "DELETE" }),
 
   // approvals — an agent is parked waiting on each pending one
   approvals: (params: { session_id?: string; status?: string } = {}) => {

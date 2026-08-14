@@ -5,7 +5,16 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..models import Session, SessionShare, Target, TargetAccess, TeamMember, User
+from ..models import (
+    RelayNode,
+    RelayNodeAccess,
+    Session,
+    SessionShare,
+    Target,
+    TargetAccess,
+    TeamMember,
+    User,
+)
 from ..schemas import UserCreate, UserOut, UserPasswordReset, UserPatch, UserSummary
 from ..security import current_admin, current_user, hash_password
 
@@ -138,14 +147,25 @@ async def _release_sessions(db: AsyncSession, leaving: User) -> None:
 
 
 async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:
-    """Pass this user's stored systems to someone who can manage them.
+    """Pass this user's stored systems and relay nodes to someone who can manage them.
 
     Admins get no implicit access to a stored credential, so a system left
     without an owner would be reachable by nobody and removable by nobody. The
     delete is refused rather than orphaning one — and refusing is also what
     stops deleting a user becoming a way to inherit their credentials.
     """
-    owned = list(await db.scalars(select(Target).where(Target.owner_id == leaving.id)))
+    # Grants this user held on other people's systems and nodes. The foreign
+    # keys say cascade, and Postgres honours them, but SQLite enforces neither
+    # that nor unique ids over time — so a leftover row is access lying in wait
+    # for whoever is created next, and access to a stored credential or a route
+    # into a network is the worst thing to inherit by accident.
+    await db.execute(delete(TargetAccess).where(TargetAccess.user_id == leaving.id))
+    await db.execute(delete(RelayNodeAccess).where(RelayNodeAccess.user_id == leaving.id))
+    # Relay nodes are owned and shared on exactly the same terms, so a node
+    # whose owner leaves strands a route into a network the same way.
+    owned = list(
+        await db.scalars(select(Target).where(Target.owner_id == leaving.id))
+    ) + list(await db.scalars(select(RelayNode).where(RelayNode.owner_id == leaving.id)))
     stranded: list[str] = []
     for target in owned:
         heir = next((g for g in target.grants if g.level == "manage"), None)
@@ -154,17 +174,13 @@ async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:
             continue
         target.owner_id = heir.user_id
         await db.delete(heir)
-    # Grants this user held on other people's systems. The foreign key says
-    # cascade, but SQLite neither enforces ON DELETE nor avoids reusing integer
-    # ids, so a leftover row is access lying in wait for whoever is created
-    # next — and access to a credential is the worst thing to inherit by
-    # accident. Done after the loop so a refusal below leaves nothing removed.
-    if not stranded:
-        await db.execute(delete(TargetAccess).where(TargetAccess.user_id == leaving.id))
+    # Nothing above is committed if this fires, so the refusal leaves the user
+    # and every grant exactly as they were.
     if stranded:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"{leaving.username} owns {len(stranded)} system(s) nobody else can manage: "
+            f"{leaving.username} owns {len(stranded)} system(s) or relay node(s) nobody "
+            f"else can manage: "
             f"{', '.join(sorted(stranded)[:5])}"
             + (" …" if len(stranded) > 5 else "")
             + ". Give someone manage access, or delete them, before removing this user.",

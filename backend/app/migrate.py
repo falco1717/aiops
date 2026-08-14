@@ -29,6 +29,7 @@ COLUMNS: dict[str, dict[str, str]] = {
     },
     "targets": {
         "owner_id": "INTEGER",
+        "relay_node_id": "INTEGER",
     },
     "target_access": {
         "level": "VARCHAR(16) NOT NULL DEFAULT 'use'",

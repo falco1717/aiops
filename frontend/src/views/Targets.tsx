@@ -1,7 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { Target, TargetGrant, User, UserSummary } from "../types";
+import type { RelayNode, Target, TargetGrant, User, UserSummary } from "../types";
 
 const EMPTY = {
   name: "",
@@ -15,6 +15,9 @@ const EMPTY = {
   password: "",
   host_key_policy: "accept-new",
   known_host_key: "",
+  // "" means connect directly from the AIOps server, which is the default and
+  // right for anything on this network.
+  relay_node_id: "",
 };
 
 type Draft = typeof EMPTY;
@@ -29,6 +32,7 @@ type Draft = typeof EMPTY;
 export default function Targets({ me }: { me: User }) {
   const [items, setItems] = useState<Target[]>([]);
   const [users, setUsers] = useState<UserSummary[]>([]);
+  const [nodes, setNodes] = useState<RelayNode[]>([]);
   // Who this system is being shared with, edited alongside the rest of the form.
   const [grants, setGrantDraft] = useState<TargetGrant[]>([]);
   const [draft, setDraft] = useState<Draft>(EMPTY);
@@ -63,6 +67,7 @@ export default function Targets({ me }: { me: User }) {
     try {
       setItems(await api.targets());
       setUsers(await api.userDirectory().catch(() => []));
+      setNodes(await api.nodes().catch(() => []));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -100,6 +105,7 @@ export default function Targets({ me }: { me: User }) {
       description: t.description ?? "",
       auth_type: t.auth_type,
       host_key_policy: t.host_key_policy,
+      relay_node_id: t.relay_node_id === null ? "" : String(t.relay_node_id),
     });
   };
 
@@ -115,6 +121,9 @@ export default function Targets({ me }: { me: User }) {
       description: draft.description || null,
       auth_type: draft.auth_type,
       host_key_policy: draft.host_key_policy,
+      // Always sent, including as null: clearing it is the meaningful edit that
+      // turns a relayed system back into a direct one.
+      relay_node_id: draft.relay_node_id ? Number(draft.relay_node_id) : null,
       grants,
     };
     // Only send a secret the operator actually typed. An empty box on an edit
@@ -224,6 +233,28 @@ export default function Targets({ me }: { me: User }) {
         <label>
           <span>Description</span>
           <input value={draft.description} onChange={(e) => set("description", e.target.value)} />
+        </label>
+
+        <label>
+          <span>Reach it via</span>
+          <select
+            value={draft.relay_node_id}
+            onChange={(e) => set("relay_node_id", e.target.value)}
+          >
+            <option value="">The AIOps server itself (direct)</option>
+            {nodes.map((n) => (
+              <option key={n.id} value={String(n.id)}>
+                {n.name} ({n.slug})
+                {n.status === "approved" ? "" : ` — ${n.status}`}
+              </option>
+            ))}
+          </select>
+          <span className="hint">
+            Pick a relay node when this host is on a network the AIOps server cannot
+            reach. The connection is then made from that node instead, and the hostname
+            above is resolved there. If the node is not connected, the system fails to
+            connect rather than quietly trying from here.
+          </span>
         </label>
 
         {draft.auth_type === "key" ? (
@@ -364,6 +395,11 @@ export default function Targets({ me }: { me: User }) {
                 {credentialStored(t) ? "credential stored" : "no credential — will fail"}
               </span>
               <span className="pill">{t.host_key_policy}</span>
+              {t.relay_node_id !== null && (
+                <span className="pill">
+                  via {nodes.find((n) => n.id === t.relay_node_id)?.name ?? "a relay node"}
+                </span>
+              )}
               {t.host_key_policy === "strict" && !t.has_known_host_key && (
                 <span className="pill failed">strict, but no host key saved</span>
               )}
