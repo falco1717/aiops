@@ -23,6 +23,7 @@ COLUMNS: dict[str, dict[str, str]] = {
     "sessions": {
         "account_id": "INTEGER",
         "available_commands": "JSON",
+        "approval_mode": "VARCHAR(32)",
     },
     "provider_accounts": {
         "limit_status": "VARCHAR(32)",

@@ -34,6 +34,18 @@ class Settings(BaseSettings):
     # Stream token-level deltas over the websocket (not persisted to the DB).
     stream_partial_messages: bool = True
 
+    # --- tool approvals ------------------------------------------------
+    # ask | auto | bypass, used by sessions that have not chosen for themselves.
+    # "ask" is the default because an unattended agent on this box can run
+    # arbitrary commands; the operator can lower it per session.
+    default_approval_mode: str = "ask"
+    # How long an agent waits, parked, for a human answer before giving up. A
+    # scheduled run at 3am has nobody to ask, so this must not be infinite.
+    approval_timeout_seconds: int = 600
+    # Port the in-container approval bridge calls back on. This is the app's own
+    # listener; nothing is published to the host.
+    internal_api_url: str = "http://127.0.0.1:8000"
+
     # --- sign-in throttling -------------------------------------------
     # AIOps may be the only thing between the internet and an agent that runs
     # shell commands, so the login endpoint locks out after repeated failures.

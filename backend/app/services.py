@@ -13,6 +13,12 @@ class ValidationError(ValueError):
     pass
 
 
+#: How a session handles tool permissions. "ask" pauses the agent and puts the
+#: decision in the UI; "auto" approves file edits without asking; "bypass"
+#: turns permission checks off entirely.
+APPROVAL_MODES = ("ask", "auto", "bypass")
+
+
 async def validate_session_targets(
     db: AsyncSession,
     *,
@@ -69,9 +75,14 @@ async def build_session(
     preset_id: int | None,
     workspace_id: int | None,
     account_id: int | None = None,
+    approval_mode: str | None = None,
     user: User | None = None,
 ) -> Session:
     """Create (but do not commit) a session, resolving preset and workspace."""
+    if approval_mode is not None and approval_mode not in APPROVAL_MODES:
+        raise ValidationError(
+            f"approval_mode must be one of {', '.join(APPROVAL_MODES)} (got {approval_mode!r})"
+        )
     preset = await validate_session_targets(
         db,
         provider=provider,
@@ -88,6 +99,7 @@ async def build_session(
         preset_id=preset_id,
         workspace_id=workspace_id,
         account_id=account_id,
+        approval_mode=approval_mode,
     )
     db.add(sess)
     return sess

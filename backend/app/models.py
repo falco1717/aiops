@@ -164,6 +164,10 @@ class Session(Base):
     # The provider CLI's own session identifier, used to resume.
     provider_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="idle")  # idle|running|error
+    # ask | auto | bypass — how tool permissions are handled for this session.
+    # Null means "use the instance default", so changing that default moves
+    # existing sessions with it.
+    approval_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     # Slash commands the CLI reported for this session at startup — the
     # authoritative list, better than anything we could hardcode.
@@ -178,6 +182,40 @@ class Session(Base):
     account: Mapped[ProviderAccount | None] = relationship(
         lazy="joined", foreign_keys=[account_id]
     )
+
+
+class Approval(Base):
+    """One tool call the agent paused on, waiting for a human answer.
+
+    The agent process blocks on this row's decision, so a pending approval is a
+    live conversation with a stopped subprocess, not a log entry. Rows are kept
+    after the fact because "who let it run `rm -rf`" is the first question asked
+    when something goes wrong.
+    """
+
+    __tablename__ = "approvals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(32))
+    # tool | exec | patch — what the agent wants to do, in provider terms.
+    kind: Mapped[str] = mapped_column(String(32), default="tool")
+    tool_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # A short human-readable rendering of the request (the command line, the
+    # file being written), so the UI does not have to understand every tool.
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # pending | allowed | denied | expired | cancelled
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    decided_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Run(Base):

@@ -54,6 +54,8 @@ class Provider:
     models: list[str] = []
     #: Values accepted by AgentPreset.permission_mode for this provider.
     permission_modes: list[str] = []
+    #: True when this adapter can pause and ask a human mid-run.
+    supports_interactive_approval: bool = False
 
     def build_run(
         self,
@@ -67,6 +69,8 @@ class Provider:
         extra_args: list[str],
         stream_partials: bool,
         account_env: dict[str, str] | None = None,
+        approval_mode: str = "ask",
+        approval_token: str | None = None,
     ) -> RunSpec:
         raise NotImplementedError
 

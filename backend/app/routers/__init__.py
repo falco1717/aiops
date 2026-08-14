@@ -1,5 +1,6 @@
 from . import (
     accounts,
+    approvals,
     auth,
     presets,
     providers,
@@ -14,6 +15,7 @@ from . import (
 
 __all__ = [
     "accounts",
+    "approvals",
     "auth",
     "presets",
     "providers",

@@ -14,12 +14,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
+from .approvals import reap_pending_approvals
 from .config import settings
 from .db import SessionLocal, init_db
 from .models import Run, Session, User
 from .migrate import run_migrations
 from .routers import (
     accounts,
+    approvals,
     auth,
     presets,
     providers,
@@ -92,6 +94,7 @@ async def lifespan(app: FastAPI):
     await run_migrations()
     await bootstrap_admin()
     await reap_orphaned_runs()
+    await reap_pending_approvals()
     await backfill_next_runs()
 
     task: asyncio.Task | None = None
@@ -133,9 +136,13 @@ for module in (
     sessions,
     runs,
     schedules,
+    approvals,
     ws,
 ):
     app.include_router(module.router)
+
+# Token-authenticated callback used by the in-container approval bridge.
+app.include_router(approvals.internal)
 
 
 @app.get("/api/health")

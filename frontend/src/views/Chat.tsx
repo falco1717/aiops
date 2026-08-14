@@ -2,7 +2,16 @@ import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, openSocket } from "../api";
-import type { Account, AgentEvent, Capability, Run, Session, WsMessage } from "../types";
+import type {
+  Account,
+  AgentEvent,
+  Approval,
+  ApprovalMode,
+  Capability,
+  Run,
+  Session,
+  WsMessage,
+} from "../types";
 
 type ChatEvent = Pick<
   AgentEvent,
@@ -70,6 +79,7 @@ export default function Chat({
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
 
   const navigate = useNavigate();
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -129,6 +139,20 @@ export default function Chat({
     api.accounts().then(setAccounts).catch(() => setAccounts([]));
   }, []);
 
+  // An agent is blocked on each of these, so they must survive a page reload —
+  // the websocket only announces new ones.
+  const loadApprovals = useCallback(async () => {
+    try {
+      setApprovals(await api.approvals({ session_id: sessionId, status: "pending" }));
+    } catch {
+      /* the transcript is still usable without them */
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    void loadApprovals();
+  }, [loadApprovals]);
+
   const accountName = (id: number | null) =>
     accounts.find((a) => a.id === id)?.name ?? "an account";
 
@@ -145,7 +169,10 @@ export default function Chat({
         setConnected(true);
         // Anything the agent emitted while the socket was down never arrived,
         // so pull the gap. Skipped on the first open — the initial load has it.
-        if (everConnected) void reload(true);
+        if (everConnected) {
+          void reload(true);
+          void loadApprovals();
+        }
         everConnected = true;
       };
       socket.onclose = () => {
@@ -181,6 +208,32 @@ export default function Chat({
               },
             ]);
           }
+        } else if (msg.type === "approval.requested") {
+          setApprovals((prev) =>
+            prev.some((a) => a.id === msg.approval_id)
+              ? prev
+              : [
+                  ...prev,
+                  {
+                    id: msg.approval_id,
+                    run_id: msg.run_id,
+                    session_id: msg.session_id,
+                    provider: msg.provider,
+                    kind: msg.kind,
+                    tool_name: msg.tool_name,
+                    summary: msg.summary,
+                    request: msg.request,
+                    status: "pending",
+                    decided_by_id: null,
+                    decided_at: null,
+                    note: null,
+                    created_at: new Date().toISOString(),
+                  },
+                ],
+          );
+        } else if (msg.type === "approval.resolved") {
+          // Someone answered — possibly in another tab, possibly it timed out.
+          setApprovals((prev) => prev.filter((a) => a.id !== msg.approval_id));
         } else if (msg.type === "run.started" || msg.type === "run.finished") {
           setLive((prev) => {
             const next = { ...prev };
@@ -199,7 +252,7 @@ export default function Chat({
       window.clearTimeout(retry);
       socket?.close();
     };
-  }, [sessionId, mergeEvents, reload, onChanged]);
+  }, [sessionId, mergeEvents, reload, loadApprovals, onChanged]);
 
   // Keep the newest output in view, unless the reader has scrolled up.
   useEffect(() => {
@@ -349,6 +402,25 @@ export default function Chat({
         <span className={`pill ${connected ? "ok" : "failed"}`}>
           {connected ? "live" : "reconnecting"}
         </span>
+        {session && !renaming && (
+          <select
+            className="approval-select"
+            value={session.approval_mode ?? "ask"}
+            title="How this session handles tool permissions"
+            onChange={async (e) => {
+              const approval_mode = e.target.value as ApprovalMode;
+              try {
+                setSession(await api.patchSession(sessionId, { approval_mode }));
+              } catch (err) {
+                setError(err instanceof Error ? err.message : String(err));
+              }
+            }}
+          >
+            <option value="ask">Ask me each time</option>
+            <option value="auto">Auto-approve edits</option>
+            <option value="bypass">Bypass all checks</option>
+          </select>
+        )}
         {activeRun && (
           <button className="danger" onClick={cancel}>
             Stop
@@ -426,6 +498,16 @@ export default function Chat({
           </div>
         ))}
       </div>
+
+      {/* The agent is stopped dead until one of these is answered, so they sit
+          between the transcript and the composer rather than inline. */}
+      {approvals.map((approval) => (
+        <ApprovalCard
+          key={approval.id}
+          approval={approval}
+          onDone={(id) => setApprovals((prev) => prev.filter((a) => a.id !== id))}
+        />
+      ))}
 
       <form className="chat-foot" onSubmit={send}>
         {pickerOpen && (
@@ -519,6 +601,75 @@ function SubagentGroup({ name, events }: { name: string; events: ChatEvent[] }) 
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * One blocked tool call, with the two buttons that unblock it.
+ *
+ * The agent process is genuinely parked on this — it is not a notification —
+ * so the card states what will run and stays until it is answered.
+ */
+function ApprovalCard({
+  approval,
+  onDone,
+}: {
+  approval: Approval;
+  onDone: (id: number) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showRaw, setShowRaw] = useState(false);
+
+  const answer = async (allowed: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.decideApproval(
+        approval.id,
+        allowed,
+        allowed ? null : "Denied by the AIOps operator.",
+      );
+      onDone(approval.id);
+    } catch (err) {
+      // A 409 means it was already answered elsewhere or the run ended, so the
+      // card is stale either way — show why, then clear it.
+      setError(err instanceof Error ? err.message : String(err));
+      window.setTimeout(() => onDone(approval.id), 2500);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const detail = approval.summary ?? approval.tool_name ?? "a tool call";
+
+  return (
+    <div className="approval">
+      <div className="approval-head">
+        <span className="pill warn">needs approval</span>
+        <strong>{approval.tool_name ?? approval.kind}</strong>
+        <span className="approval-provider">{approval.provider}</span>
+      </div>
+      <pre className="approval-detail">{detail}</pre>
+      {approval.request && Object.keys(approval.request).length > 0 && (
+        <>
+          <button type="button" className="linkish" onClick={() => setShowRaw((v) => !v)}>
+            {showRaw ? "Hide" : "Show"} full request
+          </button>
+          {showRaw && <pre className="approval-raw">{JSON.stringify(approval.request, null, 2)}</pre>}
+        </>
+      )}
+      {error && <div className="error-banner">{error}</div>}
+      <div className="row approval-actions">
+        <button className="primary" type="button" disabled={busy} onClick={() => answer(true)}>
+          Accept
+        </button>
+        <button className="danger" type="button" disabled={busy} onClick={() => answer(false)}>
+          Deny
+        </button>
+        <span className="approval-hint">The agent is waiting.</span>
+      </div>
     </div>
   );
 }

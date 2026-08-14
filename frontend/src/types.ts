@@ -56,12 +56,33 @@ export type Preset = {
   is_default: boolean;
 };
 
+/** A tool call the agent is parked on, waiting for a human answer. */
+export type Approval = {
+  id: number;
+  run_id: number;
+  session_id: string;
+  provider: string;
+  kind: string;
+  tool_name: string | null;
+  summary: string | null;
+  request: Record<string, unknown> | null;
+  status: "pending" | "allowed" | "denied" | "expired" | "cancelled";
+  decided_by_id: number | null;
+  decided_at: string | null;
+  note: string | null;
+  created_at: string;
+};
+
+/** ask = pause and let a human decide; auto = approve edits; bypass = no checks. */
+export type ApprovalMode = "ask" | "auto" | "bypass";
+
 export type Session = {
   id: string;
   title: string;
   provider: string;
   model: string | null;
   account_id: number | null;
+  approval_mode: ApprovalMode | null;
   preset_id: number | null;
   workspace_id: number | null;
   provider_session_id: string | null;
@@ -234,6 +255,25 @@ export type WsMessage =
       parent_tool_use_id?: string | null;
       agent_name?: string | null;
       seq?: number;
+    }
+  | {
+      type: "approval.requested";
+      session_id: string;
+      run_id: number;
+      approval_id: number;
+      provider: string;
+      kind: string;
+      tool_name: string | null;
+      summary: string | null;
+      request: Record<string, unknown> | null;
+    }
+  | {
+      type: "approval.resolved";
+      session_id: string;
+      run_id: number;
+      approval_id: number;
+      status: string;
+      note: string | null;
     }
   | {
       type: "run.finished";

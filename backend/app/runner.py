@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
 from .events import hub
@@ -167,6 +168,18 @@ class Runner:
                 os.makedirs(account.config_dir, exist_ok=True)
                 account_env = account.env()
 
+            approval_mode = sess.approval_mode or settings.default_approval_mode
+            # A scheduled run has nobody watching, so parking it on a question
+            # would just burn the approval timeout and fail. Unattended work
+            # runs at the session's non-interactive equivalent instead.
+            if approval_mode == "ask" and run.schedule_id is not None:
+                approval_mode = "auto"
+            token = (
+                run_tokens.issue(run.id, sess.id)
+                if approval_mode == "ask" and provider.supports_interactive_approval
+                else None
+            )
+
             spec = provider.build_run(
                 prompt=run.prompt,
                 model=sess.model or (preset.model if preset else None),
@@ -177,6 +190,8 @@ class Runner:
                 extra_args=(preset.extra_args if preset else []) or [],
                 stream_partials=settings.stream_partial_messages,
                 account_env=account_env,
+                approval_mode=approval_mode,
+                approval_token=token,
             )
 
             if spec.assigned_session_id and not sess.provider_session_id:
@@ -271,6 +286,11 @@ class Runner:
                     await stderr_task
                 self._procs.pop(run_id, None)
                 self._cancelled.discard(run_id)
+                # Nothing may stay parked on a run that is ending: the bridge
+                # dies with the agent, so a still-pending request would leave
+                # buttons in the UI answering a process nobody can reach.
+                run_tokens.revoke(run_id)
+                await broker.cancel_run(run_id)
 
         return status, exit_code, state, account, next_account
 

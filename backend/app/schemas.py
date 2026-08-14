@@ -104,6 +104,7 @@ class SessionIn(BaseModel):
     account_id: int | None = None
     preset_id: int | None = None
     workspace_id: int | None = None
+    approval_mode: str | None = None  # ask | auto | bypass
     prompt: str | None = None  # optional first turn
 
 
@@ -114,6 +115,7 @@ class SessionPatch(BaseModel):
     account_id: int | None = None
     preset_id: int | None = None
     workspace_id: int | None = None
+    approval_mode: str | None = None
 
 
 class SessionOut(ORM):
@@ -124,6 +126,7 @@ class SessionOut(ORM):
     account_id: int | None
     preset_id: int | None
     workspace_id: int | None
+    approval_mode: str | None
     provider_session_id: str | None
     status: str
     archived: bool
@@ -303,3 +306,25 @@ class UsageOut(BaseModel):
     windows: list[UsageWindow]
     by_account: list[dict]
     note: str
+
+
+# --- approvals ---------------------------------------------------------
+class ApprovalOut(ORM):
+    id: int
+    run_id: int
+    session_id: str
+    provider: str
+    kind: str
+    tool_name: str | None
+    summary: str | None
+    request: dict | None
+    status: str
+    decided_by_id: int | None
+    decided_at: datetime | None
+    note: str | None
+    created_at: datetime
+
+
+class ApprovalDecision(BaseModel):
+    allowed: bool
+    note: str | None = None

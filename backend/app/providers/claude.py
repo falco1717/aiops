@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import uuid
+from pathlib import Path
 from typing import Any
 
 from ..config import settings
 from .base import NormalizedEvent, Provider, RunSpec
+
+#: Key this server is registered under in --mcp-config; the permission tool is
+#: then addressed as mcp__<name>__ask.
+MCP_SERVER_NAME = "aiops"
+BRIDGE_SCRIPT = Path(__file__).resolve().parent.parent / "bridge" / "mcp_approver.py"
 
 
 class ClaudeProvider(Provider):
@@ -20,14 +27,26 @@ class ClaudeProvider(Provider):
 
     name = "claude"
     models = ["opus", "sonnet", "haiku", "fable"]
+    # Exactly what this CLI build accepts. Note there is no "default" — passing
+    # it is an error, even though the CLI *reports* permissionMode "default"
+    # when given "manual".
     permission_modes = [
-        "default",
+        "manual",
         "acceptEdits",
         "plan",
         "auto",
         "dontAsk",
         "bypassPermissions",
     ]
+    supports_interactive_approval = True
+
+    #: Permission mode implied by each AIOps approval mode, when a preset has
+    #: not pinned one explicitly.
+    APPROVAL_MODES = {
+        "ask": "manual",
+        "auto": "acceptEdits",
+        "bypass": "bypassPermissions",
+    }
 
     def build_run(
         self,
@@ -41,6 +60,8 @@ class ClaudeProvider(Provider):
         extra_args: list[str],
         stream_partials: bool,
         account_env: dict[str, str] | None = None,
+        approval_mode: str = "ask",
+        approval_token: str | None = None,
     ) -> RunSpec:
         argv = [
             settings.claude_bin,
@@ -66,15 +87,44 @@ class ClaudeProvider(Provider):
 
         if model:
             argv += ["--model", model]
-        if permission_mode:
-            argv += ["--permission-mode", permission_mode]
+
+        # A preset that pins a permission mode wins; otherwise the session's
+        # approval mode chooses one.
+        mode = permission_mode or self.APPROVAL_MODES.get(approval_mode, "manual")
+        argv += ["--permission-mode", mode]
+
+        env = dict(account_env or {})
+        if approval_mode == "ask" and approval_token:
+            # Without a prompt tool the CLI does not pause on a permission
+            # decision — it refuses the call, notes it in `permission_denials`
+            # and finishes. Pointing it at our MCP bridge is what turns that
+            # refusal into a question a human can answer.
+            argv += [
+                "--mcp-config",
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            MCP_SERVER_NAME: {
+                                "command": sys.executable,
+                                "args": [str(BRIDGE_SCRIPT)],
+                            }
+                        }
+                    }
+                ),
+                "--permission-prompt-tool",
+                f"mcp__{MCP_SERVER_NAME}__ask",
+            ]
+            env["AIOPS_APPROVAL_TOKEN"] = approval_token
+            env["AIOPS_INTERNAL_URL"] = settings.internal_api_url
+            env["AIOPS_PROVIDER"] = self.name
+
         if allowed_tools:
             argv += ["--allowedTools", allowed_tools]
         if system_prompt:
             argv += ["--append-system-prompt", system_prompt]
         argv += self.split_args(extra_args)
 
-        return RunSpec(argv=argv, env=dict(account_env or {}), assigned_session_id=assigned)
+        return RunSpec(argv=argv, env=env, assigned_session_id=assigned)
 
     def parse_line(self, line: str) -> NormalizedEvent | None:
         try:

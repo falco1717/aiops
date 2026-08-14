@@ -1,6 +1,7 @@
 import type {
   Account,
   AgentEvent,
+  Approval,
   Capability,
   LoginFlow,
   Preset,
@@ -142,6 +143,7 @@ export const api = {
     account_id?: number | null;
     preset_id?: number | null;
     workspace_id?: number | null;
+    approval_mode?: string | null;
     prompt?: string;
   }) => request<Session>("/api/sessions", { method: "POST", body: body(data) }),
   session: (id: string) => request<Session>(`/api/sessions/${id}`),
@@ -159,6 +161,19 @@ export const api = {
   prompt: (id: string, prompt: string) =>
     request<Run>(`/api/sessions/${id}/prompt`, { method: "POST", body: body({ prompt }) }),
   events: (id: string) => request<AgentEvent[]>(`/api/sessions/${id}/events`),
+
+  // approvals — an agent is parked waiting on each pending one
+  approvals: (params: { session_id?: string; status?: string } = {}) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v) as [string, string][],
+    ).toString();
+    return request<Approval[]>(`/api/approvals${query ? `?${query}` : ""}`);
+  },
+  decideApproval: (id: number, allowed: boolean, note?: string | null) =>
+    request<Approval>(`/api/approvals/${id}/decide`, {
+      method: "POST",
+      body: body({ allowed, note: note ?? null }),
+    }),
   eventRaw: (sessionId: string, eventId: number) =>
     request<{ raw: unknown }>(`/api/sessions/${sessionId}/events/${eventId}/raw`),
 

@@ -19,6 +19,7 @@ from ..schemas import (
 from ..runner import runner
 from ..security import current_user
 from ..services import (
+    APPROVAL_MODES,
     ValidationError,
     build_session,
     queue_run,
@@ -67,6 +68,7 @@ async def create_session(
             preset_id=payload.preset_id,
             workspace_id=payload.workspace_id,
             account_id=payload.account_id,
+            approval_mode=payload.approval_mode,
             user=user,
         )
         await db.commit()
@@ -111,6 +113,13 @@ async def patch_session(
         )
     except ValidationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    mode = data.get("approval_mode")
+    if mode is not None and mode not in APPROVAL_MODES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"approval_mode must be one of {', '.join(APPROVAL_MODES)} (got {mode!r})",
+        )
 
     for key, value in data.items():
         setattr(sess, key, value)

@@ -22,6 +22,15 @@ class CodexProvider(Provider):
     models = ["gpt-5.6-terra", "gpt-5.6", "gpt-5.6-codex", "gpt-5-codex"]
     permission_modes = ["read-only", "workspace-write", "danger-full-access"]
 
+    #: Sandbox tier used when a preset has not pinned one. "ask" maps to the
+    #: same tier as "auto" because this adapter cannot pause for a human — the
+    #: app-server adapter handles that mode.
+    SANDBOX_MODES = {
+        "ask": "workspace-write",
+        "auto": "workspace-write",
+        "bypass": "danger-full-access",
+    }
+
     def build_run(
         self,
         *,
@@ -34,6 +43,8 @@ class CodexProvider(Provider):
         extra_args: list[str],
         stream_partials: bool,
         account_env: dict[str, str] | None = None,
+        approval_mode: str = "ask",
+        approval_token: str | None = None,
     ) -> RunSpec:
         argv = [settings.codex_bin, "exec"]
         if provider_session_id:
@@ -42,10 +53,12 @@ class CodexProvider(Provider):
 
         if model:
             argv += ["--model", model]
-        # `codex exec` is already non-interactive, so there is no approval flag
-        # here — the interactive `codex` command has --ask-for-approval, but
-        # passing it to `exec` is rejected outright.
-        argv += ["--sandbox", permission_mode or "workspace-write"]
+        # `codex exec` cannot ask a human anything: --ask-for-approval is
+        # rejected here (it belongs to the interactive command) and forcing
+        # `-c approval_policy=...` still reports "approval: never". Interactive
+        # approvals therefore go through the app-server adapter instead; this
+        # path only ever runs unattended, so all it picks is a sandbox tier.
+        argv += ["--sandbox", permission_mode or self.SANDBOX_MODES.get(approval_mode, "workspace-write")]
         # Codex refuses to run outside a git repository unless told otherwise.
         # AIOps workspaces are operator-chosen directories that often are not
         # repos, so without this every run in one would fail before starting.
