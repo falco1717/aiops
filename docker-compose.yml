@@ -141,8 +141,16 @@ volumes:
 
 networks:
   # Private network for app <-> database. Postgres is never on the proxy net.
+  #
+  # Overridable, and it matters: a fixed name is not scoped by the compose
+  # project, so a second stack brought up from this file — a throwaway copy for
+  # testing, say — joins the *running* one's network. Both databases then answer
+  # to the alias `db` and connections round-robin between them, so a test writes
+  # into production roughly half the time. That has happened here. Set
+  # AIOPS_INTERNAL_NETWORK to something else for any stack that is not the
+  # real one.
   internal:
-    name: aiops_internal
+    name: ${AIOPS_INTERNAL_NETWORK:-aiops_internal}
   # The existing Traefik network, created outside this stack.
   proxy:
     external: true

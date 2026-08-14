@@ -21,6 +21,11 @@ export default function Sessions({ me }: { me: User }) {
   const load = useCallback(async () => {
     try {
       setSessions(await api.sessions());
+      // This polls every 8 seconds, so without clearing it one momentary
+      // failure — the app being redeployed under an open tab, a dropped
+      // connection — latched forever and surfaced later as if whatever the
+      // operator did next had failed.
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -81,6 +86,10 @@ export default function Sessions({ me }: { me: User }) {
               ))}
             </select>
           </div>
+          {/* Beside the list it belongs to, so a poll that starts failing says
+              so at the time. Tucked in the empty pane it was invisible while a
+              chat was open, then appeared on the way back out. */}
+          {error && <div className="error-banner session-error">{error}</div>}
           {groups.length === 0 && <div className="empty">Nothing here yet.</div>}
           {groups.map(([key, items]) => (
             <div key={key}>
@@ -124,9 +133,7 @@ export default function Sessions({ me }: { me: User }) {
         ) : sessionId ? (
           <Chat key={sessionId} sessionId={sessionId} me={me} onChanged={load} />
         ) : (
-          <div className="empty">
-            {error ? <div className="error-banner">{error}</div> : "Select a session, or create one."}
-          </div>
+          <div className="empty">Select a session, or create one.</div>
         )}
       </div>
     </div>
