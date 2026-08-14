@@ -150,6 +150,18 @@ async def _backfill_owners() -> None:
                     label,
                     admin.username,
                 )
+        # A grant to the owner is meaningless — they already have every right —
+        # but rows predating ownership can hold one, and it surfaces as a system
+        # "shared with" its own owner that the UI offers no way to switch off,
+        # because it never lists you against your own systems.
+        result = await db.execute(
+            text(
+                "DELETE FROM target_access WHERE user_id IN "
+                "(SELECT owner_id FROM targets WHERE targets.id = target_access.target_id)"
+            )
+        )
+        if result.rowcount:
+            log.info("migration: dropped %d self-grant(s) on stored systems", result.rowcount)
         await db.commit()
 
 

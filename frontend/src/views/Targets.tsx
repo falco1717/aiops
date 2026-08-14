@@ -88,7 +88,9 @@ export default function Targets({ me }: { me: User }) {
     setEditingId(t.id);
     setKeyFile(null);
     setKeyError(null);
-    setGrantDraft(t.grants);
+    // A grant to the owner is a no-op the sharing list cannot show, since it
+    // never lists you against your own system. Drop it rather than carry it.
+    setGrantDraft(t.grants.filter((g) => g.user_id !== t.owner_id));
     setDraft({
       ...EMPTY,
       name: t.name,
@@ -411,8 +413,9 @@ function validateKey(text: string): string | null {
 
 /** "Only you" / "Shared with alice, bob" — the owner's view of who else is in. */
 function sharedWithLabel(t: Target, users: UserSummary[]): string {
-  if (t.grants.length === 0) return "Only you can see this";
-  const names = t.grants
+  const shared = t.grants.filter((g) => g.user_id !== t.owner_id);
+  if (shared.length === 0) return "Only you can see this";
+  const names = shared
     .map((g) => users.find((u) => u.id === g.user_id)?.username ?? `user ${g.user_id}`)
     .sort();
   return `Shared with ${names.slice(0, 4).join(", ")}${names.length > 4 ? ` and ${names.length - 4} more` : ""}`;
