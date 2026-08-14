@@ -168,6 +168,12 @@ class Session(Base):
     # Null means "use the instance default", so changing that default moves
     # existing sessions with it.
     approval_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Whose session this is. Stored credentials are private to their owner, so
+    # the runner needs to know on whose behalf a turn runs before it decides
+    # which systems to make reachable from it.
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     # Slash commands the CLI reported for this session at startup — the
     # authoritative list, better than anything we could hardcode.
@@ -249,6 +255,12 @@ class Target(Base):
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    # Who controls it. Deleting this user is refused unless the target is first
+    # handed to someone with manage rights, so a credential can never end up
+    # owned by nobody and visible to no one.
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     grants: Mapped[list[TargetAccess]] = relationship(
         cascade="all, delete-orphan", lazy="selectin"
@@ -256,13 +268,23 @@ class Target(Base):
 
 
 class TargetAccess(Base):
-    """Which users may reach a target. No rows means everyone, matching accounts."""
+    """Who may reach a target besides its owner.
+
+    Unlike provider accounts, an empty grant list here means *nobody* but the
+    owner — a stored credential is private by default, and administrators get
+    no implicit access to one they were not given.
+    """
 
     __tablename__ = "target_access"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     target_id: Mapped[int] = mapped_column(ForeignKey("targets.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # use: agents in this user's sessions may connect through it.
+    # manage: additionally edit it, replace the credential, and grant others.
+    level: Mapped[str] = mapped_column(String(16), default="use")
+
+    __table_args__ = (UniqueConstraint("target_id", "user_id", name="uq_target_user"),)
 
 
 class Approval(Base):

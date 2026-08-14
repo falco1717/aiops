@@ -112,31 +112,117 @@ with TestClient(app) as c:
     check("a duplicate name is refused rather than shadowing the first",
           r.status_code == 409, str(r.status_code))
 
-    # Non-admins may see systems but must not manage them.
+    # --- privacy: a stored credential belongs to whoever stored it ---------
     c.post("/api/users", json={
-        "username": "plain", "password": "plainpassword1", "is_admin": False,
+        "username": "walt", "password": "waltpassword1", "is_admin": False,
         "must_change_password": False,
     })
-    c.post("/api/auth/logout")
-    c.post("/api/auth/login", json={"username": "plain", "password": "plainpassword1"})
-    r = c.post("/api/targets", json={
-        "name": "Sneaky", "hostname": "h", "username": "u", "auth_type": "key",
+    c.post("/api/users", json={
+        "username": "otheradmin", "password": "adminpassword1", "is_admin": True,
+        "must_change_password": False,
     })
-    check("a non-admin cannot add a system", r.status_code == 403, str(r.status_code))
-    r = c.delete(f"/api/targets/{target_id}")
-    check("a non-admin cannot delete one", r.status_code == 403, str(r.status_code))
+    users = {u["username"]: u["id"] for u in c.get("/api/users").json()}
+
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "walt", "password": "waltpassword1"})
+
     r = c.get("/api/targets")
-    check("a non-admin can still see what exists", r.status_code == 200, str(r.status_code))
-    check("and still gets no key material",
+    check("someone else's system is invisible, not merely locked",
+          r.status_code == 200 and r.json() == [], r.text[:200])
+    r = c.patch(f"/api/targets/{target_id}", json={"port": 99})
+    check("and cannot be edited — 404, which does not confirm it exists",
+          r.status_code == 404, str(r.status_code))
+
+    r = c.post("/api/targets", json={
+        "name": "Walt Box", "hostname": "10.0.0.9", "username": "walt",
+        "auth_type": "key", "private_key": PRIVATE_KEY,
+    })
+    check("a non-admin can store their own system", r.status_code == 201,
+          f"{r.status_code} {r.text[:200]}")
+    walt_target = r.json()["id"] if r.status_code == 201 else None
+    check("and owns what they created", r.status_code == 201 and r.json()["my_level"] == "owner")
+
+    # The property Jordan asked for.
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "otheradmin", "password": "adminpassword1"})
+    r = c.get("/api/targets")
+    check("an admin does NOT see a system somebody else stored",
+          r.status_code == 200 and all(t["id"] != walt_target for t in r.json()),
+          r.text[:300])
+    r = c.get("/api/targets")
+    check("no key material leaks to an admin either",
           "BEGIN" not in r.text and KEY_CHUNK not in r.text)
+    r = c.delete(f"/api/targets/{walt_target}")
+    check("an admin cannot delete a system they were not given",
+          r.status_code == 404, str(r.status_code))
+
+    # Sharing, and what each level permits.
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "walt", "password": "waltpassword1"})
+    r = c.patch(f"/api/targets/{walt_target}",
+                json={"grants": [{"user_id": users["admin"], "level": "use"}]})
+    check("the owner can share it", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
 
     c.post("/api/auth/logout")
     c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
-    r = c.delete(f"/api/targets/{target_id}")
-    check("deleting a system succeeds", r.status_code == 204, str(r.status_code))
     r = c.get("/api/targets")
-    check("and it is gone", r.status_code == 200 and r.json() == [], r.text[:120])
+    shared = [t for t in r.json() if t["id"] == walt_target]
+    check("a shared system appears for the grantee", len(shared) == 1)
+    check("with the level it was granted at", shared and shared[0]["my_level"] == "use")
+    r = c.patch(f"/api/targets/{walt_target}", json={"port": 2200})
+    check("but 'use' cannot change it", r.status_code == 403, str(r.status_code))
+    r = c.delete(f"/api/targets/{walt_target}")
+    check("and 'use' cannot delete it", r.status_code == 403, str(r.status_code))
 
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "walt", "password": "waltpassword1"})
+    c.patch(f"/api/targets/{walt_target}",
+            json={"grants": [{"user_id": users["admin"], "level": "manage"}]})
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
+    r = c.patch(f"/api/targets/{walt_target}", json={"port": 2200})
+    check("'manage' can change it", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
+    r = c.patch(f"/api/targets/{walt_target}", json={"owner_id": users["admin"]})
+    check("but only the owner can hand it over", r.status_code == 403, str(r.status_code))
+
+    # Offboarding: ownership passes to a manager rather than stranding a system.
+    r = c.delete(f"/api/users/{users['walt']}")
+    check("deleting the owner succeeds when a manager can inherit",
+          r.status_code == 204, f"{r.status_code} {r.text[:200]}")
+    r = c.get("/api/targets")
+    inherited = [t for t in r.json() if t["id"] == walt_target]
+    check("and the system is now owned by that manager",
+          len(inherited) == 1 and inherited[0]["my_level"] == "owner",
+          str(inherited[:1])[:200])
+
+    # With nobody able to inherit, the delete must be refused, not orphan it.
+    c.post("/api/users", json={
+        "username": "lone", "password": "lonepassword1", "is_admin": False,
+        "must_change_password": False,
+    })
+    lone_id = {u["username"]: u["id"] for u in c.get("/api/users").json()}["lone"]
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "lone", "password": "lonepassword1"})
+    c.post("/api/targets", json={
+        "name": "Lone Box", "hostname": "10.0.0.10", "username": "lone",
+        "auth_type": "key", "private_key": PRIVATE_KEY,
+    })
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
+    r = c.delete(f"/api/users/{lone_id}")
+    check("deleting a user who owns an unmanageable system is refused",
+          r.status_code == 409, str(r.status_code))
+    check("and the refusal names what is in the way",
+          "Lone Box" in r.text, r.text[:200])
+    r = c.get("/api/users")
+    check("so the user still exists",
+          any(u["id"] == lone_id for u in r.json()))
+
+    r = c.get("/api/users/directory")
+    check("anyone can look up who to share with", r.status_code == 200, str(r.status_code))
+    check("the directory exposes usernames and nothing more",
+          r.status_code == 200 and set(r.json()[0]) == {"id", "username"},
+          str(r.json()[:1])[:160])
 
 # --- what actually lands on disk for a run ---------------------------------
 from app.crypto import decrypt, encrypt  # noqa: E402
@@ -149,7 +235,7 @@ check("a stored secret is not readable without decrypting it",
 sample = Target(
     id=1, name="Example Box", slug="example-box", hostname="203.0.113.20", port=22,
     username="alice", auth_type="key", private_key_enc=encrypt(PRIVATE_KEY),
-    host_key_policy="accept-new", grants=[],
+    host_key_policy="accept-new", grants=[], owner_id=1,
 )
 ctx = ssh_targets.prepare([sample])
 check("a run gets an ssh config for the stored systems", ctx is not None)

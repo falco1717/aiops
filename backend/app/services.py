@@ -101,6 +101,7 @@ async def build_session(
         workspace_id=workspace_id,
         account_id=account_id,
         approval_mode=approval_mode,
+        owner_id=user.id if user else None,
     )
     db.add(sess)
     return sess

@@ -1,7 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { Target, User } from "../types";
+import type { Target, TargetGrant, User, UserSummary } from "../types";
 
 const EMPTY = {
   name: "",
@@ -28,7 +28,9 @@ type Draft = typeof EMPTY;
  */
 export default function Targets({ me }: { me: User }) {
   const [items, setItems] = useState<Target[]>([]);
-  const [users, setUsers] = useState<User[]>([]);
+  const [users, setUsers] = useState<UserSummary[]>([]);
+  // Who this system is being shared with, edited alongside the rest of the form.
+  const [grants, setGrantDraft] = useState<TargetGrant[]>([]);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,12 +62,12 @@ export default function Targets({ me }: { me: User }) {
   const load = useCallback(async () => {
     try {
       setItems(await api.targets());
-      if (me.is_admin) setUsers(await api.users().catch(() => []));
+      setUsers(await api.userDirectory().catch(() => []));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [me.is_admin]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -79,12 +81,14 @@ export default function Targets({ me }: { me: User }) {
     setEditingId(null);
     setKeyFile(null);
     setKeyError(null);
+    setGrantDraft([]);
   };
 
   const edit = (t: Target) => {
     setEditingId(t.id);
     setKeyFile(null);
     setKeyError(null);
+    setGrantDraft(t.grants);
     setDraft({
       ...EMPTY,
       name: t.name,
@@ -109,6 +113,7 @@ export default function Targets({ me }: { me: User }) {
       description: draft.description || null,
       auth_type: draft.auth_type,
       host_key_policy: draft.host_key_policy,
+      grants,
     };
     // Only send a secret the operator actually typed. An empty box on an edit
     // means "keep what is stored", not "clear it".
@@ -140,17 +145,13 @@ export default function Targets({ me }: { me: User }) {
     }
   };
 
-  const setGrants = async (t: Target, userId: number, granted: boolean) => {
-    const next = granted
-      ? [...t.allowed_user_ids, userId]
-      : t.allowed_user_ids.filter((id) => id !== userId);
-    try {
-      await api.updateTarget(t.id, { allowed_user_ids: next });
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
+  const setGrant = (userId: number, level: "" | "use" | "manage") =>
+    setGrantDraft((prev) => {
+      const rest = prev.filter((g) => g.user_id !== userId);
+      return level ? [...rest, { user_id: userId, level }] : rest;
+    });
+
+  const levelOf = (userId: number) => grants.find((g) => g.user_id === userId)?.level ?? "";
 
   return (
     <div className="main">
@@ -163,8 +164,7 @@ export default function Targets({ me }: { me: User }) {
       </p>
       {error && <div className="error-banner">{error}</div>}
 
-      {me.is_admin && (
-        <form className="card" onSubmit={submit}>
+      <form className="card" onSubmit={submit}>
           <div className="grid-2">
             <label>
               <span>Name</span>
@@ -300,6 +300,35 @@ export default function Targets({ me }: { me: User }) {
             />
           </label>
 
+          <fieldset className="sharing">
+            <legend>Who else can reach it</legend>
+            <p className="hint">
+              This system is yours. Nobody else sees it — administrators included — until
+              you name them here. <strong>Use</strong> lets their agents connect through it;
+              <strong> manage</strong> also lets them edit it, replace the credential and
+              share it onward.
+            </p>
+            {users.filter((u) => u.id !== me.id).length === 0 ? (
+              <p className="hint">There is nobody else to share with yet.</p>
+            ) : (
+              users
+                .filter((u) => u.id !== me.id)
+                .map((u) => (
+                  <label key={u.id} className="row share-row">
+                    <span style={{ margin: 0, flex: 1 }}>{u.username}</span>
+                    <select
+                      value={levelOf(u.id)}
+                      onChange={(e) => setGrant(u.id, e.target.value as "" | "use" | "manage")}
+                    >
+                      <option value="">No access</option>
+                      <option value="use">Can use</option>
+                      <option value="manage">Can manage</option>
+                    </select>
+                  </label>
+                ))
+            )}
+          </fieldset>
+
           <div className="row">
             <button className="primary" type="submit" disabled={busy || !draft.name.trim()}>
               {editingId ? "Save changes" : "Add system"}
@@ -314,10 +343,7 @@ export default function Targets({ me }: { me: User }) {
       )}
 
       {items.length === 0 ? (
-        <div className="empty">
-          No systems yet.{" "}
-          {me.is_admin ? "Add one above." : "An administrator can add them."}
-        </div>
+        <div className="empty">No systems yet. Add one above.</div>
       ) : (
         items.map((t) => (
           <div className="card" key={t.id}>
@@ -325,7 +351,7 @@ export default function Targets({ me }: { me: User }) {
               <h2 style={{ margin: 0, flex: 1 }}>{t.name}</h2>
               <code className="pill">ssh {t.slug}</code>
               <span className="pill">{t.auth_type}</span>
-              {!t.usable_by_me && <span className="pill cancelled">no access</span>}
+              {t.my_level !== "owner" && <span className="pill">{t.my_level}</span>}
             </div>
             <div style={{ color: "var(--text-dim)", fontSize: 13, margin: "6px 0 10px" }}>
               {t.username}@{t.hostname}:{t.port}
@@ -342,41 +368,21 @@ export default function Targets({ me }: { me: User }) {
               )}
             </div>
 
-            {me.is_admin && (
-              <>
-                <div className="row" style={{ marginTop: 12 }}>
-                  <button onClick={() => edit(t)}>Edit</button>
+            <div className="row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+              <span className="hint" style={{ flex: 1 }}>
+                {t.owner_id === me.id
+                  ? sharedWithLabel(t, users)
+                  : `Shared with you by ${users.find((u) => u.id === t.owner_id)?.username ?? "another user"}`}
+              </span>
+              {t.my_level !== "use" && (
+                <>
+                  <button onClick={() => edit(t)}>Edit &amp; sharing</button>
                   <button className="danger" onClick={() => remove(t)}>
                     Delete
                   </button>
-                </div>
-                {users.length > 0 && (
-                  <details style={{ marginTop: 10 }}>
-                    <summary>
-                      Who can use it —{" "}
-                      {t.allowed_user_ids.length === 0
-                        ? "everyone"
-                        : `${t.allowed_user_ids.length} user(s)`}
-                    </summary>
-                    <p className="hint" style={{ margin: "8px 0" }}>
-                      With nobody selected this system is open to every AIOps user. Selecting
-                      anyone restricts it to them and to administrators.
-                    </p>
-                    {users.map((u) => (
-                      <label key={u.id} className="row" style={{ gap: 8, margin: "4px 0" }}>
-                        <input
-                          type="checkbox"
-                          style={{ width: 16 }}
-                          checked={t.allowed_user_ids.includes(u.id)}
-                          onChange={(e) => setGrants(t, u.id, e.target.checked)}
-                        />
-                        <span style={{ margin: 0 }}>{u.username}</span>
-                      </label>
-                    ))}
-                  </details>
-                )}
-              </>
-            )}
+                </>
+              )}
+            </div>
           </div>
         ))
       )}
@@ -402,6 +408,15 @@ function validateKey(text: string): string | null {
     return "This key is passphrase-protected — enter the passphrase below or it cannot be used.";
   }
   return null;
+}
+
+/** "Only you" / "Shared with alice, bob" — the owner's view of who else is in. */
+function sharedWithLabel(t: Target, users: UserSummary[]): string {
+  if (t.grants.length === 0) return "Only you can see this";
+  const names = t.grants
+    .map((g) => users.find((u) => u.id === g.user_id)?.username ?? `user ${g.user_id}`)
+    .sort();
+  return `Shared with ${names.slice(0, 4).join(", ")}${names.length > 4 ? ` and ${names.length - 4} more` : ""}`;
 }
 
 function credentialStored(t: Target): boolean {

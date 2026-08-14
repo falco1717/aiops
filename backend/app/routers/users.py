@@ -5,9 +5,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..models import User
-from ..schemas import UserCreate, UserOut, UserPasswordReset, UserPatch
-from ..security import current_admin, hash_password
+from ..models import Target, User
+from ..schemas import UserCreate, UserOut, UserPasswordReset, UserPatch, UserSummary
+from ..security import current_admin, current_user, hash_password
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -19,6 +19,19 @@ async def _admin_count(db: AsyncSession) -> int:
 @router.get("", response_model=list[UserOut])
 async def list_users(_: User = Depends(current_admin), db: AsyncSession = Depends(get_db)):
     return list(await db.scalars(select(User).order_by(User.id)))
+
+
+@router.get("/directory", response_model=list[UserSummary])
+async def directory(_: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Names to share things with, for anyone signed in.
+
+    Sharing is not an admin action — whoever stores a system decides who else
+    may reach it — so it cannot depend on the admin-only listing above. This
+    exposes usernames and nothing else: no roles, no timestamps, no password
+    state.
+    """
+    rows = await db.scalars(select(User).order_by(User.username))
+    return [UserSummary(id=u.id, username=u.username) for u in rows]
 
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -102,5 +115,33 @@ async def delete_user(
         raise HTTPException(status.HTTP_409_CONFLICT, "You cannot delete your own account")
     if user.is_admin and await _admin_count(db) <= 1:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot delete the only admin")
+    await _hand_on_systems(db, user)
     await db.delete(user)
     await db.commit()
+
+
+async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:
+    """Pass this user's stored systems to someone who can manage them.
+
+    Admins get no implicit access to a stored credential, so a system left
+    without an owner would be reachable by nobody and removable by nobody. The
+    delete is refused rather than orphaning one — and refusing is also what
+    stops deleting a user becoming a way to inherit their credentials.
+    """
+    owned = list(await db.scalars(select(Target).where(Target.owner_id == leaving.id)))
+    stranded: list[str] = []
+    for target in owned:
+        heir = next((g for g in target.grants if g.level == "manage"), None)
+        if heir is None:
+            stranded.append(target.name)
+            continue
+        target.owner_id = heir.user_id
+        await db.delete(heir)
+    if stranded:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{leaving.username} owns {len(stranded)} system(s) nobody else can manage: "
+            f"{', '.join(sorted(stranded)[:5])}"
+            + (" …" if len(stranded) > 5 else "")
+            + ". Give someone manage access, or delete them, before removing this user.",
+        )

@@ -14,7 +14,7 @@ from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
 from .events import hub
-from .models import Attachment, Event, ProviderAccount, Run, Session
+from .models import Attachment, Event, ProviderAccount, Run, Session, User
 from . import attachments, ssh_targets
 from .providers import get_provider
 from .providers.base import NormalizedEvent
@@ -240,7 +240,11 @@ class Runner:
             # into a private per-run directory and removed in the finally
             # below, so `ssh <name>` works for this turn and nothing is left
             # on disk afterwards.
-            targets = await ssh_targets.visible_targets(db, None)
+            # Scoped to whoever owns the session: stored credentials belong to
+            # the person who saved them, so a turn only reaches systems that
+            # person may reach.
+            owner = await db.get(User, sess.owner_id) if sess.owner_id else None
+            targets = await ssh_targets.visible_targets(db, owner)
             ssh_ctx = ssh_targets.prepare(targets)
             target_note = ssh_targets.describe(
                 [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names]

@@ -24,6 +24,13 @@ COLUMNS: dict[str, dict[str, str]] = {
         "account_id": "INTEGER",
         "available_commands": "JSON",
         "approval_mode": "VARCHAR(32)",
+        "owner_id": "INTEGER",
+    },
+    "targets": {
+        "owner_id": "INTEGER",
+    },
+    "target_access": {
+        "level": "VARCHAR(16) NOT NULL DEFAULT 'use'",
     },
     "provider_accounts": {
         "limit_status": "VARCHAR(32)",
@@ -77,6 +84,7 @@ async def run_migrations() -> None:
 
     await _ensure_an_admin_exists()
     await _adopt_existing_logins()
+    await _backfill_owners()
 
 
 # Where each CLI keeps credentials when no per-account directory is set. An
@@ -111,6 +119,37 @@ async def _adopt_existing_logins() -> None:
                 )
             )
             log.info("migration: adopted existing %s login at %s", provider, path)
+        await db.commit()
+
+
+async def _backfill_owners() -> None:
+    """Give pre-ownership rows an owner.
+
+    Sessions and stored systems used to be visible to everyone, so nothing
+    recorded who made them. Anything without an owner would be invisible to
+    every user once visibility starts depending on one, so it is assigned to
+    an administrator, who can hand it on. This is logged loudly because it is
+    a visibility change to existing data, not a schema detail.
+    """
+    async with SessionLocal() as db:
+        admin = await db.scalar(
+            select(User).where(User.is_admin.is_(True)).order_by(User.id).limit(1)
+        )
+        if admin is None:
+            return
+        for table, label in (("sessions", "session"), ("targets", "stored system")):
+            result = await db.execute(
+                text(f"UPDATE {table} SET owner_id = :owner WHERE owner_id IS NULL"),
+                {"owner": admin.id},
+            )
+            if result.rowcount:
+                log.warning(
+                    "migration: %d %s(s) had no owner and are now owned by %r. "
+                    "They are no longer visible to other users until shared.",
+                    result.rowcount,
+                    label,
+                    admin.username,
+                )
         await db.commit()
 
 

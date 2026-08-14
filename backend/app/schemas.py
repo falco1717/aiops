@@ -24,6 +24,13 @@ class UserOut(ORM):
     last_login_at: datetime | None
 
 
+class UserSummary(BaseModel):
+    """The least that lets one user share something with another."""
+
+    id: int
+    username: str
+
+
 class PasswordChangeIn(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8)
@@ -364,6 +371,11 @@ class ApprovalDecision(BaseModel):
 
 
 # --- targets (systems an agent can reach) ------------------------------
+class TargetGrant(BaseModel):
+    user_id: int
+    level: str = "use"  # use | manage
+
+
 class TargetIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     hostname: str = Field(min_length=1, max_length=255)
@@ -377,7 +389,7 @@ class TargetIn(BaseModel):
     password: str | None = None
     host_key_policy: str = "accept-new"
     known_host_key: str | None = None
-    allowed_user_ids: list[int] | None = None
+    grants: list[TargetGrant] | None = None
 
 
 class TargetPatch(BaseModel):
@@ -392,7 +404,8 @@ class TargetPatch(BaseModel):
     password: str | None = None
     host_key_policy: str | None = None
     known_host_key: str | None = None
-    allowed_user_ids: list[int] | None = None
+    grants: list[TargetGrant] | None = None
+    owner_id: int | None = None
 
 
 class TargetOut(BaseModel):
@@ -411,6 +424,8 @@ class TargetOut(BaseModel):
     has_password: bool
     host_key_policy: str
     has_known_host_key: bool
-    allowed_user_ids: list[int]
-    usable_by_me: bool
+    owner_id: int | None
+    grants: list[TargetGrant]
+    #: owner | manage | use — what the caller may do with it.
+    my_level: str
     created_at: datetime

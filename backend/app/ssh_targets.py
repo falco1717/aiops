@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .crypto import SecretUnavailable, decrypt
 from .models import Target, User
+from .access import level_for
 
 log = logging.getLogger("aiops.ssh")
 
@@ -46,11 +47,17 @@ def _write_private(path: str, content: str) -> None:
 
 
 async def visible_targets(db: AsyncSession, user: User | None) -> list[Target]:
-    """Targets this user may reach. Ungranted targets are open to everyone."""
+    """Systems this user may reach.
+
+    A session with no owner gets none: credentials are private to the person
+    who stored them, so an unattributable run must not inherit anybody's. That
+    is deliberately stricter than failing open, which would hand every stored
+    system to any turn whose owner had been deleted.
+    """
+    if user is None:
+        return []
     rows = list(await db.scalars(select(Target).order_by(Target.name)))
-    if user is None or user.is_admin:
-        return rows
-    return [t for t in rows if not t.grants or any(g.user_id == user.id for g in t.grants)]
+    return [t for t in rows if level_for(t, user) is not None]
 
 
 def prepare(targets: list[Target]) -> SshContext | None:

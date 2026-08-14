@@ -16,6 +16,7 @@ import type {
   Target,
   Transcript,
   User,
+  UserSummary,
   Workspace,
   WorkspaceStatus,
 } from "./types";
@@ -70,6 +71,8 @@ export const api = {
 
   // users (admin)
   users: () => request<User[]>("/api/users"),
+  /** Usernames only, available to any signed-in user, for sharing. */
+  userDirectory: () => request<UserSummary[]>("/api/users/directory"),
   createUser: (data: {
     username: string;
     password: string;

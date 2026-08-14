@@ -488,3 +488,12 @@ button.big { font-size: 15px; padding: 11px 18px; }
 .keyfile-label:hover { border-color: var(--accent); color: var(--accent); }
 .paste-key summary { cursor: pointer; color: var(--text-dim); font-size: 12px; margin-bottom: 6px; }
 .paste-key textarea { margin-top: 6px; }
+
+/* --- per-system sharing ----------------------------------------------- */
+.sharing {
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 14px 14px; margin: 4px 0 14px;
+}
+.sharing legend { padding: 0 6px; font-size: 13px; color: var(--text-dim); }
+.share-row { gap: 10px; margin: 6px 0; align-items: center; }
+.share-row select { width: auto; min-width: 140px; }

@@ -328,7 +328,20 @@ export type Target = {
   has_password: boolean;
   host_key_policy: "accept-new" | "strict";
   has_known_host_key: boolean;
-  allowed_user_ids: number[];
-  usable_by_me: boolean;
+  owner_id: number | null;
+  grants: TargetGrant[];
+  /** owner | manage | use — what you may do with it. */
+  my_level: "owner" | "manage" | "use";
   created_at: string;
+};
+
+export type TargetGrant = {
+  user_id: number;
+  level: "use" | "manage";
+};
+
+/** Just enough about another user to share something with them. */
+export type UserSummary = {
+  id: number;
+  username: string;
 };
