@@ -668,3 +668,27 @@ button.big { font-size: 15px; padding: 11px 18px; }
 .sharing legend { padding: 0 6px; font-size: 13px; color: var(--text-dim); }
 .share-row { gap: 10px; margin: 6px 0; align-items: center; }
 .share-row select { width: auto; min-width: 140px; }
+
+/* --- the exposure warning, put away -----------------------------------
+   Expanded it is deliberately long; standing on screen for the life of a
+   conversation it would just train people to look past it. Collapsed it keeps
+   the fact and drops the essay. */
+.exposure-collapsed {
+  display: flex; align-items: center; gap: 8px; width: calc(100% - 36px);
+  margin: 0 18px 10px; padding: 7px 12px; text-align: left;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text-dim); font-size: 12px; cursor: pointer;
+}
+.exposure-collapsed:hover { border-color: var(--warn); color: var(--text); }
+.exposure-more { margin-left: auto; color: var(--accent); white-space: nowrap; }
+.exposure-hide {
+  float: right; width: auto; margin: -2px 0 0 10px; padding: 0 6px;
+  background: none; border: none; color: var(--text-dim);
+  font-size: 14px; line-height: 1.2; cursor: pointer;
+}
+.exposure-hide:hover { color: var(--text); }
+
+@media (max-width: 860px) {
+  .exposure-collapsed { width: calc(100% - 24px); margin: 0 12px 8px; }
+  .exposure-more { display: none; }
+}

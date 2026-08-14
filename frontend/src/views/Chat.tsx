@@ -651,7 +651,14 @@ export default function Chat({
             type="button"
             className={`icon-btn chat-more${toolsOpen ? " open" : ""}`}
             aria-expanded={toolsOpen}
-            onClick={() => setToolsOpen((v) => !v)}
+            onClick={() => {
+              // The panels are opened from inside this menu, so they belong to
+              // it: leaving Share up after the menu it was launched from has
+              // gone reads as a stuck window rather than a choice.
+              setToolsOpen((v) => !v);
+              setShareOpen(false);
+              setFilesOpen(false);
+            }}
             title="Session settings and actions"
           >
             ⋯
@@ -1094,12 +1101,63 @@ function ExposureNotice({
     ? `${added} ${plural} added since you agreed to this, so you will be asked to confirm once more before your next message.`
     : "You will be asked to confirm this once before your next message.";
 
+  // Collapsed once it has been agreed to, and remembered per session: this is a
+  // standing fact about the conversation, not news, and a wall of text that
+  // cannot be put away is a wall of text people stop reading. It cannot be
+  // collapsed while confirming — that is the one moment the detail is the point.
+  const storageKey = `aiops.exposure.collapsed.${exposure.session_id}`;
+  const [collapsed, setCollapsed] = useState(() => {
+    if (exposure.needs_acknowledgement) return false;
+    try {
+      return window.localStorage.getItem(storageKey) !== "0";
+    } catch {
+      return true; // private browsing; default to out of the way
+    }
+  });
+
+  const setAndRemember = (next: boolean) => {
+    setCollapsed(next);
+    try {
+      window.localStorage.setItem(storageKey, next ? "1" : "0");
+    } catch {
+      /* nothing to remember it with */
+    }
+  };
+
+  // A re-arm forces it back open whatever was remembered: somebody new can read
+  // this now, which is exactly when it stops being old news.
+  if (collapsed && !confirming && !exposure.needs_acknowledgement) {
+    return (
+      <button
+        type="button"
+        className="exposure-collapsed"
+        onClick={() => setAndRemember(false)}
+        title="What this exposes, and to whom"
+      >
+        <span className="pill warn">shared</span>
+        {readers} can read anything your systems produce here.
+        <span className="exposure-more">Details</span>
+      </button>
+    );
+  }
+
   return (
     <div className={`exposure-note${confirming ? " confirming" : ""}`}>
       <strong>
         {confirming
           ? `Use your stored systems in a session ${readers} can read?`
           : `${readers} can read this session, and your stored systems are reachable from it.`}
+        {!confirming && (
+          <button
+            type="button"
+            className="exposure-hide"
+            onClick={() => setAndRemember(true)}
+            aria-label="Collapse this warning"
+            title="Collapse — it stays one line at the top"
+          >
+            ✕
+          </button>
+        )}
       </strong>
       <p>
         Any turn you send here runs with your systems available to the agent:{" "}
