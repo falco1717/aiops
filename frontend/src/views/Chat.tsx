@@ -207,6 +207,9 @@ export default function Chat({
   const accountName = (id: number | null) =>
     accounts.find((a) => a.id === id)?.name ?? "an account";
 
+  const providerLabel = (name: string | null) =>
+    (name && providers.find((p) => p.name === name)?.label) ?? name ?? "the agent";
+
   // Live feed. Reconnects on drop and refetches so nothing is missed.
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -405,6 +408,43 @@ export default function Chat({
     }
   };
 
+  /**
+   * Hand the conversation to the other CLI.
+   *
+   * Worth a confirmation because it is not reversible in the way a dropdown
+   * implies: the provider session id behind the thread is thrown away, so
+   * switching back does not resume what the first agent had either — it is a
+   * second handoff. The dialog says what is actually lost rather than asking
+   * "are you sure".
+   */
+  const switchProvider = async (provider: string) => {
+    if (!session || provider === session.provider) return;
+    const from = providerLabel(session.provider);
+    const to = providerLabel(provider);
+    const hasHistory = runs.length > 0;
+    if (
+      hasHistory &&
+      !confirm(
+        `Hand this conversation to ${to}?\n\n` +
+          `${to} cannot read ${from}'s session, so it does not continue this thread — ` +
+          `it starts a new one. Its first message is prefixed with a written summary of ` +
+          `the transcript so far, assembled by AIOps.\n\n` +
+          `Anything ${from} worked out but never said out loud here is lost, and the ` +
+          `model, account and preset are reset to whatever ${to} can actually use.`,
+      )
+    )
+      return;
+    try {
+      setSession(await api.patchSession(sessionId, { provider }));
+      await reload();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      // The select is showing the provider the user picked, which is now a lie.
+      await reload();
+    }
+  };
+
   const remove = async () => {
     if (
       !confirm(
@@ -544,6 +584,32 @@ export default function Chat({
         )}
         {!renaming && (
           <div className={`chat-tools${toolsOpen ? " open" : ""}`}>
+            {/* Which agent runs this conversation. Dead while a turn is in
+                flight: the prompt has already gone to one CLI, and switching
+                underneath it would leave the reply attributed to the other. */}
+            {session && providers.length > 0 && (
+              <select
+                className="approval-select"
+                value={session.provider}
+                disabled={!!activeRun}
+                title={
+                  activeRun
+                    ? `${providerLabel(session.provider)} is in the middle of a turn. ` +
+                      "Switching agents now would leave that turn attributed to the wrong " +
+                      "one — stop it or let it finish first."
+                    : "Which agent runs this conversation. Switching hands it over rather " +
+                      "than continuing it: the new agent cannot read the other's session, " +
+                      "so it starts fresh from a written summary of the transcript."
+                }
+                onChange={(e) => void switchProvider(e.target.value)}
+              >
+                {providers.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    Agent: {p.label}
+                  </option>
+                ))}
+              </select>
+            )}
             {session && (
               <select
                 className="approval-select"
@@ -634,6 +700,23 @@ export default function Chat({
             <div className="msg prompt">
               <div className="who">
                 you{run.schedule_id ? " (scheduled)" : ""}
+                {/* Per turn, not per session: a switched conversation is a
+                    mixed one, and reading this off the session would relabel
+                    every earlier turn as the agent selected now. */}
+                {run.provider && (
+                  <span
+                    className="turn-agent"
+                    title={
+                      `This turn was answered by ${providerLabel(run.provider)}` +
+                      `${run.model ? ` (${run.model})` : ""}. Other turns in this ` +
+                      "conversation may have been answered by a different agent."
+                    }
+                  >
+                    {" → "}
+                    {run.provider}
+                    {run.model ? ` · ${run.model}` : ""}
+                  </span>
+                )}
               </div>
               <pre>{run.prompt}</pre>
               {(attachmentsByRun.get(run.id) ?? []).length > 0 && (
@@ -644,6 +727,16 @@ export default function Chat({
                 </div>
               )}
             </div>
+
+            {/* The turn that carried the handoff. Said here rather than only in
+                the header, because it is the reason this reply may read as
+                slightly out of step with the one above it. */}
+            {run.carries_handoff && (
+              <div className="msg system">
+                {providerLabel(run.provider)} received this message with a written summary of
+                the earlier turns — it could not read them itself.
+              </div>
+            )}
 
             {/* A silent failover looks like the first account simply worked.
                 Say which one actually answered. */}
@@ -710,6 +803,21 @@ export default function Chat({
       ))}
 
       {filesOpen && <FilesPanel sessionId={sessionId} onClose={() => setFilesOpen(false)} />}
+
+      {/* Sits against the composer because it is a fact about the message about
+          to be sent, and it has to be honest rather than reassuring: the agent
+          reading it did not have this conversation. */}
+      {session?.handoff_pending && (
+        <div className="handoff-note">
+          <strong>
+            {providerLabel(session.provider)} is picking up this conversation from a summary.
+          </strong>{" "}
+          It has not seen the messages above and cannot — that history belongs to the other
+          agent's session. Your next message goes out with a written briefing of the
+          transcript so far, once; after that this is an ordinary conversation with{" "}
+          {providerLabel(session.provider)}.
+        </div>
+      )}
 
       <form
         className={`chat-foot${dragging ? " dropping" : ""}`}
@@ -1197,6 +1305,21 @@ function Bubble({ event }: { event: ChatEvent }) {
       : event.kind === "tool_result"
         ? "tool result"
         : event.kind;
+
+  // Written by AIOps, not by an agent: the point in the transcript where the
+  // conversation changed hands. Drawn as a break across the thread rather than
+  // another grey system line, because everything below it was produced by a
+  // different agent that never saw anything above it.
+  if (event.kind === "provider_switch") {
+    return (
+      <div className="msg handoff">
+        <div className="handoff-rule">
+          <span>⇄ handed over</span>
+        </div>
+        <pre>{event.text}</pre>
+      </div>
+    );
+  }
 
   if (event.kind === "system") {
     return <div className="msg system">{event.text}</div>;

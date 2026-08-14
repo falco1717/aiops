@@ -90,6 +90,13 @@ export type Session = {
   preset_id: number | null;
   workspace_id: number | null;
   provider_session_id: string | null;
+  /**
+   * A provider switch has happened and the briefing has not been sent yet, so
+   * the next turn is the handoff. Neither CLI can load the other's session, so
+   * the incoming agent starts fresh with a written summary — the UI says that
+   * out loud rather than letting the thread look continuous.
+   */
+  handoff_pending: boolean;
   status: string;
   archived: boolean;
   owner_id: number | null;
@@ -116,6 +123,12 @@ export type Run = {
   session_id: string;
   schedule_id: number | null;
   prompt: string;
+  /** Which agent answered *this* turn. A session can be switched mid-thread, so
+   *  this is recorded per turn and must never be read off the session. */
+  provider: string | null;
+  model: string | null;
+  /** True on the turn that carried the post-switch briefing. */
+  carries_handoff: boolean;
   status: string;
   exit_code: number | null;
   error: string | null;

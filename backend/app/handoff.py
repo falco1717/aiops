@@ -47,9 +47,13 @@ _ITEM_LIMIT = 2000
 _ACTION_LIMIT = 200
 _ACTIONS_PER_TURN = 12
 
-#: A briefing shorter than this cannot carry its own framing plus one turn, so
-#: the arithmetic below has no useful answer under it.
-_MIN_BUDGET = 600
+#: Room kept for conversation on top of the briefing's own framing. A budget too
+#: small to hold the framing plus this is raised until it is — a briefing that
+#: tells an agent it is inheriting somebody's conversation and then says nothing
+#: about the conversation is worse than no briefing at all, because it invites
+#: the agent to guess. The cap is honoured above this floor and reported below
+#: it; the setting's default leaves two orders of magnitude of headroom.
+_MIN_TURN_ROOM = 900
 
 _TRUNCATED = "\n[briefing cut off here to stay within its size limit]"
 
@@ -122,7 +126,7 @@ async def build_digest(
     prompt is what the CLI is being sent, and repeating it above itself would
     read as the user having said the same thing twice.
     """
-    budget = max(budget if budget is not None else settings.handoff_digest_max_chars, _MIN_BUDGET)
+    budget = budget if budget is not None else settings.handoff_digest_max_chars
 
     runs = list(
         await db.scalars(
@@ -156,6 +160,12 @@ async def build_digest(
         (r.provider for r in reversed(runs) if r.provider and r.provider != sess.provider),
         None,
     )
+    if outgoing is None:
+        # Switched away and back before the other provider ever answered. The
+        # briefing is still owed — the round trip threw the resumable session id
+        # away — but it is being handed to the same agent as before, and telling
+        # it that it is taking over from itself would be nonsense.
+        outgoing = next((r.provider for r in reversed(runs) if r.provider), None)
     return _fit(_header(outgoing, sess), blocks, _FOOTER, budget)
 
 
@@ -163,11 +173,18 @@ def _header(outgoing: str | None, sess: Session) -> str:
     who = label(sess.provider)
     them = label(outgoing)
     where = f" using {sess.model}" if sess.model else ""
+    # Same agent, different session: the honest framing is "you, earlier, in a
+    # conversation you cannot reopen" rather than "somebody else".
+    whose = (
+        f"an earlier session of {them} that you cannot reopen"
+        if outgoing == sess.provider
+        else f"{them}, in a separate session you have no access to"
+    )
     return (
         f"--- HANDOFF BRIEFING: you are taking over a conversation in progress ---\n"
         f"You are {who}{where}, and this is your first turn in this conversation. "
-        f"Until now it was being handled by {them}, in a separate session you have "
-        f"no access to — you were switched in by the operator partway through.\n\n"
+        f"Until now it was being handled by {whose} — you were switched in by the "
+        f"operator partway through.\n\n"
         f"What follows is not your own history and not a log you produced. It is a "
         f"written record assembled by AIOps, the tool running both of you, from the "
         f"transcript it kept: the operator's messages, {them}'s replies, and the "
@@ -269,7 +286,8 @@ def _fit(header: str, blocks: list[str], footer: str, budget: int) -> str:
     the obvious version of this has.
     """
     reserve = len(header) + len(footer) + len(_notice(len(blocks))) + 8
-    room = max(budget - reserve, 200)
+    budget = max(budget, reserve + _MIN_TURN_ROOM)
+    room = budget - reserve
 
     chosen: list[str] = []
     used = 0

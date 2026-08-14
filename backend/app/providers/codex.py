@@ -100,7 +100,13 @@ class CodexProvider(Provider):
         # Codex has no --append-system-prompt; fold any preset instructions into
         # the prompt itself so presets behave the same across providers.
         full_prompt = f"{system_prompt.strip()}\n\n---\n\n{prompt}" if system_prompt else prompt
-        argv.append(full_prompt)
+        # `--` first, so everything after it is the prompt whatever it starts
+        # with. Without it `codex exec` reads a prompt beginning with a dash as
+        # an option and dies in argument parsing before the model is called —
+        # which the provider-handoff briefing hit every single time, its first
+        # line being a `--- HANDOFF BRIEFING ---` rule. Any operator message
+        # starting with a dash was already failing the same way.
+        argv += ["--", full_prompt]
 
         return RunSpec(argv=argv, env=dict(account_env or {}))
 

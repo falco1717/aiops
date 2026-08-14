@@ -63,6 +63,18 @@ _COLON = re.compile(rf"(?im)^(\s*[\"']?{_NAME}[\"']?\s*:\s*)(\S.*)$")
 #: Inline, mid-sentence spellings the two line-anchored patterns above miss.
 _INLINE = re.compile(rf"(?i)\b({_NAME})(\s*[=:]\s*)([\"']?)([A-Za-z0-9_\-./+=]{{8,}})\3")
 
+#: An agent narrating a secret in prose — "the token is abc…", "password abc…" —
+#: with no punctuation to key on. Deliberately narrower than the patterns above:
+#: it needs a long, unbroken, credential-shaped run of characters right after the
+#: word, because at ordinary-English lengths this would redact half a sentence
+#: every time an agent said "the password was changed".
+#: The value charset is wider here than in the patterns above, which run to end
+#: of line anyway: a generated passphrase contains punctuation, and stopping at
+#: the first `&` would mask nine characters of it and print the rest.
+_NARRATED = re.compile(
+    rf"(?i)\b({_NAME})\s+(?:is\s+|was\s+|=\s*)?([A-Za-z0-9_\-./+=!@#$%^&*~?]{{16,}})"
+)
+
 #: `Authorization: Bearer <token>` survives the colon pattern (the name is
 #: "Authorization", which contains "auth", so it is actually caught) — this is
 #: for a bearer token quoted anywhere else.
@@ -117,6 +129,7 @@ def redact(text: str | None) -> str:
     out = _COLON.sub(lambda m: m.group(1) + MASK, out)
     out = _INLINE.sub(lambda m: f"{m.group(1)}{m.group(2)}{MASK}", out)
     out = _BEARER.sub(lambda m: m.group(1) + MASK, out)
+    out = _NARRATED.sub(lambda m: f"{m.group(1)} {MASK}", out)
     for literal in _literals():
         out = out.replace(literal, MASK)
     return out
