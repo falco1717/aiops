@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     # Bootstrap account, created on first startup if no users exist.
     admin_username: str = "admin"
     admin_password: str = ""
+    # Encrypts stored system credentials (SSH keys, passwords). Deliberately
+    # separate from jwt_secret: rotating the session secret logs everyone out,
+    # while rotating this one makes every stored credential unreadable.
+    secret_key: str = ""
 
     # --- agent execution ----------------------------------------------
     workspace_root: str = "/workspaces"

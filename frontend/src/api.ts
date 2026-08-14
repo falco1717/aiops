@@ -11,6 +11,7 @@ import type {
   Run,
   Schedule,
   Session,
+  Target,
   Transcript,
   User,
   Workspace,
@@ -161,6 +162,14 @@ export const api = {
   prompt: (id: string, prompt: string) =>
     request<Run>(`/api/sessions/${id}/prompt`, { method: "POST", body: body({ prompt }) }),
   events: (id: string) => request<AgentEvent[]>(`/api/sessions/${id}/events`),
+
+  // targets — systems an agent can reach by name
+  targets: () => request<Target[]>("/api/targets"),
+  createTarget: (data: Record<string, unknown>) =>
+    request<Target>("/api/targets", { method: "POST", body: body(data) }),
+  updateTarget: (id: number, data: Record<string, unknown>) =>
+    request<Target>(`/api/targets/${id}`, { method: "PATCH", body: body(data) }),
+  deleteTarget: (id: number) => request<void>(`/api/targets/${id}`, { method: "DELETE" }),
 
   // approvals — an agent is parked waiting on each pending one
   approvals: (params: { session_id?: string; status?: string } = {}) => {

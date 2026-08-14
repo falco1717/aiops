@@ -28,6 +28,7 @@ from .routers import (
     runs,
     schedules,
     sessions,
+    targets,
     usage,
     users,
     workspaces,
@@ -137,6 +138,7 @@ for module in (
     runs,
     schedules,
     approvals,
+    targets,
     ws,
 ):
     app.include_router(module.router)

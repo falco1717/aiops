@@ -284,3 +284,24 @@ export type WsMessage =
       error: string | null;
       cost_usd: number | null;
     };
+
+/** A system an agent can reach by name. Secrets are write-only — the API only
+ *  ever reports whether one is stored. */
+export type Target = {
+  id: number;
+  name: string;
+  slug: string;
+  hostname: string;
+  port: number;
+  username: string;
+  description: string | null;
+  auth_type: "key" | "password";
+  has_private_key: boolean;
+  has_passphrase: boolean;
+  has_password: boolean;
+  host_key_policy: "accept-new" | "strict";
+  has_known_host_key: boolean;
+  allowed_user_ids: number[];
+  usable_by_me: boolean;
+  created_at: string;
+};

@@ -14,6 +14,7 @@ from .config import settings
 from .db import SessionLocal
 from .events import hub
 from .models import Event, ProviderAccount, Run, Session
+from . import ssh_targets
 from .providers import get_provider
 
 log = logging.getLogger("aiops.runner")
@@ -180,12 +181,24 @@ class Runner:
                 else None
             )
 
+            # Systems the operator has stored. Their credentials are written
+            # into a private per-run directory and removed in the finally
+            # below, so `ssh <name>` works for this turn and nothing is left
+            # on disk afterwards.
+            targets = await ssh_targets.visible_targets(db, None)
+            ssh_ctx = ssh_targets.prepare(targets)
+            target_note = ssh_targets.describe(
+                [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names]
+            )
+            preset_prompt = preset.system_prompt if preset else None
+            system_prompt = "\n\n".join(p for p in (preset_prompt, target_note) if p) or None
+
             spec = provider.build_run(
                 prompt=run.prompt,
                 model=sess.model or (preset.model if preset else None),
                 provider_session_id=sess.provider_session_id,
                 permission_mode=preset.permission_mode if preset else None,
-                system_prompt=preset.system_prompt if preset else None,
+                system_prompt=system_prompt,
                 allowed_tools=preset.allowed_tools if preset else None,
                 extra_args=(preset.extra_args if preset else []) or [],
                 stream_partials=settings.stream_partial_messages,
@@ -221,6 +234,8 @@ class Runner:
             )
 
             env = {**os.environ, **spec.env, "NO_COLOR": "1", "FORCE_COLOR": "0", "TERM": "dumb"}
+            if ssh_ctx:
+                env.update(ssh_ctx.env)
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *spec.argv,
@@ -291,6 +306,9 @@ class Runner:
                 # buttons in the UI answering a process nobody can reach.
                 run_tokens.revoke(run_id)
                 await broker.cancel_run(run_id)
+                # Stored credentials exist on disk only for the life of the run.
+                if ssh_ctx:
+                    ssh_ctx.cleanup()
 
         return status, exit_code, state, account, next_account
 

@@ -151,6 +151,10 @@ class CodexAppServerAdapter:
         self._stderr_reader: asyncio.Task[None] | None = None
         self._closed = False
         self._deadline = 0.0
+        # Last-seen payload per item id. A file-change approval names only its
+        # itemId, so the paths it wants to touch have to be recovered from the
+        # `item/started` notification that preceded it.
+        self._items: dict[str, dict[str, Any]] = {}
 
     # -- public ---------------------------------------------------------
     async def run(self) -> AsyncIterator[NormalizedEvent]:
@@ -373,7 +377,8 @@ class CodexAppServerAdapter:
             ]
 
         kind, tool_name = APPROVAL_METHODS[method]
-        summary = approval_summary(method, params)
+        item = self._items.get(str(params.get("itemId") or ""))
+        summary = approval_summary(method, params, item)
         events: list[Any] = [
             NormalizedEvent(
                 kind="system",
@@ -413,7 +418,7 @@ class CodexAppServerAdapter:
                 timeout=self.approval_timeout,
             )
         except asyncio.TimeoutError:
-            return False, f"no answer within {self.approval_timeout:.0f}s"
+            return False, f"no answer within {self.approval_timeout:g}s"
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -482,6 +487,10 @@ class CodexAppServerAdapter:
 
         if method in ("item/started", "item/completed"):
             item = params.get("item") if isinstance(params.get("item"), dict) else {}
+            if isinstance(item.get("id"), str):
+                if len(self._items) > 200:
+                    self._items.clear()
+                self._items[item["id"]] = item
             event = self._item(item, params, started=method == "item/started")
             return [event] if event else []
 
@@ -834,8 +843,15 @@ _QUIET_NOTIFICATIONS = frozenset(
 
 
 # --- approval translation (pure, so the tests can pin it) -------------------
-def approval_summary(method: str, params: dict[str, Any]) -> str:
-    """One line describing what Codex is asking permission to do."""
+def approval_summary(
+    method: str, params: dict[str, Any], item: dict[str, Any] | None = None
+) -> str:
+    """One line describing what Codex is asking permission to do.
+
+    *item* is the `item/started` payload this approval belongs to, when one was
+    seen. A file-change request carries only an itemId, so without it the
+    operator would be asked to approve "some edit" with no paths.
+    """
     if method == "item/commandExecution/requestApproval":
         command = _stringify(params.get("command")) or _stringify(params.get("commandActions"))
         cwd = params.get("cwd")
@@ -858,9 +874,13 @@ def approval_summary(method: str, params: dict[str, Any]) -> str:
         return " ".join(parts)
 
     if method == "item/fileChange/requestApproval":
+        paths = _change_paths(item)
+        reason = params.get("reason")
+        head = f"apply file changes to {', '.join(paths)}" if paths else "apply file changes"
         root = params.get("grantRoot")
-        reason = params.get("reason") or "apply file changes"
-        return f"{reason}" + (f" under {root}" if root else "")
+        if root:
+            head += f" under {root}"
+        return f"{head} ({reason})" if reason else head
 
     if method == "applyPatchApproval":
         changes = params.get("changes") or params.get("fileChanges")
@@ -891,6 +911,12 @@ def approval_reply(
       operator's reason back to the model.
     * `item/permissions/requestApproval` answers with a granted profile rather
       than a decision, so a denial grants nothing.
+
+    The live server also sends an `availableDecisions` list that the generated
+    schema does not mention, and it omits `decline` — but replying `decline`
+    was verified to work against 0.147.0 and is the behaviour we want, because
+    the listed alternative (`cancel`) tears the whole turn down instead of
+    letting the model try another route after a refusal.
     """
     if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
         # "decline" rather than "cancel": the model should be told no and pick
@@ -908,6 +934,20 @@ def approval_reply(
         return {"permissions": granted, "scope": "turn"}
 
     return {"decision": "accept" if allowed else "decline"}
+
+
+def _change_paths(item: dict[str, Any] | None) -> list[str]:
+    if not isinstance(item, dict):
+        return []
+    paths = []
+    for change in item.get("changes") or []:
+        if isinstance(change, dict):
+            kind = change.get("kind")
+            verb = kind.get("type") if isinstance(kind, dict) else kind
+            path = str(change.get("path") or "")
+            if path:
+                paths.append(f"{path} ({verb})" if verb else path)
+    return paths[:10]
 
 
 def looks_rate_limited(text: str) -> bool:

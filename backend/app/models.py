@@ -184,6 +184,57 @@ class Session(Base):
     )
 
 
+class Target(Base):
+    """A system an agent can reach by name — a host plus how to log into it.
+
+    Secrets are stored encrypted (see crypto.py) and are never returned by the
+    API: the UI writes them and afterwards only sees whether one is set. At run
+    time the private key is loaded into a per-run ssh-agent rather than written
+    to disk, so `ssh <slug>` works without the key ever landing in a file.
+    """
+
+    __tablename__ = "targets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    #: What the agent types: `ssh <slug>`.
+    slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    hostname: Mapped[str] = mapped_column(String(255))
+    port: Mapped[int] = mapped_column(Integer, default=22)
+    username: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # key | password
+    auth_type: Mapped[str] = mapped_column(String(32), default="key")
+
+    private_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    passphrase_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # accept-new trusts on first use and pins afterwards; strict requires the
+    # key below to already be known. Never "no" — that accepts any host key.
+    host_key_policy: Mapped[str] = mapped_column(String(32), default="accept-new")
+    known_host_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    grants: Mapped[list[TargetAccess]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class TargetAccess(Base):
+    """Which users may reach a target. No rows means everyone, matching accounts."""
+
+    __tablename__ = "target_access"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int] = mapped_column(ForeignKey("targets.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+
 class Approval(Base):
     """One tool call the agent paused on, waiting for a human answer.
 

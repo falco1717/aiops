@@ -27,6 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-venv \
       git \
       openssh-client \
+      # Password-authenticated stored systems; the password is handed over via
+      # the environment so it never appears in the process list.
+      sshpass \
       ca-certificates \
       curl \
       ripgrep \

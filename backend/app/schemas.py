@@ -328,3 +328,56 @@ class ApprovalOut(ORM):
 class ApprovalDecision(BaseModel):
     allowed: bool
     note: str | None = None
+
+
+# --- targets (systems an agent can reach) ------------------------------
+class TargetIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    hostname: str = Field(min_length=1, max_length=255)
+    username: str = Field(min_length=1, max_length=128)
+    port: int = Field(default=22, ge=1, le=65535)
+    description: str | None = None
+    auth_type: str = "key"  # key | password
+    # Write-only. Absent means "leave whatever is stored"; empty string clears.
+    private_key: str | None = None
+    passphrase: str | None = None
+    password: str | None = None
+    host_key_policy: str = "accept-new"
+    known_host_key: str | None = None
+    allowed_user_ids: list[int] | None = None
+
+
+class TargetPatch(BaseModel):
+    name: str | None = None
+    hostname: str | None = None
+    username: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    description: str | None = None
+    auth_type: str | None = None
+    private_key: str | None = None
+    passphrase: str | None = None
+    password: str | None = None
+    host_key_policy: str | None = None
+    known_host_key: str | None = None
+    allowed_user_ids: list[int] | None = None
+
+
+class TargetOut(BaseModel):
+    """Never carries a secret — only whether one is stored."""
+
+    id: int
+    name: str
+    slug: str
+    hostname: str
+    port: int
+    username: str
+    description: str | None
+    auth_type: str
+    has_private_key: bool
+    has_passphrase: bool
+    has_password: bool
+    host_key_policy: str
+    has_known_host_key: bool
+    allowed_user_ids: list[int]
+    usable_by_me: bool
+    created_at: datetime

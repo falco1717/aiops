@@ -11,6 +11,7 @@ import Presets from "./views/Presets";
 import Providers from "./views/Providers";
 import Schedules from "./views/Schedules";
 import Sessions from "./views/Sessions";
+import Targets from "./views/Targets";
 import Workspaces from "./views/Workspaces";
 
 const NAV = [
@@ -19,6 +20,7 @@ const NAV = [
   { to: "/presets", label: "Agents" },
   { to: "/accounts", label: "Accounts" },
   { to: "/workspaces", label: "Workspaces" },
+  { to: "/targets", label: "Systems" },
   { to: "/usage", label: "Usage" },
   { to: "/providers", label: "Providers" },
 ];
@@ -123,6 +125,7 @@ export default function App() {
         <Route path="/accounts" element={<Accounts me={user} />} />
         <Route path="/usage" element={<Usage />} />
         <Route path="/workspaces" element={<Workspaces />} />
+        <Route path="/targets" element={<Targets me={user} />} />
         <Route path="/providers" element={<Providers />} />
         <Route path="/account" element={<Account me={user} onChanged={refresh} />} />
         <Route path="*" element={<Navigate to="/sessions" replace />} />
