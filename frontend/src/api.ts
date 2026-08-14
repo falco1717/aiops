@@ -4,6 +4,7 @@ import type {
   Approval,
   Attachment,
   Capability,
+  Exposure,
   LoginFlow,
   NodeEnrolment,
   Preset,
@@ -189,6 +190,19 @@ export const api = {
       body: body({ prompt, attachment_ids }),
     }),
   events: (id: string) => request<AgentEvent[]>(`/api/sessions/${id}/events`),
+
+  /** Who would read what your own stored systems produce in this session. */
+  exposure: (id: string) => request<Exposure>(`/api/sessions/${id}/exposure`),
+  /**
+   * Record that you understand it. `viewerIds` is the audience you were shown:
+   * the server refuses with 409 if the list has changed since, so agreeing to a
+   * smaller group cannot be recorded as agreeing to a larger one.
+   */
+  acknowledgeExposure: (id: string, viewerIds: number[]) =>
+    request<Exposure>(`/api/sessions/${id}/exposure/ack`, {
+      method: "POST",
+      body: body({ viewer_ids: viewerIds }),
+    }),
 
   // attachments — files sent to the agent, and files it produced
   uploadAttachment: (id: string, file: File) => {

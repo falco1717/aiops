@@ -275,6 +275,57 @@ class TranscriptOut(BaseModel):
     attachments: list[AttachmentOut] = []
 
 
+# --- credential exposure in a shared session ---------------------------
+class ExposureSystem(BaseModel):
+    """One of the caller's own stored systems, named the way the agent types it.
+
+    No hostname, no credential state, nothing about who else it is shared with:
+    the warning needs to name the system, and this is a screen about audiences,
+    not a second copy of the systems page.
+    """
+
+    id: int
+    name: str
+    slug: str
+
+
+class ExposureOut(BaseModel):
+    """What a turn of the caller's would expose here, and to whom.
+
+    Always from the caller's point of view. `viewers` excludes them, `systems` is
+    only theirs, and nothing in here is information they could not already get
+    from /api/users/directory and /api/targets.
+    """
+
+    session_id: str
+    #: Everyone else who can read this session — owner, named sharees, the team.
+    viewers: list[UserSummary]
+    #: The caller's systems a turn of theirs in this session would reach.
+    systems: list[ExposureSystem]
+    #: True when both lists are non-empty, i.e. when there is anything to say.
+    at_stake: bool
+    acknowledged: bool
+    acknowledged_at: datetime | None
+    #: Viewers the standing acknowledgement does not cover. Everyone, when there
+    #: is none. This is what the confirmation is asked about.
+    new_viewers: list[UserSummary]
+    #: The first prompt is refused until this is False.
+    needs_acknowledgement: bool
+
+
+class ExposureAckIn(BaseModel):
+    """Optionally, the audience the client believes it is agreeing to.
+
+    Sent back so a race is caught rather than papered over: if the owner adds
+    somebody between the warning being drawn and the button being pressed, the
+    agreement on screen was about a smaller group than the one that now exists,
+    and it is refused so the question can be asked again. Omitted means "whatever
+    the server sees now", which is what a non-interactive client wants.
+    """
+
+    viewer_ids: list[int] | None = None
+
+
 # --- schedules ---------------------------------------------------------
 class ScheduleIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)

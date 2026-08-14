@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import attachments as store, handoff
+from .. import attachments as store, exposure as exposure_facts, handoff
 from ..access import can_see_session, sessions_visible_to
 from ..config import settings
 from ..db import get_db
@@ -18,6 +18,9 @@ from ..schemas import (
     AttachmentOut,
     CapabilityOut,
     EventOut,
+    ExposureAckIn,
+    ExposureOut,
+    ExposureSystem,
     PromptIn,
     RunOut,
     SessionFile,
@@ -26,6 +29,7 @@ from ..schemas import (
     SessionOut,
     SessionPatch,
     TranscriptOut,
+    UserSummary,
 )
 from ..runner import runner
 from ..security import current_user
@@ -243,6 +247,15 @@ async def create_session(
             team_id=payload.team_id,
             user=user,
         )
+        if payload.prompt:
+            # Same gate as the ordinary prompt endpoint. It can fire here too —
+            # creating a session straight into a team makes it shared before the
+            # first word is sent, and skipping the check on this path would make
+            # "create with an opening prompt" the way around it. Before the
+            # commit, so a refusal leaves no half-made session behind: the
+            # request ends with this transaction never committed.
+            await db.flush()  # so the row has its id to be described by
+            await _require_exposure_ack(db, sess, user)
         await db.commit()
         await db.refresh(sess)
         if payload.prompt:
@@ -402,6 +415,7 @@ async def send_prompt(
             status.HTTP_409_CONFLICT,
             "This session is still working on the previous turn. Cancel it or wait.",
         )
+    await _require_exposure_ack(db, sess, user)
     try:
         return await queue_run(
             db,
@@ -436,6 +450,95 @@ async def list_events(
         stmt = stmt.where(Event.run_id == run_id)
     rows = await db.scalars(stmt.order_by(Event.id))
     return list(rows)
+
+
+# --- credential exposure: who reads what your systems produce here --------
+def _rendered(exposure: exposure_facts.Exposure) -> ExposureOut:
+    return ExposureOut(
+        session_id=exposure.session_id,
+        viewers=[UserSummary(id=v.id, username=v.username) for v in exposure.viewers],
+        systems=[
+            ExposureSystem(id=t.id, name=t.name, slug=t.slug) for t in exposure.systems
+        ],
+        at_stake=exposure.at_stake,
+        acknowledged=exposure.acknowledged,
+        acknowledged_at=exposure.acknowledged_at,
+        new_viewers=[
+            UserSummary(id=v.id, username=v.username) for v in exposure.new_viewers
+        ],
+        needs_acknowledgement=exposure.needs_acknowledgement,
+    )
+
+
+@router.get("/{session_id}/exposure", response_model=ExposureOut)
+async def session_exposure(
+    session_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    """What a turn of yours here would put in front of whom.
+
+    Behind the same `_get` as everything else, so a non-viewer gets the same 404
+    the transcript gives them and this cannot become a way to enumerate who is in
+    a conversation you are not in. What it returns for a viewer is only what they
+    could already assemble themselves — the usernames are the ones
+    /api/users/directory hands to any signed-in user, and the systems are their
+    own — computed here because the point is to state the consequence, and the
+    client should not be deriving that from three separate lists.
+    """
+    sess = await _get(db, session_id, user)
+    return _rendered(await exposure_facts.describe(db, sess, user))
+
+
+@router.post("/{session_id}/exposure/ack", response_model=ExposureOut)
+async def acknowledge_exposure(
+    session_id: str,
+    # Optional, so a client with nothing to assert can POST an empty body.
+    payload: ExposureAckIn | None = None,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Record that this user understands who will read what their systems produce.
+
+    Accepted even when nothing is at stake — a client that asks is not wrong, and
+    refusing would make the UI's ordering matter. The stored audience is always
+    the one the server just computed; `viewer_ids` in the body is checked against
+    it and not trusted as its source, so agreeing to a stale list is refused
+    rather than recorded as agreement to a larger one.
+    """
+    sess = await _get(db, session_id, user)
+    state = await exposure_facts.describe(db, sess, user)
+    asserted = payload.viewer_ids if payload else None
+    if asserted is not None and sorted(asserted) != state.viewer_ids:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Who can see this session changed while you were reading. Nothing has "
+            "been recorded — look at the list again.",
+        )
+    await exposure_facts.acknowledge(db, sess, user, state.viewer_ids)
+    await db.commit()
+    return _rendered(await exposure_facts.describe(db, sess, user))
+
+
+async def _require_exposure_ack(db: AsyncSession, sess: Session, user: User) -> None:
+    """Refuse a first turn that would expose this user's systems undisclosed.
+
+    The only gate in this feature, and it gates being *told*, not being allowed:
+    it clears the moment the person says they understand, it never looks at which
+    systems the turn may reach, and it removes nothing — a turn in a shared
+    session still gets every system its requester can reach, exactly as before.
+
+    Deliberately not applied to scheduled turns, which arrive through the
+    scheduler with nobody watching: there is no one to ask, and failing them
+    would turn a disclosure into an outage. The transcript note is still written
+    for those (see exposure.record_use), so the record is kept either way.
+    """
+    state = await exposure_facts.describe(db, sess, user)
+    if state.needs_acknowledgement:
+        raise HTTPException(
+            # Not 403 — they are entitled to do this. 428 is the closest honest
+            # answer: the request is missing a precondition the caller can meet.
+            status.HTTP_428_PRECONDITION_REQUIRED,
+            exposure_facts.refusal(state),
+        )
 
 
 @router.get("/{session_id}/capabilities", response_model=list[CapabilityOut])

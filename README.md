@@ -346,6 +346,40 @@ it — send turns, rename it, change its approval mode — but a session shared 
 a team is other people's work too, so only its owner (or an admin who can already
 see it) can delete it or change who else is in.
 
+### Your stored systems in somebody else's session
+
+A turn reaches the systems **whoever asked for it** can reach — not the session
+owner's. That is deliberate: you can bring your own systems into any conversation
+you are a member of, and a shared session is no less capable than a private one.
+Nothing about that is restricted, and the intersection rule you might expect
+("only systems every viewer can reach") is deliberately *not* implemented.
+
+What is implemented is telling you what it means, because a shared transcript
+makes it non-obvious. If you prompt a session Alice can read, using a system she
+cannot reach:
+
+- everything the agent does on that host is written into a transcript she reads —
+  command output, file contents, whatever is on the far end
+- the decrypted private key is a file on disk for the length of the run, so
+  anything that prints it puts the key itself in the transcript
+- her earlier messages are context for your next turn, so **an instruction she
+  left in the thread can be carried out by the agent holding your credentials**.
+  She does not have to wait for the key to be printed; she can ask for the host
+  to be used
+
+So `GET /api/sessions/{id}/exposure` computes, for you, who else can read the
+session and which of your own systems are reachable in it, and the chat view
+shows a standing warning naming both. The first turn where that applies is
+refused with **428** until you confirm it, once, and the agreement is recorded
+against the exact set of people it was about — add somebody afterwards and you
+are asked again, because agreeing that Bob may read what your key produces is not
+agreeing that Carol may. Every turn that actually used a stored system in front of
+other people is noted in the transcript, naming the systems, whose they were, who
+could read the result, and when the exposure was acknowledged.
+
+Scheduled turns are not held for a confirmation — there is nobody to ask — but the
+transcript note is still written for them.
+
 ### Relay nodes
 
 A stored system is normally dialled from this server. When the host is on a

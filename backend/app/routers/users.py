@@ -15,6 +15,7 @@ from ..models import (
     Run,
     Schedule,
     Session,
+    SessionExposureAck,
     SessionShare,
     Target,
     TargetAccess,
@@ -172,6 +173,7 @@ async def _release_sessions(db: AsyncSession, leaving: User) -> list[str]:
     """
     await db.execute(delete(SessionShare).where(SessionShare.user_id == leaving.id))
     await db.execute(delete(TeamMember).where(TeamMember.user_id == leaving.id))
+    await _forget_exposure_acks(db, leaving)
     await db.flush()
 
     destroyed: list[str] = []
@@ -193,6 +195,28 @@ async def _release_sessions(db: AsyncSession, leaving: User) -> list[str]:
             destroyed.append(sess.id)
     await db.flush()
     return destroyed
+
+
+async def _forget_exposure_acks(db: AsyncSession, leaving: User) -> None:
+    """Erase a departing user from the credential-exposure consents.
+
+    Two directions, both for the reason the share rows above are deleted rather
+    than left to a foreign key: SQLite does not enforce ON DELETE and it reuses
+    integer ids, so anything still naming this id is a decision lying in wait
+    for whoever is created next.
+
+    * Their own acknowledgements go, or the next user to be given this id would
+      inherit an agreement they never made and never be asked.
+    * Their id comes out of everyone else's, or that same next user would be
+      pre-approved as a reader of other people's systems — the exact thing the
+      re-arming rule exists to prevent.
+    """
+    await db.execute(delete(SessionExposureAck).where(SessionExposureAck.user_id == leaving.id))
+    rows = list(await db.scalars(select(SessionExposureAck)))
+    for row in rows:
+        viewers = list(row.viewer_ids or ())
+        if leaving.id in viewers:
+            row.viewer_ids = [uid for uid in viewers if uid != leaving.id]
 
 
 async def _session_heir(db: AsyncSession, sess: Session, leaving: User) -> int | None:
@@ -239,7 +263,7 @@ async def _destroy_session(db: AsyncSession, sess: Session) -> None:
     )
     for run_id in active:
         await runner.cancel(run_id)
-    for model in (Event, Approval, Attachment, Run):
+    for model in (Event, Approval, Attachment, SessionExposureAck, Run):
         await db.execute(delete(model).where(model.session_id == sess.id))
     await db.delete(sess)
 

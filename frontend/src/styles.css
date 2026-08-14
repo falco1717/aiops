@@ -270,6 +270,39 @@ label.check span { margin: 0; color: var(--text); font-size: 13px; }
   font-size: 12.5px;
 }
 .handoff-note strong { color: var(--text); }
+
+/* Who will read what your stored systems produce here. Sits above the composer
+   with the approvals, because it is a fact about the message about to be sent.
+   Readable rather than alarming: it is a paragraph and a list, not a wall of
+   red — the standing version is quiet, and only the one asking for an answer
+   takes the warning colour and the border weight. */
+.exposure-note {
+  margin: 0 18px 10px;
+  padding: 10px 13px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  font-size: 12.5px;
+}
+.exposure-note.confirming {
+  border-color: var(--warn);
+  border-left-width: 4px;
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+.exposure-note strong { color: var(--text); display: block; margin-bottom: 5px; }
+.exposure-note p { margin: 0 0 6px; }
+.exposure-note ul { margin: 0 0 6px; padding-left: 20px; }
+.exposure-note li { margin-bottom: 3px; }
+.exposure-note .mono { font-family: var(--mono); color: var(--text); }
+.exposure-note em { color: var(--text); font-style: normal; font-weight: 600; }
+.exposure-fine { color: var(--text-dim); }
+.exposure-actions { gap: 8px; align-items: center; margin-top: 8px; }
+@media (max-width: 860px) {
+  .exposure-note { margin: 0 12px 8px; max-height: 46vh; overflow-y: auto; }
+  .exposure-actions button { flex: 1 1 40%; min-height: 46px; font-weight: 600; }
+}
 /* Which agent answered one turn, beside the "you" that asked for it. */
 .turn-agent { text-transform: none; letter-spacing: 0; color: var(--accent); }
 

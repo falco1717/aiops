@@ -138,6 +138,32 @@ exception: an account still appears by **name and provider**, because
 `/api/accounts` shows the roster to everyone anyway, but with none of another
 user's spend on it.
 
+## `test_exposure.py`
+
+What a shared session does with a member's own stored credentials. The rule is
+permissive — a turn gets the systems its *requester* can reach, so Bob's system
+works inside Alice's session even though Alice cannot reach it — and the group of
+checks under "capability unchanged" exists to prove that has not been narrowed:
+an intersection rule would pass everything else in the file while removing the
+feature.
+
+The rest is the disclosure around it. The exposure endpoint is checked from all
+three sides — the owner's, a named sharee's, and a team member's — for naming the
+right people, listing only the caller's *own* systems, and answering **404** for
+somebody who was not let in. Then the acknowledgement: the first turn is refused
+with **428**, agreeing to a stale audience is refused with 409, agreeing to the
+real one lets the turn through, and a second turn is not held again. The re-arming
+check is the point of the whole design — the owner adds Carol, and Bob is asked
+once more, about Carol specifically.
+
+The negative cases matter as much: a session nobody else can read requires nothing,
+and neither does a member with no stored systems of their own — a warning shown
+when there is nothing at stake is how people learn to click past the one that
+matters. Last, the transcript note is asserted to exist once per turn that used a
+system in front of others, to name the systems, whose they were, who could read
+the result and when it was acknowledged, and to be absent from turns that used
+nothing.
+
 ## `test_relay.py`
 
 Relay nodes, in two halves. The first drives the API and asserts the rules: an

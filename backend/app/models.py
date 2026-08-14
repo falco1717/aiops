@@ -272,6 +272,41 @@ class SessionShare(Base):
     __table_args__ = (UniqueConstraint("session_id", "user_id", name="uq_session_share_user"),)
 
 
+class SessionExposureAck(Base):
+    """One person saying "yes, use my stored systems in front of these people".
+
+    A turn reaches the systems its *requester* may reach, not the session
+    owner's, so anyone who can type into a shared session can put their own
+    credentials to work inside somebody else's transcript. That is deliberate
+    and stays — it is what makes a shared session useful — but the person whose
+    key it is has to find out first, and this row is the record that they did.
+
+    `viewer_ids` is the audience they agreed to, not a flag, because consent is
+    to an audience: agreeing that Bob may read what your key produces says
+    nothing about Carol. The set is stored exactly as it stood at the moment of
+    agreement, so a viewer added afterwards is not covered by it and the
+    question gets asked again (see exposure.needs_acknowledgement).
+    """
+
+    __tablename__ = "session_exposure_acks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    #: Everyone besides this user who could read the session when they agreed.
+    viewer_ids: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "user_id", name="uq_session_exposure_user"),
+    )
+
+
 class Attachment(Base):
     """A file the operator handed to the agent with a message.
 

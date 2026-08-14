@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
-from . import agent_env, handoff
+from . import agent_env, exposure, handoff
 from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
@@ -270,8 +270,16 @@ class Runner:
             # cancelling the run, a shutdown cancelling all of them, or the
             # commit below failing on a row somebody deleted underneath it.
             try:
-                target_note = ssh_targets.describe(
-                    [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names], nodes
+                usable = [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names]
+                target_note = ssh_targets.describe(usable, nodes)
+
+                # Say in the transcript that somebody's stored credentials were
+                # put to work in front of other people. Written here, next to the
+                # decision, rather than at the API — the API knows what was
+                # asked for, this knows what the turn actually got. Silent when
+                # the session has no other readers, which is most of them.
+                exposure_note = await exposure.record_use(
+                    db, run, sess, usable, asker=asker
                 )
                 preset_prompt = preset.system_prompt if preset else None
                 system_prompt = "\n\n".join(p for p in (preset_prompt, target_note) if p) or None
@@ -381,6 +389,25 @@ class Runner:
                         "attempt": len(attempted) + 1,
                     },
                 )
+
+                # After run.started, so it lands under the turn it belongs to
+                # rather than ahead of it. Committed above with the run row.
+                if exposure_note is not None:
+                    hub.publish(
+                        sess.id,
+                        {
+                            "type": "event",
+                            "session_id": sess.id,
+                            "run_id": run.id,
+                            "seq": exposure_note.seq,
+                            "kind": exposure_note.kind,
+                            "text": exposure_note.text,
+                            "tool_name": None,
+                            "is_error": False,
+                            "parent_tool_use_id": None,
+                            "agent_name": None,
+                        },
+                    )
 
                 state = _RunState()
                 try:

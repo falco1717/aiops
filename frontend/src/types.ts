@@ -427,3 +427,34 @@ export type UserSummary = {
   id: number;
   username: string;
 };
+
+/** One of your own stored systems, as the exposure warning names it. */
+export type ExposureSystem = {
+  id: number;
+  name: string;
+  slug: string;
+};
+
+/**
+ * What a turn of yours in this session would put in front of whom.
+ *
+ * Computed by the server from the same visibility rules as everything else, and
+ * always from the caller's point of view: `viewers` never includes you, and
+ * `systems` is only ever yours. A turn reaches the systems its *requester* can
+ * reach, so in a shared session your credentials work inside somebody else's
+ * transcript — this is the disclosure of that, not a limit on it.
+ */
+export type Exposure = {
+  session_id: string;
+  /** Everyone else who can read this session: owner, sharees, the team. */
+  viewers: UserSummary[];
+  systems: ExposureSystem[];
+  /** Both lists non-empty — there is actually something to warn about. */
+  at_stake: boolean;
+  acknowledged: boolean;
+  acknowledged_at: string | null;
+  /** Viewers your standing acknowledgement does not cover; all of them if none. */
+  new_viewers: UserSummary[];
+  /** The next prompt is refused with 428 until this is false. */
+  needs_acknowledgement: boolean;
+};

@@ -1,7 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, openSocket } from "../api";
+import { ApiError, api, openSocket } from "../api";
 import { EFFORT_HINT, effortChoices } from "../effort";
 import type {
   Account,
@@ -10,6 +10,7 @@ import type {
   ApprovalMode,
   Attachment,
   Capability,
+  Exposure,
   Preset,
   ProviderInfo,
   Run,
@@ -104,6 +105,12 @@ export default function Chat({
   const [dragging, setDragging] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  // Who can read this session, and which of *my* systems a turn of mine would
+  // reach in it. Both come from the server, which is the only side that can see
+  // the team memberships and the credential grants that decide them.
+  const [exposure, setExposure] = useState<Exposure | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [acking, setAcking] = useState(false);
   const [teams, setTeams] = useState<Team[]>([]);
   const [directory, setDirectory] = useState<UserSummary[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -189,6 +196,28 @@ export default function Chat({
     api.teams().then(setTeams).catch(() => setTeams([]));
     api.userDirectory().then(setDirectory).catch(() => setDirectory([]));
   }, []);
+
+  const loadExposure = useCallback(async () => {
+    try {
+      setExposure(await api.exposure(sessionId));
+    } catch {
+      // Not fatal to the conversation. The prompt endpoint refuses on its own
+      // if an acknowledgement is owed, so a failure here cannot lose the check.
+      setExposure(null);
+    }
+  }, [sessionId]);
+
+  // Refetched whenever the sharing on the session row changes, so adding
+  // somebody re-draws the warning with their name in it straight away. A team
+  // gaining a member changes nothing here, which is why `send` asks again at the
+  // moment it matters rather than trusting this copy.
+  const audience = session
+    ? `${session.owner_id}|${session.team_id}|${[...session.shared_user_ids].sort().join(",")}`
+    : "";
+
+  useEffect(() => {
+    void loadExposure();
+  }, [loadExposure, audience]);
 
   // An agent is blocked on each of these, so they must survive a page reload —
   // the websocket only announces new ones.
@@ -367,23 +396,69 @@ export default function Chat({
     }
   };
 
-  const send = async (event: React.FormEvent | React.KeyboardEvent) => {
-    event.preventDefault();
+  // The event is optional because the acknowledgement card sends the pending
+  // message itself, with nothing to suppress.
+  const send = async (event?: { preventDefault: () => void }) => {
+    event?.preventDefault();
     const text = prompt.trim() || (staged.length ? ATTACHMENTS_ONLY_PROMPT : "");
     if (!text || activeRun || uploading) return;
     setSending(true);
     setError(null);
     try {
+      // Asked fresh rather than read off the copy above: the people who can see
+      // this session may have changed since it was drawn — a team gaining a
+      // member leaves no trace on the session row — and consenting to Bob
+      // reading your output is not consenting to Carol.
+      const now = await api.exposure(sessionId).catch(() => null);
+      if (now) setExposure(now);
+      if (now?.needs_acknowledgement) {
+        setConfirming(true);
+        return;
+      }
       await api.prompt(sessionId, text, staged.map((a) => a.id));
       setPrompt("");
       pinnedRef.current = true;
       await reload();
       onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // 428 is the server refusing a turn that would expose this user's systems
+      // to people they have not been told about. It is the same check as above,
+      // enforced where it cannot be skipped — so answer it, don't just report it.
+      if (err instanceof ApiError && err.status === 428) {
+        setConfirming(true);
+        await loadExposure();
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setSending(false);
     }
+  };
+
+  /**
+   * Record the acknowledgement, then send the message that prompted it.
+   *
+   * The audience on screen goes back with it, so if somebody was added while
+   * this card was being read the server refuses and the question is asked again
+   * about the larger group rather than being answered about the smaller one.
+   */
+  const acknowledgeAndSend = async () => {
+    if (!exposure) return;
+    setAcking(true);
+    setError(null);
+    try {
+      setExposure(
+        await api.acknowledgeExposure(sessionId, exposure.viewers.map((v) => v.id)),
+      );
+      setConfirming(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      await loadExposure();
+      return;
+    } finally {
+      setAcking(false);
+    }
+    await send();
   };
 
   const cancel = async () => {
@@ -804,6 +879,21 @@ export default function Chat({
 
       {filesOpen && <FilesPanel sessionId={sessionId} onClose={() => setFilesOpen(false)} />}
 
+      {/* Above the composer for the same reason an approval card is: it is a
+          fact about the message about to be sent. Drawn whenever there is
+          anything to say, and only then — a warning shown to somebody with no
+          stored systems, or in a session nobody else can read, teaches people to
+          click past the one that matters. */}
+      {exposure?.at_stake && (
+        <ExposureNotice
+          exposure={exposure}
+          confirming={confirming}
+          busy={acking || sending}
+          onAgree={() => void acknowledgeAndSend()}
+          onDefer={() => setConfirming(false)}
+        />
+      )}
+
       {/* Sits against the composer because it is a fact about the message about
           to be sent, and it has to be honest rather than reassuring: the agent
           reading it did not have this conversation. */}
@@ -949,6 +1039,118 @@ export default function Chat({
           )}
         </div>
       </form>
+    </div>
+  );
+}
+
+/** "alice", "alice and bob", "alice, bob and carol". */
+function names(people: UserSummary[]): string {
+  const list = people.map((p) => p.username).sort();
+  if (list.length === 0) return "nobody else";
+  if (list.length === 1) return list[0];
+  return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
+/**
+ * Who is going to read what your stored systems produce in this session.
+ *
+ * A turn reaches the systems the person who *asked for it* can reach, not the
+ * session owner's — so bringing your own systems into somebody else's
+ * conversation is allowed, and stays allowed. This is not a gate on that: it is
+ * the disclosure that it is happening, which is the part a shared transcript
+ * makes non-obvious.
+ *
+ * The three consequences are spelled out rather than summarised as "this session
+ * is shared", because they are not the same risk and only the first is the one
+ * people assume. The third is the one nobody thinks of: the other readers can
+ * *write* here too, and their messages are context for your next turn, so an
+ * instruction they left in the thread can be carried out holding your
+ * credentials. That is a confused deputy, not an information leak — they do not
+ * have to wait for the key to be printed, they can ask for the host to be used.
+ *
+ * Names, always. "This session is shared" is not actionable; "bob can read this,
+ * and example-prod-sb is reachable from it" is.
+ */
+function ExposureNotice({
+  exposure,
+  confirming,
+  busy,
+  onAgree,
+  onDefer,
+}: {
+  exposure: Exposure;
+  confirming: boolean;
+  busy: boolean;
+  onAgree: () => void;
+  onDefer: () => void;
+}) {
+  const readers = names(exposure.viewers);
+  const added = names(exposure.new_viewers);
+  const systems = exposure.systems.map((s) => s.slug).join(", ");
+  const plural = exposure.new_viewers.length === 1 ? "was" : "were";
+  // Whether one person or five, they are "they" — the alternative is guessing at
+  // a stranger's pronoun in a security warning.
+  const rearmed = exposure.acknowledged_at
+    ? `${added} ${plural} added since you agreed to this, so you will be asked to confirm once more before your next message.`
+    : "You will be asked to confirm this once before your next message.";
+
+  return (
+    <div className={`exposure-note${confirming ? " confirming" : ""}`}>
+      <strong>
+        {confirming
+          ? `Use your stored systems in a session ${readers} can read?`
+          : `${readers} can read this session, and your stored systems are reachable from it.`}
+      </strong>
+      <p>
+        Any turn you send here runs with your systems available to the agent:{" "}
+        <span className="mono">{systems}</span>. {readers} cannot reach{" "}
+        {exposure.systems.length === 1 ? "it" : "them"} directly, but{" "}
+        {confirming ? "by continuing you accept that" : "through this session"}:
+      </p>
+      <ul>
+        <li>
+          everything the agent does on those hosts is written into this transcript —
+          command output, file contents, whatever is on the far end — and they can
+          read all of it;
+        </li>
+        <li>
+          the private key is a real file on disk for the length of each turn, so if
+          the agent is asked to print it, the key itself lands in the transcript
+          where they can read it;
+        </li>
+        <li>
+          they can type in here too, and their messages are context for your next
+          turn — so an instruction one of them leaves in this conversation can be
+          carried out by the agent <em>using your credentials</em>, without you
+          asking for it.
+        </li>
+      </ul>
+      {confirming ? (
+        <>
+          <p className="exposure-fine">
+            This is recorded against your name and this session, and the transcript
+            notes it whenever a turn actually uses those systems. You will be asked
+            again if anyone else is given access. Saying no sends nothing and changes
+            nothing else — your systems stay yours either way.
+          </p>
+          <div className="row exposure-actions">
+            <button className="primary" type="button" disabled={busy} onClick={onAgree}>
+              {busy ? "Sending…" : "I understand — send it"}
+            </button>
+            <button type="button" disabled={busy} onClick={onDefer}>
+              Not now
+            </button>
+          </div>
+        </>
+      ) : (
+        <p className="exposure-fine">
+          Nothing is restricted by this — a turn here still reaches everything you
+          can reach.{" "}
+          {exposure.needs_acknowledgement
+            ? rearmed
+            : "You confirmed this; the transcript records each turn that uses them."}
+        </p>
+      )}
     </div>
   );
 }
@@ -1119,6 +1321,18 @@ function Sharing({
           {mine ? "" : " — only they can change who else is in"}. Everyone listed here sees
           the transcript and can answer the prompts a paused agent is waiting on.
         </p>
+        {/* Said to the person doing the adding, at the moment they add. The
+            other half of this warning is above the composer, addressed to
+            whoever's credentials are at stake; this half is the fact that
+            letting someone in is what puts them in a position to read it. */}
+        {mine && (
+          <p className="hint">
+            Anyone you add can read anything <em>other</em> members' stored systems
+            produce here, and can leave instructions the agent carries out with those
+            members' credentials on their next turn. Members are warned before their
+            systems are used, and asked again whenever you add someone.
+          </p>
+        )}
 
         {mine ? (
           <>

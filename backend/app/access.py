@@ -78,6 +78,45 @@ def sessions_visible_to(user: User) -> ColumnElement[bool]:
     )
 
 
+async def session_viewer_ids(db: AsyncSession, session: Session) -> set[int]:
+    """Everyone who can read this session's transcript, by user id.
+
+    The same three routes as `sessions_visible_to`, resolved forwards instead of
+    used as a filter: its owner, everyone it was shared with by name, and every
+    member of the team that owns it. Administrators are not in it, because being
+    an admin is not a way into a session (see the docstring above) — so this is
+    the real audience for anything the agent prints here, not an approximation
+    of it.
+
+    Written as a set of ids rather than of users so the caller decides what to
+    do about names: the exposure endpoint resolves them, the runner's transcript
+    note resolves them, and neither wants the other's ordering.
+
+    The shares are queried rather than read off `session.shares`, unlike
+    `can_see_session` below. That relationship is only populated for a session
+    that was loaded by a query, and this also runs against one just built in
+    memory — creating a session straight into a team is shared before its first
+    turn, so the check happens before the row is committed. Touching the
+    collection there is an implicit lazy load, which under asyncio is not a slow
+    path but a hard MissingGreenlet.
+    """
+    ids: set[int] = set()
+    if session.owner_id is not None:
+        ids.add(session.owner_id)
+    ids.update(
+        await db.scalars(
+            select(SessionShare.user_id).where(SessionShare.session_id == session.id)
+        )
+    )
+    if session.team_id is not None:
+        ids.update(
+            await db.scalars(
+                select(TeamMember.user_id).where(TeamMember.team_id == session.team_id)
+            )
+        )
+    return ids
+
+
 async def can_see_session(db: AsyncSession, session: Session, user: User) -> bool:
     """The same rule for one already-loaded session."""
     if session.owner_id is not None and session.owner_id == user.id:
