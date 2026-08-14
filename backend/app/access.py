@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import ColumnElement, or_, select, true
+from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import RelayNode, Session, SessionShare, Target, TeamMember, User

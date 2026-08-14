@@ -56,6 +56,9 @@ services:
       AIOPS_ACCOUNT_LIMIT_COOLDOWN_SECONDS: ${AIOPS_ACCOUNT_LIMIT_COOLDOWN_SECONDS:-3600}
       AIOPS_FORWARD_SUBAGENT_TEXT: ${AIOPS_FORWARD_SUBAGENT_TEXT:-true}
       AIOPS_STREAM_PARTIAL_MESSAGES: ${AIOPS_STREAM_PARTIAL_MESSAGES:-true}
+      # How much of the old conversation is written into the briefing an agent
+      # gets when a session is switched to another provider mid-thread.
+      AIOPS_HANDOFF_DIGEST_MAX_CHARS: ${AIOPS_HANDOFF_DIGEST_MAX_CHARS:-24000}
       AIOPS_INTERNAL_API_URL: ${AIOPS_INTERNAL_API_URL:-http://127.0.0.1:8000}
       # Brute-force protection on the sign-in form. AIOps may be the only thing
       # in front of an agent that runs shell commands.

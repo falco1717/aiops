@@ -236,7 +236,10 @@ Two different things, deliberately kept apart:
   failover.
 - **Measured usage** is what AIOps ran: tokens and estimated cost per window and
   per account, plus per-session context size. It covers *this server only* —
-  work done in a terminal elsewhere on the same account is not counted.
+  work done in a terminal elsewhere on the same account is not counted — and
+  *your own sessions only*, since a turn is only as visible as the conversation
+  it belongs to. An account you can see but have not driven reads as zero rather
+  than showing you somebody else's spend.
 
 Costs are API-rate estimates. On a subscription login they are not an extra
 charge; they are shown to compare relative spend.
@@ -296,10 +299,10 @@ an agent. Add accounts sparingly.
 
 ### Teams and who can see a session
 
-A session belongs to whoever created it. It is visible to four kinds of people
-and nobody else: its owner, anyone it was shared with by name, every member of
-the team it belongs to, and administrators. Anything you cannot see answers
-**404** — not 403, which would confirm the conversation exists.
+A session belongs to whoever created it. It is visible to three kinds of people
+and nobody else: its owner, anyone it was shared with by name, and every member
+of the team it belongs to. Anything you cannot see answers **404** — not 403,
+which would confirm the conversation exists.
 
 Teams are the unit for a shared space: an admin creates one and puts people in
 it, and every member sees every session that belongs to it, from the transcript
@@ -312,17 +315,36 @@ Accept/Deny prompts a paused agent is waiting on — which is to say, you can le
 it run the command it stopped on. That is the reason the sharing panel names
 everyone who can see the session rather than hiding the list.
 
-Two deliberate asymmetries:
+**Administrators get nothing extra**, exactly as with a stored system: being able
+to administer AIOps is not the same as being entitled to read somebody's work.
+They did once see every session, for a real operational reason — a session owned
+by someone who has left can still hold a stopped agent, and somebody has to be
+able to unstick it — but on an instance where everybody is an admin that made
+every session readable by everyone. It is handled at the other end instead, when
+the user is deleted:
 
-- **Administrators keep visibility of every session**, unlike stored systems,
-  where an admin gets no implicit access to somebody else's credential. The
-  reason is operational rather than principled: a session owned by someone who
-  has left can still hold a stopped agent, and somebody has to be able to
-  unstick it.
-- **Deleting is the owner's call.** Everyone who can see a session can work in
-  it — send turns, rename it, change its approval mode — but a session shared
-  into a team is other people's work too, so only its owner (or an admin) can
-  delete it or change who else is in.
+- shared with someone by name → it goes to them; they already had it
+- in a team → the team keeps it, and a remaining member takes ownership. It
+  survives the team emptying out and comes back when somebody is added
+- neither → deleted, with its runs and events. Nobody but the departing user
+  could see it, so nothing anybody had access to is lost
+- their **schedules** are deleted too. A schedule cannot be shared, so nobody
+  else ever had a claim on one, and an ownerless one would keep firing prompts
+  no user can read, edit or switch off
+
+So there is nothing stranded for an admin to need to reach, and deleting a user
+is not a way to inherit their work. `/api/usage` and `/api/schedules` follow the
+same rule: usage counts only turns in sessions you can see, and a schedule is
+visible and runnable only to its author. The one thing that stays instance-wide
+is the *account roster* — every signed-in user can already see which provider
+accounts exist and which are rate-limited, because you have to see them to pick
+one and a limited account explains why your run failed over. The spend on them is
+scoped like everything else.
+
+**Deleting is the owner's call.** Everyone who can see a session can work in
+it — send turns, rename it, change its approval mode — but a session shared into
+a team is other people's work too, so only its owner (or an admin who can already
+see it) can delete it or change who else is in.
 
 ### Relay nodes
 

@@ -10,8 +10,12 @@ MAX_QUEUE = 1000
 class EventHub:
     """In-process fan-out of live run events to websocket subscribers.
 
-    Topics are session ids, plus the special topic "*" which receives every
-    event (used by the dashboard to show global activity).
+    A topic is a session id, and nothing else. There used to be a "*" topic that
+    every message was copied to as well, which an administrator's socket could
+    subscribe to for a feed of every session at once; that went with the rest of
+    the admin bypass on session visibility. It is gone from here rather than only
+    refused at the router so that there is no reachable way to ask for it, and so
+    the next thing to add a subscriber cannot re-open it by accident.
     """
 
     def __init__(self) -> None:
@@ -31,21 +35,18 @@ class EventHub:
             self._subscribers.pop(topic, None)
 
     def publish(self, topic: str, message: dict[str, Any]) -> None:
-        # dict.fromkeys keeps order while collapsing the duplicate when the
-        # caller publishes to "*" directly.
-        for target in dict.fromkeys((topic, "*")):
-            for queue in list(self._subscribers.get(target, ())):
+        for queue in list(self._subscribers.get(topic, ())):
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                # A slow consumer must not stall the agent process. Drop the
+                # oldest message and keep the stream moving; the client can
+                # refetch persisted events over HTTP to fill any gap.
                 try:
+                    queue.get_nowait()
                     queue.put_nowait(message)
-                except asyncio.QueueFull:
-                    # A slow consumer must not stall the agent process. Drop the
-                    # oldest message and keep the stream moving; the client can
-                    # refetch persisted events over HTTP to fill any gap.
-                    try:
-                        queue.get_nowait()
-                        queue.put_nowait(message)
-                    except (asyncio.QueueEmpty, asyncio.QueueFull):
-                        pass
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    pass
 
 
 hub = EventHub()

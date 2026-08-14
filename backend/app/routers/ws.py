@@ -21,10 +21,21 @@ HEARTBEAT_SECONDS = 25
 
 @router.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None):
-    """Live event feed.
+    """Live event feed for one session, named by `session_id`.
 
-    Without `session_id` the socket receives every event (dashboard view);
-    with one it receives only that session's.
+    This socket streams the agent's output as it is written, so it obeys exactly
+    the rule the transcript does — otherwise a session would be private only
+    until somebody watched it live.
+
+    `session_id` used to be optional, and omitting it subscribed an administrator
+    to every session on the instance at once. That was the same admin bypass the
+    transcript just lost, arriving by a different door and carrying more: the
+    live feed includes tool calls and their output as they happen. There is no
+    filtered version of it here because nothing wants one — the Sessions page
+    refetches its list over HTTP on a timer, and the only socket the UI opens is
+    for the conversation being read. Filtering delivery instead would mean
+    re-deciding visibility per message on the runner's hot path, to arrive at a
+    feed no client asks for.
     """
     token = websocket.cookies.get(settings.cookie_name)
     async with SessionLocal() as db:
@@ -32,21 +43,16 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
         if user is None:
             await websocket.close(code=4401, reason="Not authenticated")
             return
-        # This socket streams the agent's output as it is written, so it has to
-        # obey the same rule the transcript does — otherwise a session is private
-        # only until somebody watches it live. The unscoped feed carries every
-        # session at once, which nobody but an administrator can be entitled to.
         if session_id is None:
-            allowed = user.is_admin
-        else:
-            sess = await db.get(Session, session_id)
-            allowed = sess is not None and await can_see_session(db, sess, user)
-        if not allowed:
+            await websocket.close(code=4400, reason="session_id is required")
+            return
+        sess = await db.get(Session, session_id)
+        if sess is None or not await can_see_session(db, sess, user):
             await websocket.close(code=4404, reason="Session not found")
             return
 
     await websocket.accept()
-    topic = session_id or "*"
+    topic = session_id
     queue = hub.subscribe(topic)
     await websocket.send_json({"type": "connected", "topic": topic})
 

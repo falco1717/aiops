@@ -4,10 +4,16 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import attachments as store
 from ..db import get_db
 from ..models import (
+    Approval,
+    Attachment,
+    Event,
     RelayNode,
     RelayNodeAccess,
+    Run,
+    Schedule,
     Session,
     SessionShare,
     Target,
@@ -15,6 +21,7 @@ from ..models import (
     TeamMember,
     User,
 )
+from ..runner import runner
 from ..schemas import UserCreate, UserOut, UserPasswordReset, UserPatch, UserSummary
 from ..security import current_admin, current_user, hash_password
 
@@ -125,25 +132,138 @@ async def delete_user(
     if user.is_admin and await _admin_count(db) <= 1:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot delete the only admin")
     await _hand_on_systems(db, user)
-    await _release_sessions(db, user)
+    await _release_schedules(db, user)
+    destroyed = await _release_sessions(db, user)
     await db.delete(user)
     await db.commit()
+    # Uploads on disk, once the rows that named them are actually gone. After the
+    # commit rather than before: a failure between the two would otherwise leave
+    # a session whose attachments the UI still lists and cannot fetch.
+    for session_id in destroyed:
+        store.discard_session(session_id)
 
 
-async def _release_sessions(db: AsyncSession, leaving: User) -> None:
-    """Take a departing user out of everything that grants session access.
+async def _release_sessions(db: AsyncSession, leaving: User) -> list[str]:
+    """Take a departing user out of everything that grants session access, and
+    leave none of their own sessions visible to nobody.
 
-    The foreign keys say as much, but SQLite does not enforce ON DELETE and
-    reuses integer ids, so a leftover share is a grant lying in wait for whoever
-    is created next. Their own sessions are left ownerless rather than handed
-    on: administrators can still reach them, which is exactly why they keep
-    visibility of every session.
+    Returns the ids of the sessions destroyed, whose uploads the caller should
+    remove from disk once the transaction has landed.
+
+    The membership and share rows go first. The foreign keys say as much, but
+    SQLite does not enforce ON DELETE and reuses integer ids, so a leftover
+    share is a grant lying in wait for whoever is created next.
+
+    Then their own sessions, which used to be left ownerless. That worked only
+    because administrators saw every session; now that nobody does, an ownerless
+    session is visible to no one for ever — including one holding a parked agent.
+    Handing them to an administrator instead would make deleting a user a way to
+    read their work, so each session goes to whoever already had a claim on it:
+
+    * shared with someone by name → to them, by the owner's own earlier decision
+    * in a team → the team keeps it, and a remaining member takes ownership
+    * neither → destroyed, because the departing user was the only person who
+      could ever see it, so there is nothing anyone else loses
+
+    A team session outlives an empty team: `team_id` is kept and the owner left
+    null, so it comes back as soon as the team has members again. That is an
+    administrator adding someone to a team, which is a deliberate and visible
+    act — not the silent read that an admin bypass would be.
     """
     await db.execute(delete(SessionShare).where(SessionShare.user_id == leaving.id))
     await db.execute(delete(TeamMember).where(TeamMember.user_id == leaving.id))
-    await db.execute(
-        update(Session).where(Session.owner_id == leaving.id).values(owner_id=None)
+    await db.flush()
+
+    destroyed: list[str] = []
+    owned = list(await db.scalars(select(Session).where(Session.owner_id == leaving.id)))
+    for sess in owned:
+        heir = await _session_heir(db, sess, leaving)
+        if heir is not None:
+            sess.owner_id = heir
+            # The new owner must not also hold a share of their own session; it
+            # would sit in the sharing list with nothing to switch it off.
+            for share in list(sess.shares):
+                if share.user_id == heir:
+                    sess.shares.remove(share)
+                    await db.delete(share)
+        elif sess.team_id is not None:
+            sess.owner_id = None
+        else:
+            await _destroy_session(db, sess)
+            destroyed.append(sess.id)
+    await db.flush()
+    return destroyed
+
+
+async def _session_heir(db: AsyncSession, sess: Session, leaving: User) -> int | None:
+    """Who should inherit this session, or None if nobody has a claim on it.
+
+    A named sharee first: the owner decided to give that person this exact
+    conversation. Failing that any remaining member of its team, who can see it
+    through the team whoever holds it. The lowest user id in both cases, so the
+    choice is deterministic rather than whatever order the database happens to
+    return, which is what makes it testable.
+    """
+    shared = sorted(share.user_id for share in sess.shares if share.user_id != leaving.id)
+    if shared:
+        return shared[0]
+    if sess.team_id is None:
+        return None
+    return await db.scalar(
+        select(func.min(TeamMember.user_id)).where(
+            TeamMember.team_id == sess.team_id, TeamMember.user_id != leaving.id
+        )
     )
+
+
+async def _destroy_session(db: AsyncSession, sess: Session) -> None:
+    """Delete a session nobody else could have seen, and everything under it.
+
+    The same shape as DELETE /api/sessions/{id}: stop the agent first, because
+    deleting the row out from under a running process leaves it writing events
+    against a session that no longer exists, which fails on the foreign key and
+    orphans the subprocess.
+
+    The children are deleted explicitly rather than left to the cascade. Every
+    one of those foreign keys is declared ON DELETE CASCADE and Postgres honours
+    it, but SQLite does not enforce foreign keys at all unless asked to, and
+    nothing here asks — so on a development database the rows would simply stay,
+    pointing at a session id that will never resolve.
+    """
+    active = list(
+        await db.scalars(
+            select(Run.id).where(
+                Run.session_id == sess.id, Run.status.in_(("queued", "running"))
+            )
+        )
+    )
+    for run_id in active:
+        await runner.cancel(run_id)
+    for model in (Event, Approval, Attachment, Run):
+        await db.execute(delete(model).where(model.session_id == sess.id))
+    await db.delete(sess)
+
+
+async def _release_schedules(db: AsyncSession, leaving: User) -> None:
+    """Delete a departing user's schedules.
+
+    A schedule has no sharing of any kind and the list is owner-scoped, so
+    nobody but its owner ever had a claim on one. Left ownerless it would be
+    worse than an invisible session: the cron loop keeps firing it, spending an
+    account and running commands on this server under a prompt no user can read,
+    edit or switch off. Same rule as a session nobody else could see, and for
+    the same reason.
+
+    Runs are unpinned first. `runs.schedule_id` is ON DELETE SET NULL, which
+    SQLite does not enforce, so a run belonging to a session that gets handed on
+    would otherwise keep reporting a schedule id that no longer resolves.
+    """
+    ids = list(await db.scalars(select(Schedule.id).where(Schedule.owner_id == leaving.id)))
+    if not ids:
+        return
+    await db.execute(update(Run).where(Run.schedule_id.in_(ids)).values(schedule_id=None))
+    await db.execute(delete(Schedule).where(Schedule.id.in_(ids)))
+    await db.flush()
 
 
 async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:

@@ -10,6 +10,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 from datetime import datetime
 
 sys.path.insert(0, os.getcwd())
@@ -28,6 +29,11 @@ os.environ.setdefault("AIOPS_SCHEDULER_ENABLED", "false")
 os.environ.setdefault("AIOPS_ATTACHMENTS_ROOT", tempfile.mkdtemp(prefix="aiops-teams-test-"))
 os.environ.setdefault(
     "AIOPS_WORKSPACE_ROOT", os.path.join(os.getcwd(), ".test-team-workspaces")
+)
+# A throwaway directory: creating a provider account makes its credential
+# directory, and the real one is not something a test should be writing into.
+os.environ.setdefault(
+    "AIOPS_ACCOUNTS_ROOT", os.path.join(os.getcwd(), ".test-team-accounts")
 )
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -87,6 +93,61 @@ def rows_for_user(table: str, user_id: int) -> int:
         return con.execute(f"SELECT COUNT(*) FROM {table} WHERE user_id = ?", (user_id,)).fetchone()[0]
     finally:
         con.close()
+
+
+def rows_for_session(table: str, session_id: str) -> int:
+    con = sqlite3.connect(DB_FILE)
+    try:
+        return con.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE session_id = ?", (session_id,)
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+
+def scalar(sql: str, *params):
+    con = sqlite3.connect(DB_FILE)
+    try:
+        return con.execute(sql, params).fetchone()[0]
+    finally:
+        con.close()
+
+
+def stranded_sessions() -> int:
+    """Sessions visible to nobody at all: no owner, no team, no named sharee.
+
+    Asked of the database rather than the API precisely because no user could see
+    one to report it — which is the whole problem with leaving one behind.
+    """
+    return scalar(
+        "SELECT COUNT(*) FROM sessions WHERE owner_id IS NULL AND team_id IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM session_shares s WHERE s.session_id = sessions.id)"
+    )
+
+
+def settle(client, session_id: str) -> None:
+    """Wait for a session's turns to stop, so row counts are not a race.
+
+    There is no `claude` on PATH here, so a run fails almost at once — but "almost"
+    is not "before the next assertion".
+    """
+    for _ in range(80):
+        rows = client.get(f"/api/sessions/{session_id}/runs")
+        if rows.status_code != 200:
+            return
+        if all(row["status"] not in ("queued", "running") for row in rows.json()):
+            return
+        time.sleep(0.05)
+
+
+def ws_close_code(client, query: str):
+    """The code the live feed hangs up with, or "accepted" if the socket opened."""
+    try:
+        with client.websocket_connect(f"/api/ws{query}") as socket:
+            socket.receive_json()
+            return "accepted"
+    except Exception as exc:  # noqa: BLE001
+        return getattr(exc, "code", f"{type(exc).__name__}: {exc}")
 
 
 with TestClient(app) as c:
@@ -271,15 +332,45 @@ with TestClient(app) as c:
     check("including the approval it carried", r.status_code == 200 and r.json() == [],
           r.text[:200])
 
-    # --- admins keep visibility, unlike stored systems ---------------------
+    # --- an admin gets nothing they were not given -------------------------
+    # Admins used to see every session, so that one abandoned by a user who had
+    # left could still be unstuck. On an instance where everybody is an admin
+    # that made every session readable by everyone, so it is gone; what replaces
+    # it is the departing-user rule further down, which leaves nothing stranded
+    # for an admin to need to reach. otheradmin owns nothing here, holds no share
+    # and is in no team, so every one of these must read as missing.
     login(c, "otheradmin", "otheradminpassword1")
     r = c.get("/api/sessions")
-    check("an admin sees a session they were never given",
-          r.status_code == 200 and any(s["id"] == sid for s in r.json()), r.text[:200])
-    check("and can read it", c.get(f"/api/sessions/{sid}/transcript").status_code == 200)
+    check("an admin does not see a session they were never given",
+          r.status_code == 200 and all(s["id"] != sid for s in r.json()), r.text[:200])
+    for method, path, payload in blocked:
+        r = c.request(method, path, json=payload)
+        check(f"{method} {path.split(sid)[-1] or '(the session)'} is 404 for an admin too",
+              r.status_code == 404, f"{r.status_code} {r.text[:120]}")
     r = c.get("/api/approvals", params={"session_id": sid})
-    check("an admin can unstick a paused agent",
-          r.status_code == 200 and len(r.json()) == 1, r.text[:200])
+    check("an admin's approval list does not carry it either",
+          r.status_code == 200 and r.json() == [], r.text[:200])
+    r = c.post(f"/api/approvals/{approval_id}/decide", json={"allowed": True})
+    check("and an admin cannot decide it, so no command runs on their say-so",
+          r.status_code == 404, f"{r.status_code} {r.text[:160]}")
+    r = c.get(f"/api/runs/{run_id}")
+    check("nor read the run carrying the prompt", r.status_code == 404, str(r.status_code))
+    r = c.get("/api/runs")
+    check("nor find it in the run list",
+          r.status_code == 200 and all(row["id"] != run_id for row in r.json()), r.text[:200])
+    code = ws_close_code(c, f"?session_id={sid}")
+    check("nor watch it live", code == 4404, str(code))
+
+    # The firehose. Omitting session_id used to subscribe an admin to every
+    # session at once — the same bypass arriving by a different door, and
+    # carrying more, because the live feed includes tool calls as they happen.
+    code = ws_close_code(c, "")
+    check("an admin cannot subscribe to every session at once", code == 4400, str(code))
+    login(c, "walt", "waltpassword1")
+    code = ws_close_code(c, "")
+    check("and neither can anybody else", code == 4400, str(code))
+    code = ws_close_code(c, f"?session_id={sid}")
+    check("the owner can still watch their own session", code == "accepted", str(code))
 
     # --- ownership transfer ------------------------------------------------
     login(c, "walt", "waltpassword1")
@@ -340,6 +431,178 @@ with TestClient(app) as c:
     check("their shares are gone with them, not left for the next id to inherit",
           rows_for_user("session_shares", walt) == 0)
     check("and their team memberships too", rows_for_user("team_members", walt) == 0)
+
+    # --- schedules are their author's own ----------------------------------
+    # ScheduleOut carries `prompt` and `target_session_id`, so an unscoped list
+    # handed every signed-in user the full text of everyone's unattended prompts
+    # and the id of the session each one writes into.
+    login(c, "nina", "ninapassword1")
+    nightly = {
+        "name": "nina nightly", "cron": "0 2 * * *", "timezone_name": "UTC",
+        "prompt": "nina's private prompt", "provider": "claude", "session_mode": "new",
+    }
+    r = c.post("/api/schedules", json=nightly)
+    check("a user can create a schedule", r.status_code == 201, f"{r.status_code} {r.text[:200]}")
+    nina_sched = r.json()["id"]
+    r = c.get("/api/schedules")
+    check("and sees it in their own list",
+          r.status_code == 200 and [s["id"] for s in r.json()] == [nina_sched], r.text[:300])
+
+    login(c, "ivan", "ivanpassword1")
+    r = c.get("/api/schedules")
+    check("somebody else's schedule is not in the list",
+          r.status_code == 200 and r.json() == [], r.text[:300])
+    r = c.put(f"/api/schedules/{nina_sched}", json=nightly)
+    check("nor can they edit it", r.status_code == 404, f"{r.status_code} {r.text[:160]}")
+    r = c.post(f"/api/schedules/{nina_sched}/run")
+    check("nor fire it, which would run under the author's access",
+          r.status_code == 404, f"{r.status_code} {r.text[:160]}")
+    r = c.delete(f"/api/schedules/{nina_sched}")
+    check("nor delete it", r.status_code == 404, str(r.status_code))
+
+    # Being an admin is not a way in either: a schedule is somebody's prompt and
+    # firing one reaches the stored systems only its author can reach.
+    login(c, "admin", "devpassword123")
+    r = c.get("/api/schedules")
+    check("an admin's schedule list does not carry it",
+          r.status_code == 200 and all(s["id"] != nina_sched for s in r.json()), r.text[:300])
+    r = c.delete(f"/api/schedules/{nina_sched}")
+    check("and an admin cannot delete it", r.status_code == 404, str(r.status_code))
+    login(c, "nina", "ninapassword1")
+    r = c.get("/api/schedules")
+    check("so it is still there for its owner",
+          r.status_code == 200 and [s["id"] for s in r.json()] == [nina_sched], r.text[:300])
+
+    # --- usage counts only what you can see --------------------------------
+    login(c, "admin", "devpassword123")
+    dora = make_user(c, "dora")
+    ella = make_user(c, "ella")
+    night = c.post("/api/teams", json={"name": "Nightshift",
+                                       "member_ids": [dora, ella]}).json()["id"]
+    r = c.post("/api/accounts", json={"name": "Shared Claude", "provider": "claude"})
+    check("an admin can add a provider account", r.status_code == 201, r.text[:200])
+    account_id = r.json()["id"]
+
+    login(c, "dora", "dorapassword1")
+    lone = c.post("/api/sessions", json={
+        "provider": "claude", "title": "nobody else's", "account_id": account_id,
+    }).json()["id"]
+    c.post(f"/api/sessions/{lone}/prompt", json={"prompt": "a turn to leave behind"})
+    settle(c, lone)
+    u = c.get("/api/usage").json()
+    check("your own turns are counted in your usage",
+          max(w["runs"] for w in u["windows"]) >= 1, str(u["windows"])[:300])
+    mine = next(a for a in u["by_account"] if a["account_id"] == account_id)
+    check("and attributed to the account that served them", mine["runs"] >= 1, str(mine))
+
+    login(c, "ivan", "ivanpassword1")
+    u = c.get("/api/usage").json()
+    check("somebody else's turns are not counted in yours",
+          all(w["runs"] == 0 and w["total_tokens"] == 0 and w["cost_usd"] == 0
+              for w in u["windows"]), str(u["windows"])[:300])
+    theirs = next(a for a in u["by_account"] if a["account_id"] == account_id)
+    # Deliberate: the account roster is instance-level and /api/accounts already
+    # shows it to everyone, because you have to see an account to pick one and a
+    # limited account is why somebody else's run just failed over onto yours.
+    # What was never instance-level is the spend.
+    check("the account is still listed, by name and provider",
+          theirs["name"] == "Shared Claude" and theirs["provider"] == "claude", str(theirs))
+    check("but with none of somebody else's spend on it",
+          theirs["runs"] == 0 and theirs["total_tokens"] == 0 and theirs["cost_usd"] == 0,
+          str(theirs))
+
+    # --- deleting a user must strand nothing --------------------------------
+    # An ownerless session used to be fine because admins saw everything. Now
+    # that nobody does, one would be invisible for ever — including one holding a
+    # parked agent. So each of the departing user's sessions goes to whoever
+    # already had a claim on it, or is destroyed if nobody did.
+    login(c, "dora", "dorapassword1")
+    shared_on = c.post("/api/sessions", json={"provider": "claude",
+                                              "title": "handed on"}).json()["id"]
+    c.patch(f"/api/sessions/{shared_on}", json={"shared_user_ids": [ella]})
+    teamed = c.post("/api/sessions", json={"provider": "claude", "title": "the team's",
+                                           "team_id": night}).json()["id"]
+    r = c.post("/api/schedules", json={
+        "name": "dora nightly", "cron": "0 3 * * *", "timezone_name": "UTC",
+        "prompt": "dora's private prompt", "provider": "claude", "session_mode": "new",
+    })
+    check("the departing user has a schedule of their own", r.status_code == 201, r.text[:200])
+    check("and an unshared session with a turn on it",
+          rows_for_session("runs", lone) >= 1, str(rows_for_session("runs", lone)))
+
+    login(c, "admin", "devpassword123")
+    r = c.delete(f"/api/users/{dora}")
+    check("a user who owns sessions can be deleted", r.status_code == 204,
+          f"{r.status_code} {r.text[:200]}")
+
+    login(c, "ella", "ellapassword1")
+    r = c.get(f"/api/sessions/{shared_on}")
+    check("a shared session goes to the person it was shared with",
+          r.status_code == 200 and r.json()["owner_id"] == ella, f"{r.status_code} {r.text[:200]}")
+    check("who does not also end up holding a share of their own session",
+          r.status_code == 200 and r.json()["shared_user_ids"] == [], r.text[:200])
+    r = c.get(f"/api/sessions/{teamed}")
+    check("a team's session stays with the team", r.status_code == 200, str(r.status_code))
+    check("owned by a member who is still there",
+          r.status_code == 200 and r.json()["owner_id"] == ella, r.text[:200])
+    r = c.get(f"/api/sessions/{lone}")
+    check("a session nobody else could ever see is gone", r.status_code == 404,
+          str(r.status_code))
+    check("and its runs with it", rows_for_session("runs", lone) == 0,
+          str(rows_for_session("runs", lone)))
+    check("and its events", rows_for_session("events", lone) == 0,
+          str(rows_for_session("events", lone)))
+    check("their schedules go with them, not left firing unseen",
+          scalar("SELECT COUNT(*) FROM schedules WHERE owner_id = ?", dora) == 0)
+    check("and nothing at all is left visible to nobody", stranded_sessions() == 0,
+          str(stranded_sessions()))
+
+    # An admin is not a backdoor to any of it: the sessions that survived are the
+    # ones somebody else already had, and they are still only that person's.
+    login(c, "otheradmin", "otheradminpassword1")
+    r = c.get("/api/sessions")
+    ids = [s["id"] for s in r.json()]
+    check("an admin still sees none of the inherited sessions",
+          shared_on not in ids and teamed not in ids, str(ids)[:200])
+
+    # --- a team keeps a session even when the team empties out --------------
+    login(c, "admin", "devpassword123")
+    frank = make_user(c, "frank")
+    solo = c.post("/api/teams", json={"name": "Solo", "member_ids": [frank]}).json()["id"]
+    login(c, "frank", "frankpassword1")
+    held = c.post("/api/sessions", json={"provider": "claude", "title": "the team's alone",
+                                         "team_id": solo}).json()["id"]
+    login(c, "admin", "devpassword123")
+    r = c.delete(f"/api/users/{frank}")
+    check("the only member of a team can be deleted", r.status_code == 204, r.text[:200])
+    check("their team session is kept rather than destroyed",
+          scalar("SELECT COUNT(*) FROM sessions WHERE id = ? AND owner_id IS NULL "
+                 "AND team_id = ?", held, solo) == 1)
+    r = c.get(f"/api/sessions/{held}")
+    check("an admin outside the team still cannot read it", r.status_code == 404,
+          str(r.status_code))
+    c.patch(f"/api/teams/{solo}", json={"member_ids": [nina]})
+    login(c, "nina", "ninapassword1")
+    r = c.get(f"/api/sessions/{held}")
+    check("and it comes back to whoever is put in the team", r.status_code == 200,
+          str(r.status_code))
+
+# --- the two orphan mechanisms must not fight --------------------------------
+# The upgrade path assigns ownerless rows to the first admin, which is right for
+# data that predates ownership and wrong for the team session just left
+# deliberately ownerless. Booting the app again is what would show them fighting:
+# "delete the owner, restart" must not be a way for an admin to end up owning
+# somebody else's work.
+with TestClient(app) as c:
+    check("restarting does not hand the team's session to an admin",
+          scalar("SELECT COUNT(*) FROM sessions WHERE id = ? AND owner_id IS NULL "
+                 "AND team_id = ?", held, solo) == 1)
+    login(c, "nina", "ninapassword1")
+    check("and the team can still read it",
+          c.get(f"/api/sessions/{held}").status_code == 200)
+    login(c, "otheradmin", "otheradminpassword1")
+    check("while the admin still cannot",
+          c.get(f"/api/sessions/{held}").status_code == 404)
 
 print()
 if failures:

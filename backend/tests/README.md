@@ -19,6 +19,12 @@ rm -f test_users.db && python tests/test_users.py
 
 Each exits non-zero on the first failure and prints a PASS/FAIL line per check.
 
+`run_all.sh` does every suite in one go — from `backend/`, each against a fresh
+database of its own, and it prints the per-suite check counts together so "all
+suites pass" is one command rather than fifteen. Run it with **neither agent CLI
+on PATH**: several suites assert what happens when the binary is missing, and a
+real `claude` or `codex` turns those checks into live agent runs.
+
 ## `test_api.py`
 
 Covers the HTTP surface: authentication and cookie invalidation, the workspace
@@ -83,16 +89,54 @@ never a 403.
 
 The checks with teeth are the approvals: answering one runs the command the agent
 stopped on, so the suite asserts that an outsider's approval list is empty *and*
-that deciding one returns 404. It then walks the three ways in — a direct share,
-team membership, and being an administrator — and asserts each grants the list,
-the transcript and the approval, and that withdrawing the share or the membership
-takes all of it away again. Ownership transfer is checked from both ends: the new
-owner gains it, the old owner loses it.
+that deciding one returns 404. It then walks the two ways in — a direct share and
+team membership — and asserts each grants the list, the transcript and the
+approval, and that withdrawing the share or the membership takes all of it away
+again. Ownership transfer is checked from both ends: the new owner gains it, the
+old owner loses it.
 
-Last, it deletes a user who is in a team and holds a share, and asserts both rows
-are gone. SQLite does not enforce `ON DELETE` and reuses integer ids, so a
-leftover row there is a grant waiting to be inherited by the next account
-created.
+There used to be a third way in: being an administrator. That is gone, and the
+same block now runs the whole outsider list against an admin who owns nothing,
+holds no share and is in no team — including the live feed, which is where the
+bypass survived longest. Subscribing with no `session_id` was an admin's feed of
+every session at once, and the socket carries tool calls as they happen, so it
+leaked more than the transcript did. It is refused for everyone now; the Sessions
+page never used it, and keeps its list current by refetching over HTTP.
+
+Then the other end of that rule, which is what makes removing the bypass safe.
+Deleting a user must leave nothing behind that nobody can see:
+
+- a session shared with someone by name goes to them, without also leaving them
+  holding a share of what is now their own session
+- a session in a team stays with the team, owned by a member who is still there —
+  and survives the team emptying out entirely, coming back when somebody is added
+- a session with neither is destroyed, with its runs and its events
+- their schedules go too, because a schedule cannot be shared and an ownerless
+  one keeps firing prompts nobody can read or switch off
+
+The summary assertion is `stranded_sessions()`, asked of the database directly
+rather than through the API — the point of a stranded session is that no user
+could see one to report it. It also deletes a user who is in a team and holds a
+share and asserts both rows are gone: SQLite does not enforce `ON DELETE` and
+reuses integer ids, so a leftover row there is a grant waiting to be inherited by
+the next account created.
+
+Last, it boots the app a second time against the same database. The upgrade path
+assigns ownerless rows to the first administrator, which is right for data that
+predates ownership and wrong for the team session just left deliberately
+ownerless — so "delete the owner, restart the app" must not be a way for an admin
+to end up owning somebody else's work.
+
+Scoping for the two endpoints that leaked past session visibility is here as
+well. `/api/schedules` was entirely unscoped while `ScheduleOut` carries `prompt`
+and `target_session_id`, so the suite asserts the list is the caller's own and
+that `PUT`, `DELETE` and `/run` are 404 for anyone else, an administrator
+included — firing a schedule runs commands under its author's access to stored
+systems. `/api/usage` aggregated over every session; the suite asserts your own
+turns are counted and somebody else's are not, and pins the one deliberate
+exception: an account still appears by **name and provider**, because
+`/api/accounts` shows the roster to everyone anyway, but with none of another
+user's spend on it.
 
 ## `test_relay.py`
 

@@ -143,6 +143,14 @@ async def _backfill_owners() -> None:
     every user once visibility starts depending on one, so it is assigned to
     an administrator, who can hand it on. This is logged loudly because it is
     a visibility change to existing data, not a schema detail.
+
+    A session is only claimed if it is genuinely unreachable — no team and no
+    named sharee. Without that qualification this would fight the other half of
+    the rule: deleting a user deliberately leaves a team's session ownerless so
+    the team keeps it (see routers/users.py), and claiming it here would make
+    "delete the owner, restart the app" a way for an administrator to end up
+    owning somebody else's work. Handing on a session nobody at all can see is
+    an upgrade fixing pre-ownership data; handing on one a team can see is not.
     """
     async with SessionLocal() as db:
         admin = await db.scalar(
@@ -150,15 +158,17 @@ async def _backfill_owners() -> None:
         )
         if admin is None:
             return
-        for table, label in (
-            ("sessions", "session"),
-            ("targets", "stored system"),
-            ("schedules", "schedule"),
+        unreachable = (
+            "UPDATE sessions SET owner_id = :owner WHERE owner_id IS NULL "
+            "AND team_id IS NULL AND NOT EXISTS "
+            "(SELECT 1 FROM session_shares WHERE session_shares.session_id = sessions.id)"
+        )
+        for statement, label in (
+            (unreachable, "session"),
+            ("UPDATE targets SET owner_id = :owner WHERE owner_id IS NULL", "stored system"),
+            ("UPDATE schedules SET owner_id = :owner WHERE owner_id IS NULL", "schedule"),
         ):
-            result = await db.execute(
-                text(f"UPDATE {table} SET owner_id = :owner WHERE owner_id IS NULL"),
-                {"owner": admin.id},
-            )
+            result = await db.execute(text(statement), {"owner": admin.id})
             if result.rowcount:
                 log.warning(
                     "migration: %d %s(s) had no owner and are now owned by %r. "

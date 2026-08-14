@@ -264,9 +264,14 @@ export const api = {
     }),
 };
 
-/** Opens the live event socket, optionally scoped to one session. */
-export function openSocket(sessionId?: string): WebSocket {
+/** Opens the live event socket for one session.
+ *
+ * The session is required. Omitting it used to subscribe to every session on the
+ * instance, which the server now refuses; nothing here ever asked for that feed,
+ * and the Sessions list stays current by refetching on a timer instead.
+ */
+export function openSocket(sessionId: string): WebSocket {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  const query = `?session_id=${encodeURIComponent(sessionId)}`;
   return new WebSocket(`${proto}//${location.host}/api/ws${query}`);
 }

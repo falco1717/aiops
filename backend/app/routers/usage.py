@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..access import can_see_session
+from ..access import can_see_session, sessions_visible_to
 from ..db import get_db
 from ..models import ProviderAccount, Run, Session, User
 from ..schemas import SessionContextOut, UsageOut, UsageWindow
@@ -25,10 +25,12 @@ WINDOWS = [
 ]
 
 NOTE = (
-    "Counted from runs AIOps executed, so it covers this server only — work you "
-    "do in a terminal elsewhere on the same account is not included. Plan "
-    "windows above come from the CLI itself and are authoritative. Token costs "
-    "are API-rate estimates and are not billed separately on a subscription."
+    "Counted from runs AIOps executed in sessions you can see, so it covers this "
+    "server only and your own work only — turns in somebody else's conversation, "
+    "and anything you do in a terminal elsewhere on the same account, are not "
+    "included. Plan windows above come from the CLI itself and are "
+    "authoritative. Token costs are API-rate estimates and are not billed "
+    "separately on a subscription."
 )
 
 
@@ -44,12 +46,30 @@ def _cols():
 
 
 @router.get("", response_model=UsageOut)
-async def usage(_: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def usage(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """What this user has spent, counted over the conversations they can see.
+
+    A run is a turn of a session, so it is exactly as visible as that session is.
+    Unscoped, these figures reported how much work everybody on the instance had
+    done and — with the per-account breakdown below — on whose account, to anyone
+    who loaded the page.
+
+    The account roster itself is deliberately *not* scoped. `GET /api/accounts`
+    already lists every account with its name, provider and limit state to every
+    signed-in user, because you have to be able to see the accounts to choose one
+    for a session, and a limited account is the reason someone else's run just
+    failed over onto yours. What was never instance-level is the usage: an
+    account you can see but have not driven now reads as zero rather than as
+    somebody else's totals.
+    """
     now = datetime.now(timezone.utc)
+    mine = Run.session_id.in_(select(Session.id).where(sessions_visible_to(user)))
     windows: list[UsageWindow] = []
     for label, delta in WINDOWS:
         since = now - delta
-        row = (await db.execute(select(*_cols()).where(Run.created_at >= since))).one()
+        row = (
+            await db.execute(select(*_cols()).where(Run.created_at >= since, mine))
+        ).one()
         runs, inp, outp, cread, cwrite, cost = row
         windows.append(
             UsageWindow(
@@ -75,8 +95,19 @@ async def usage(_: User = Depends(current_user), db: AsyncSession = Depends(get_
                 ProviderAccount.limited_until,
                 *_cols(),
             )
-            .join(Run, Run.account_id == ProviderAccount.id, isouter=True)
-            .where((Run.created_at >= since) | (Run.id.is_(None)))
+            # Every condition on the run belongs in the ON clause, not a WHERE.
+            # This is an outer join whose whole point is to keep accounts with
+            # nothing to count, and a WHERE would drop those rows back out again
+            # — so an account somebody else has been hammering would vanish from
+            # your list entirely instead of showing zero, which is a slower way
+            # of leaking the same fact.
+            .join(
+                Run,
+                (Run.account_id == ProviderAccount.id)
+                & (Run.created_at >= since)
+                & mine,
+                isouter=True,
+            )
             .group_by(
                 ProviderAccount.id,
                 ProviderAccount.name,
