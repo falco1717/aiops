@@ -119,6 +119,7 @@ async def queue_run(
     *,
     schedule_id: int | None = None,
     attachment_ids: list[str] | None = None,
+    requested_by_id: int | None = None,
 ) -> Run:
     """Persist a turn and hand it to the runner. Commits."""
     prompt = prompt.strip()
@@ -127,7 +128,13 @@ async def queue_run(
 
     attached = await _claimable_attachments(db, session.id, attachment_ids or [])
 
-    run = Run(session_id=session.id, prompt=prompt, schedule_id=schedule_id, status="queued")
+    run = Run(
+        session_id=session.id,
+        prompt=prompt,
+        schedule_id=schedule_id,
+        requested_by_id=requested_by_id,
+        status="queued",
+    )
     db.add(run)
     await db.flush()
     for row in attached:

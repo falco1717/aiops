@@ -243,8 +243,13 @@ class Runner:
             # Scoped to whoever owns the session: stored credentials belong to
             # the person who saved them, so a turn only reaches systems that
             # person may reach.
-            owner = await db.get(User, sess.owner_id) if sess.owner_id else None
-            targets = await ssh_targets.visible_targets(db, owner)
+            # Whoever asked for this turn, not whoever owns the session: a
+            # shared session must not lend its owner's stored credentials to
+            # everyone able to type into it.
+            asker = (
+                await db.get(User, run.requested_by_id) if run.requested_by_id else None
+            )
+            targets = await ssh_targets.visible_targets(db, asker)
             # Systems bound to a relay node are reached through it. The nodes
             # are looked up here so the generated config can name them, and so
             # this run's permission to use one covers exactly these hosts.

@@ -486,6 +486,12 @@ class Run(Base):
         ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True
     )
     prompt: Mapped[str] = mapped_column(Text)
+    # Who asked for this turn. Stored credentials are materialised for *this*
+    # user, not the session's owner: a session can be shared, and anyone able
+    # to prompt one would otherwise inherit the owner's keys by typing into it.
+    requested_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="queued")
     # queued | running | succeeded | failed | cancelled | timeout
     exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)

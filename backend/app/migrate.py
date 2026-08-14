@@ -45,6 +45,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "owner_id": "INTEGER",
     },
     "runs": {
+        "requested_by_id": "INTEGER",
         "account_id": "INTEGER",
         "failed_over_from_id": "INTEGER",
         "input_tokens": "INTEGER",
