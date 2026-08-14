@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal
 
+from .agent_env import agent_environ
 from .config import settings
 
 log = logging.getLogger("aiops.auth_flows")
@@ -203,7 +204,7 @@ class LoginManager:
         # account_env carries CLAUDE_CONFIG_DIR / CODEX_HOME so the credentials
         # land in the right account's directory.
         return {
-            **os.environ,
+            **agent_environ(),
             **(account_env or {}),
             "NO_COLOR": "1",
             "FORCE_COLOR": "0",

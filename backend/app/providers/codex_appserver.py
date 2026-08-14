@@ -30,6 +30,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+from ..agent_env import agent_environ
 from ..config import settings
 from .base import NormalizedEvent
 
@@ -664,7 +665,7 @@ class CodexAppServerAdapter:
 
     # -- transport ------------------------------------------------------
     async def _spawn(self) -> None:
-        env = os.environ.copy()
+        env = agent_environ()
         if self.codex_home:
             env["CODEX_HOME"] = self.codex_home
         env.update(self.extra_env)

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from .agent_env import agent_environ
 from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
@@ -355,7 +356,7 @@ class Runner:
                     )
                 else:
                     env = {
-                        **os.environ,
+                        **agent_environ(),
                         **spec.env,
                         "NO_COLOR": "1",
                         "FORCE_COLOR": "0",

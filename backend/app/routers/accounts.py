@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth_flows import login_manager
+from ..agent_env import agent_environ
 from ..config import settings
 from ..db import get_db
 from ..models import AccountAccess, ProviderAccount, User
@@ -51,7 +52,7 @@ async def _status(account: ProviderAccount) -> tuple[bool | None, str | None]:
         if account.provider == "claude"
         else [binary, "login", "status"]
     )
-    env = {**os.environ, **account.env(), "NO_COLOR": "1"}
+    env = {**agent_environ(), **account.env(), "NO_COLOR": "1"}
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
