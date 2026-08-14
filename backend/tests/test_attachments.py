@@ -280,7 +280,7 @@ with TestClient(app) as c:
     )
     check("a prompt carrying an attachment is accepted", r.status_code == 202, r.text[:300])
     run_id = r.json().get("id") if r.status_code == 202 else None
-    check("the turn settles", wait_idle(c, sid), "still busy after 20s")
+    check("the turn settles", wait_idle(c, sid))
 
     r = c.get(f"/api/sessions/{sid}/transcript")
     body = r.json()
@@ -307,7 +307,7 @@ with TestClient(app) as c:
     check(
         "the agent is handed the absolute path of each attachment",
         str(store.stored_path(sid, sent_id, "notes.txt")) in suffix and "attached" in suffix,
-        suffix[:200],
+        suffix.strip().replace("\n", " ")[:140],
     )
 
     r = c.post(
@@ -316,7 +316,7 @@ with TestClient(app) as c:
     )
     check("an attachment cannot be re-sent with a later turn", r.status_code == 400,
           f"{r.status_code} {r.text[:160]}")
-    check("the rejected turn settles", wait_idle(c, sid), "still busy after 20s")
+    check("the rejected turn settles", wait_idle(c, sid))
     r = c.post(f"/api/sessions/{sid}/prompt", json={"prompt": "x", "attachment_ids": ["made-up"]})
     check("an unknown attachment id is refused", r.status_code == 400,
           f"{r.status_code} {r.text[:160]}")
@@ -331,6 +331,11 @@ with TestClient(app) as c:
     (ws_dir / "nested" / "deep.log").write_bytes(b"nested output")
     (ws_dir / ".git").mkdir(exist_ok=True)
     (ws_dir / ".git" / "HEAD").write_bytes(b"ref: refs/heads/main")
+    in_range = ws_dir / "d1" / "d2" / "d3"
+    in_range.mkdir(parents=True, exist_ok=True)
+    (in_range / "in-range.txt").write_bytes(b"still listed")
+    (in_range / "d4").mkdir(exist_ok=True)
+    (in_range / "d4" / "too-deep.txt").write_bytes(b"below the depth limit")
 
     r = c.get(f"/api/sessions/{sid}/files")
     check("the session's files are listed", r.status_code == 200, r.text[:200])
@@ -341,6 +346,10 @@ with TestClient(app) as c:
     check("a file the agent wrote is listed", "report.txt" in names, str(sorted(names))[:200])
     check("so is one a level down", "nested/deep.log" in names, str(sorted(names))[:200])
     check("but .git is not walked", not any(n.startswith(".git") for n in names),
+          str(sorted(names))[:200])
+    check("a file at the depth limit is still listed", "d1/d2/d3/in-range.txt" in names,
+          str(sorted(names))[:200])
+    check("one below it is not", "d1/d2/d3/d4/too-deep.txt" not in names,
           str(sorted(names))[:200])
     check("the caps are reported so the UI can state the rule",
           listing.get("max_files") == settings.session_files_max
@@ -388,6 +397,18 @@ with TestClient(app) as c:
               "escape-link" not in {f["path"] for f in r.json()["files"]})
     else:
         print("[SKIP] symlink checks — this platform would not create one")
+
+    # --- the count cap ------------------------------------------------------
+    # Last, because it buries everything else in the listing.
+    flood = ws_dir / "flood"
+    flood.mkdir(exist_ok=True)
+    for n in range(settings.session_files_max + 5):
+        (flood / f"out-{n:04d}.bin").write_bytes(b"x")
+    r = c.get(f"/api/sessions/{sid}/files")
+    listing = r.json()
+    check("the listing stops at the cap", len(listing["files"]) <= settings.session_files_max,
+          str(len(listing["files"])))
+    check("and says so rather than truncating silently", listing["truncated"] is True)
 
     # --- authentication ------------------------------------------------------
     c.post("/api/auth/logout")
