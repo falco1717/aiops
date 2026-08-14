@@ -88,8 +88,23 @@ export type Session = {
   provider_session_id: string | null;
   status: string;
   archived: boolean;
+  owner_id: number | null;
+  /** The team whose members all see this session, if it belongs to one. */
+  team_id: number | null;
+  /** People it was shared with by name, beside any team. */
+  shared_user_ids: number[];
   created_at: string;
   updated_at: string;
+};
+
+/** A group of people who see each other's sessions. Membership is admin-managed. */
+export type Team = {
+  id: number;
+  name: string;
+  description: string | null;
+  member_ids: number[];
+  session_count: number;
+  created_at: string;
 };
 
 export type Run = {

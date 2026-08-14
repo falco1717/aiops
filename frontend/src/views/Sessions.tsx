@@ -1,14 +1,19 @@
 import type * as React from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
-import type { Account, Preset, ProviderInfo, Session, Workspace } from "../types";
+import type { Account, Preset, ProviderInfo, Session, Team, User, Workspace } from "../types";
 import Chat from "./Chat";
 
-export default function Sessions() {
+/** The bucket a session is listed under: its team, or nobody's. */
+const NO_TEAM = 0;
+
+export default function Sessions({ me }: { me: User }) {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [filter, setFilter] = useState("all");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,6 +31,30 @@ export default function Sessions() {
     return () => clearInterval(timer);
   }, [load]);
 
+  // Only to name the team a session belongs to; the list itself is already
+  // limited to what the server says this user may see.
+  useEffect(() => {
+    api.teams().then(setTeams).catch(() => setTeams([]));
+  }, []);
+
+  const teamName = (id: number | null) =>
+    teams.find((t) => t.id === id)?.name ?? (id === null ? "Not in a team" : "Another team");
+
+  const groups = useMemo(() => {
+    const shown = sessions.filter((s) => {
+      if (filter === "all") return true;
+      if (filter === "mine") return s.owner_id === me.id;
+      if (filter === "shared") return s.owner_id !== me.id;
+      return s.team_id === Number(filter.replace("team:", ""));
+    });
+    const byTeam = new Map<number, Session[]>();
+    for (const s of shown) {
+      const key = s.team_id ?? NO_TEAM;
+      byTeam.set(key, [...(byTeam.get(key) ?? []), s]);
+    }
+    return [...byTeam.entries()].sort(([a], [b]) => a - b);
+  }, [sessions, filter, me.id]);
+
   return (
     <div className="main flush">
       {/* On a phone the list and the conversation are separate screens; the
@@ -36,25 +65,54 @@ export default function Sessions() {
             <button className="primary" style={{ width: "100%" }} onClick={() => setCreating(true)}>
               + New session
             </button>
-          </div>
-          {sessions.length === 0 && <div className="empty">No sessions yet.</div>}
-          {sessions.map((s) => (
-            <Link
-              key={s.id}
-              to={`/sessions/${s.id}`}
-              className={`session-item${s.id === sessionId ? " active" : ""}`}
+            <select
+              style={{ width: "100%", marginTop: 8 }}
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
             >
-              <span className="title">{s.title}</span>
-              <span className="meta">
-                {s.provider}
-                {s.model ? ` · ${s.model}` : ""} · <span className={`pill ${s.status}`}>{s.status}</span>
-              </span>
-            </Link>
+              <option value="all">Everything I can see</option>
+              <option value="mine">Mine</option>
+              <option value="shared">Shared with me</option>
+              {teams.map((t) => (
+                <option key={t.id} value={`team:${t.id}`}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          {groups.length === 0 && <div className="empty">Nothing here yet.</div>}
+          {groups.map(([key, items]) => (
+            <div key={key}>
+              <div className="session-group">{teamName(key === NO_TEAM ? null : key)}</div>
+              {items.map((s) => (
+                <Link
+                  key={s.id}
+                  to={`/sessions/${s.id}`}
+                  className={`session-item${s.id === sessionId ? " active" : ""}`}
+                >
+                  <span className="title">{s.title}</span>
+                  <span className="meta">
+                    {s.provider}
+                    {s.model ? ` · ${s.model}` : ""} ·{" "}
+                    <span className={`pill ${s.status}`}>{s.status}</span>
+                    {/* Not shown to admins: they see every session, so the
+                        label would be on almost every row and would be a lie. */}
+                    {s.owner_id !== me.id && !me.is_admin && (
+                      <span className="pill">shared with you</span>
+                    )}
+                    {s.owner_id === me.id && s.shared_user_ids.length > 0 && (
+                      <span className="pill">shared</span>
+                    )}
+                  </span>
+                </Link>
+              ))}
+            </div>
           ))}
         </div>
 
         {creating ? (
           <NewSession
+            teams={teams}
             onCancel={() => setCreating(false)}
             onCreated={async (session) => {
               setCreating(false);
@@ -63,7 +121,7 @@ export default function Sessions() {
             }}
           />
         ) : sessionId ? (
-          <Chat key={sessionId} sessionId={sessionId} onChanged={load} />
+          <Chat key={sessionId} sessionId={sessionId} me={me} onChanged={load} />
         ) : (
           <div className="empty">
             {error ? <div className="error-banner">{error}</div> : "Select a session, or create one."}
@@ -75,9 +133,11 @@ export default function Sessions() {
 }
 
 function NewSession({
+  teams,
   onCancel,
   onCreated,
 }: {
+  teams: Team[];
   onCancel: () => void;
   onCreated: (session: Session) => void;
 }) {
@@ -90,6 +150,7 @@ function NewSession({
   const [accountId, setAccountId] = useState("");
   const [presetId, setPresetId] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
+  const [teamId, setTeamId] = useState("");
   const [prompt, setPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -132,6 +193,7 @@ function NewSession({
           account_id: accountId ? Number(accountId) : null,
           preset_id: presetId ? Number(presetId) : null,
           workspace_id: workspaceId ? Number(workspaceId) : null,
+          team_id: teamId ? Number(teamId) : null,
           prompt: prompt.trim() || undefined,
         }),
       );
@@ -215,6 +277,17 @@ function NewSession({
               {workspaces.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Team</span>
+            <select value={teamId} onChange={(e) => setTeamId(e.target.value)}>
+              <option value="">Just me</option>
+              {teams.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
                 </option>
               ))}
             </select>

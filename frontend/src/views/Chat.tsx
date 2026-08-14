@@ -12,6 +12,9 @@ import type {
   Run,
   Session,
   SessionFiles,
+  Team,
+  User,
+  UserSummary,
   WsMessage,
 } from "../types";
 
@@ -72,9 +75,11 @@ const FLUSHES_LIVE = new Set(["assistant", "thinking", "result", "tool_use"]);
 
 export default function Chat({
   sessionId,
+  me,
   onChanged,
 }: {
   sessionId: string;
+  me: User;
   onChanged: () => void;
 }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -95,6 +100,9 @@ export default function Chat({
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [directory, setDirectory] = useState<UserSummary[]>([]);
 
   const navigate = useNavigate();
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -156,6 +164,13 @@ export default function Chat({
   // Only needed to put a name to the account ids on a run.
   useEffect(() => {
     api.accounts().then(setAccounts).catch(() => setAccounts([]));
+  }, []);
+
+  // Names for the ids on the session itself — which team owns it, who it was
+  // shared with. Both endpoints are open to any signed-in user.
+  useEffect(() => {
+    api.teams().then(setTeams).catch(() => setTeams([]));
+    api.userDirectory().then(setDirectory).catch(() => setDirectory([]));
   }, []);
 
   // An agent is blocked on each of these, so they must survive a page reload —
@@ -459,6 +474,11 @@ export default function Chat({
             <span className="pill">{session.provider}</span>
             {session.model && <span className="pill">{session.model}</span>}
             <span className={`pill ${session.status}`}>{session.status}</span>
+            {session.team_id !== null && (
+              <span className="pill" title="Everyone in this team can see this session">
+                {teams.find((t) => t.id === session.team_id)?.name ?? "team"}
+              </span>
+            )}
           </>
         )}
         <span className={`pill ${connected ? "ok" : "failed"}`}>
@@ -490,17 +510,41 @@ export default function Chat({
         >
           Files
         </button>
+        {session && !renaming && (
+          <button
+            type="button"
+            onClick={() => setShareOpen((v) => !v)}
+            title="Who else can see this session"
+          >
+            Share
+          </button>
+        )}
         {activeRun && (
           <button className="danger" onClick={cancel}>
             Stop
           </button>
         )}
-        {!renaming && (
+        {/* Deleting is the owner's call: a session shared into a team is other
+            people's work too. */}
+        {!renaming && session && (me.is_admin || session.owner_id === me.id) && (
           <button className="danger" onClick={remove} title="Delete this session">
             Delete
           </button>
         )}
       </div>
+
+      {shareOpen && session && (
+        <Sharing
+          session={session}
+          me={me}
+          teams={teams}
+          users={directory}
+          onSaved={(updated) => {
+            setSession(updated);
+            onChanged();
+          }}
+        />
+      )}
 
       <div className="chat-body" ref={bodyRef} onScroll={onScroll}>
         {error && <div className="error-banner">{error}</div>}
@@ -824,6 +868,149 @@ function FilesPanel({ sessionId, onClose }: { sessionId: string; onClose: () => 
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+/**
+ * Who else can see this conversation.
+ *
+ * Read-only unless you own it: a session you were let into is not yours to pass
+ * on. Whoever can see it can answer its approvals, so this panel says so — the
+ * list here is the list of people who can let this agent run a command.
+ */
+function Sharing({
+  session,
+  me,
+  teams,
+  users,
+  onSaved,
+}: {
+  session: Session;
+  me: User;
+  teams: Team[];
+  users: UserSummary[];
+  onSaved: (session: Session) => void;
+}) {
+  const [teamId, setTeamId] = useState(session.team_id === null ? "" : String(session.team_id));
+  const [shared, setShared] = useState<number[]>(session.shared_user_ids);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const mine = me.is_admin || session.owner_id === me.id;
+  const nameOf = (id: number | null) =>
+    users.find((u) => u.id === id)?.username ?? (id === null ? "nobody" : `user ${id}`);
+
+  const save = async (changes: Partial<Session>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      onSaved(await api.patchSession(session.id, changes));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggle = (userId: number) => {
+    const next = shared.includes(userId)
+      ? shared.filter((id) => id !== userId)
+      : [...shared, userId];
+    setShared(next);
+    void save({ shared_user_ids: next });
+  };
+
+  return (
+    <div className="session-share">
+      {error && <div className="error-banner">{error}</div>}
+      <fieldset className="sharing">
+        <legend>Who can see this session</legend>
+        <p className="hint">
+          Owned by {nameOf(session.owner_id)}
+          {mine ? "" : " — only they can change who else is in"}. Everyone listed here sees
+          the transcript and can answer the prompts a paused agent is waiting on.
+        </p>
+
+        {mine ? (
+          <>
+            <label className="row share-row">
+              <span style={{ margin: 0, flex: 1 }}>Team</span>
+              <select
+                value={teamId}
+                disabled={busy}
+                onChange={(e) => {
+                  setTeamId(e.target.value);
+                  void save({ team_id: e.target.value ? Number(e.target.value) : null });
+                }}
+              >
+                <option value="">No team</option>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="share-list">
+              {users
+                .filter((u) => u.id !== session.owner_id)
+                .map((u) => (
+                  <label key={u.id} className="row share-row">
+                    <span style={{ margin: 0, flex: 1 }}>{u.username}</span>
+                    <input
+                      type="checkbox"
+                      checked={shared.includes(u.id)}
+                      disabled={busy}
+                      onChange={() => toggle(u.id)}
+                    />
+                  </label>
+                ))}
+            </div>
+
+            <label className="row share-row">
+              <span style={{ margin: 0, flex: 1 }}>Hand it over to</span>
+              <select
+                value=""
+                disabled={busy}
+                onChange={(e) => {
+                  const heir = Number(e.target.value);
+                  if (!heir) return;
+                  if (
+                    !confirm(
+                      `Give this session to ${nameOf(heir)}? They decide who can see it ` +
+                        "from then on, and you keep access only if they leave you on the list.",
+                    )
+                  )
+                    return;
+                  void save({ owner_id: heir });
+                }}
+              >
+                <option value="">Keep it</option>
+                {users
+                  .filter((u) => u.id !== session.owner_id)
+                  .map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.username}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          </>
+        ) : (
+          <p className="hint">
+            {session.team_id !== null
+              ? `Shared through the team ${teams.find((t) => t.id === session.team_id)?.name ?? ""}.`
+              : "Shared with you directly."}
+            {session.shared_user_ids.length > 0 &&
+              ` Also shared with ${session.shared_user_ids
+                .map(nameOf)
+                .sort()
+                .join(", ")}.`}
+          </p>
+        )}
+      </fieldset>
     </div>
   );
 }

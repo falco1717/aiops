@@ -12,6 +12,7 @@ import Providers from "./views/Providers";
 import Schedules from "./views/Schedules";
 import Sessions from "./views/Sessions";
 import Targets from "./views/Targets";
+import Teams from "./views/Teams";
 import Workspaces from "./views/Workspaces";
 
 const NAV = [
@@ -21,6 +22,7 @@ const NAV = [
   { to: "/accounts", label: "Accounts" },
   { to: "/workspaces", label: "Workspaces" },
   { to: "/targets", label: "Systems" },
+  { to: "/teams", label: "Teams" },
   { to: "/usage", label: "Usage" },
   { to: "/providers", label: "Providers" },
 ];
@@ -118,14 +120,15 @@ export default function App() {
 
       <Routes>
         <Route path="/" element={<Navigate to="/sessions" replace />} />
-        <Route path="/sessions" element={<Sessions />} />
-        <Route path="/sessions/:sessionId" element={<Sessions />} />
+        <Route path="/sessions" element={<Sessions me={user} />} />
+        <Route path="/sessions/:sessionId" element={<Sessions me={user} />} />
         <Route path="/schedules" element={<Schedules />} />
         <Route path="/presets" element={<Presets />} />
         <Route path="/accounts" element={<Accounts me={user} />} />
         <Route path="/usage" element={<Usage />} />
         <Route path="/workspaces" element={<Workspaces />} />
         <Route path="/targets" element={<Targets me={user} />} />
+        <Route path="/teams" element={<Teams me={user} />} />
         <Route path="/providers" element={<Providers />} />
         <Route path="/account" element={<Account me={user} onChanged={refresh} />} />
         <Route path="*" element={<Navigate to="/sessions" replace />} />

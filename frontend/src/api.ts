@@ -14,6 +14,7 @@ import type {
   Schedule,
   Session,
   Target,
+  Team,
   Transcript,
   User,
   UserSummary,
@@ -88,6 +89,16 @@ export const api = {
     }),
   deleteUser: (id: number) => request<void>(`/api/users/${id}`, { method: "DELETE" }),
 
+  // teams — everyone sees their own; only admins can change one
+  teams: () => request<Team[]>("/api/teams"),
+  createTeam: (data: { name: string; description?: string | null; member_ids: number[] }) =>
+    request<Team>("/api/teams", { method: "POST", body: body(data) }),
+  patchTeam: (
+    id: number,
+    data: { name?: string; description?: string | null; member_ids?: number[] },
+  ) => request<Team>(`/api/teams/${id}`, { method: "PATCH", body: body(data) }),
+  deleteTeam: (id: number) => request<void>(`/api/teams/${id}`, { method: "DELETE" }),
+
   // providers
   providers: () => request<ProviderInfo[]>("/api/providers"),
 
@@ -153,6 +164,7 @@ export const api = {
     account_id?: number | null;
     preset_id?: number | null;
     workspace_id?: number | null;
+    team_id?: number | null;
     approval_mode?: string | null;
     prompt?: string;
   }) => request<Session>("/api/sessions", { method: "POST", body: body(data) }),
