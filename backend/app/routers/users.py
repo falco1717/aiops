@@ -5,7 +5,15 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..models import Session, SessionShare, Target, TeamMember, User
+from ..models import (
+    RelayNode,
+    RelayNodeAccess,
+    Session,
+    SessionShare,
+    Target,
+    TeamMember,
+    User,
+)
 from ..schemas import UserCreate, UserOut, UserPasswordReset, UserPatch, UserSummary
 from ..security import current_admin, current_user, hash_password
 
@@ -138,14 +146,19 @@ async def _release_sessions(db: AsyncSession, leaving: User) -> None:
 
 
 async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:
-    """Pass this user's stored systems to someone who can manage them.
+    """Pass this user's stored systems and relay nodes to someone who can manage them.
 
     Admins get no implicit access to a stored credential, so a system left
     without an owner would be reachable by nobody and removable by nobody. The
     delete is refused rather than orphaning one — and refusing is also what
     stops deleting a user becoming a way to inherit their credentials.
     """
-    owned = list(await db.scalars(select(Target).where(Target.owner_id == leaving.id)))
+    # Relay nodes are owned and shared on exactly the same terms, so a node
+    # whose owner leaves strands a route into a network the same way.
+    await db.execute(delete(RelayNodeAccess).where(RelayNodeAccess.user_id == leaving.id))
+    owned = list(
+        await db.scalars(select(Target).where(Target.owner_id == leaving.id))
+    ) + list(await db.scalars(select(RelayNode).where(RelayNode.owner_id == leaving.id)))
     stranded: list[str] = []
     for target in owned:
         heir = next((g for g in target.grants if g.level == "manage"), None)
@@ -157,7 +170,8 @@ async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:
     if stranded:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"{leaving.username} owns {len(stranded)} system(s) nobody else can manage: "
+            f"{leaving.username} owns {len(stranded)} system(s) or relay node(s) nobody "
+            f"else can manage: "
             f"{', '.join(sorted(stranded)[:5])}"
             + (" …" if len(stranded) > 5 else "")
             + ". Give someone manage access, or delete them, before removing this user.",

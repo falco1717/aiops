@@ -15,7 +15,7 @@ from .config import settings
 from .db import SessionLocal
 from .events import hub
 from .models import Attachment, Event, ProviderAccount, Run, Session, User
-from . import attachments, ssh_targets
+from . import attachments, relay, ssh_targets
 from .providers import get_provider
 from .providers.base import NormalizedEvent
 from .providers.codex_appserver import CodexAppServerAdapter
@@ -245,9 +245,13 @@ class Runner:
             # person may reach.
             owner = await db.get(User, sess.owner_id) if sess.owner_id else None
             targets = await ssh_targets.visible_targets(db, owner)
-            ssh_ctx = ssh_targets.prepare(targets)
+            # Systems bound to a relay node are reached through it. The nodes
+            # are looked up here so the generated config can name them, and so
+            # this run's permission to use one covers exactly these hosts.
+            nodes = await relay.nodes_for_targets(db, targets)
+            ssh_ctx = ssh_targets.prepare(targets, nodes)
             target_note = ssh_targets.describe(
-                [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names]
+                [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names], nodes
             )
             preset_prompt = preset.system_prompt if preset else None
             system_prompt = "\n\n".join(p for p in (preset_prompt, target_note) if p) or None

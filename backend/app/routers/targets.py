@@ -6,10 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..access import LEVELS, level_for
+from ..access import LEVELS, level_for, node_level_for
 from ..crypto import encrypt, is_configured
 from ..db import get_db
-from ..models import Target, TargetAccess, User
+from ..models import RelayNode, Target, TargetAccess, User
 from ..schemas import TargetGrant, TargetIn, TargetOut, TargetPatch
 from ..security import current_user
 
@@ -65,8 +65,25 @@ def _out(target: Target, level: str) -> TargetOut:
         owner_id=target.owner_id,
         grants=[TargetGrant(user_id=g.user_id, level=g.level) for g in target.grants],
         my_level=level,
+        relay_node_id=target.relay_node_id,
         created_at=target.created_at,
     )
+
+
+async def _check_node(db: AsyncSession, node_id: int | None, user: User) -> None:
+    """Binding a system to a node needs the right to use that node.
+
+    Otherwise anyone able to store a system could route traffic through
+    somebody else's network by guessing an id.
+    """
+    if node_id is None:
+        return
+    node = await db.get(RelayNode, node_id)
+    if node is None or node_level_for(node, user) is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "That relay node does not exist, or has not been shared with you",
+        )
 
 
 def _validate(auth_type: str | None, policy: str | None, grants: list[TargetGrant] | None) -> None:
@@ -132,6 +149,7 @@ async def create_target(
     """Anyone may store a system; it belongs to them until they share it."""
     _require_key()
     _validate(payload.auth_type, payload.host_key_policy, payload.grants)
+    await _check_node(db, payload.relay_node_id, user)
 
     slug = _slugify(payload.name)
     # Names are global because the slug is what an agent types as `ssh <slug>`,
@@ -156,6 +174,7 @@ async def create_target(
         password_enc=encrypt(payload.password),
         host_key_policy=payload.host_key_policy,
         known_host_key=payload.known_host_key,
+        relay_node_id=payload.relay_node_id,
         created_by_id=user.id,
         owner_id=user.id,
     )
@@ -182,6 +201,12 @@ async def update_target(
     _validate(payload.auth_type, payload.host_key_policy, payload.grants)
 
     data = payload.model_dump(exclude_unset=True)
+
+    if "relay_node_id" in data:
+        await _check_node(db, data["relay_node_id"], user)
+        # Applied here rather than by the loop below, which skips nulls: null is
+        # the meaningful value that unbinds a system and makes it direct again.
+        target.relay_node_id = data.pop("relay_node_id")
 
     new_owner = data.pop("owner_id", None)
     if new_owner is not None and new_owner != target.owner_id:

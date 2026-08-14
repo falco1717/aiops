@@ -67,6 +67,14 @@ services:
       AIOPS_CLAUDE_BIN: ${AIOPS_CLAUDE_BIN:-claude}
       AIOPS_CODEX_BIN: ${AIOPS_CODEX_BIN:-codex}
       AIOPS_SCHEDULER_TICK_SECONDS: ${AIOPS_SCHEDULER_TICK_SECONDS:-20}
+      # Relay nodes. The forwarder is loopback-only inside this container and
+      # takes an ephemeral port by default, so none of this is published; it is
+      # here because a setting absent from this block cannot be changed at all.
+      AIOPS_RELAY_FORWARDER_HOST: ${AIOPS_RELAY_FORWARDER_HOST:-127.0.0.1}
+      AIOPS_RELAY_FORWARDER_PORT: ${AIOPS_RELAY_FORWARDER_PORT:-0}
+      AIOPS_RELAY_CONNECT_TIMEOUT_SECONDS: ${AIOPS_RELAY_CONNECT_TIMEOUT_SECONDS:-20}
+      AIOPS_RELAY_MAX_STREAMS_PER_NODE: ${AIOPS_RELAY_MAX_STREAMS_PER_NODE:-64}
+      AIOPS_RELAY_ENROLMENT_TOKEN_TTL_HOURS: ${AIOPS_RELAY_ENROLMENT_TOKEN_TTL_HOURS:-24}
       AIOPS_CORS_ORIGINS: ${AIOPS_CORS_ORIGINS:-}
       AIOPS_COOKIE_NAME: ${AIOPS_COOKIE_NAME:-aiops_session}
     volumes:

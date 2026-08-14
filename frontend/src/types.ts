@@ -348,12 +348,57 @@ export type Target = {
   grants: TargetGrant[];
   /** owner | manage | use — what you may do with it. */
   my_level: "owner" | "manage" | "use";
+  /** Reached through this relay node instead of from the AIOps server. */
+  relay_node_id: number | null;
   created_at: string;
 };
 
 export type TargetGrant = {
   user_id: number;
   level: "use" | "manage";
+};
+
+/** A machine on another network that AIOps opens connections through.
+ *
+ *  It holds no credential of ours and runs no agent: it is dialled out from,
+ *  told a host and a port, and copies bytes. Nothing here is ever a secret —
+ *  the enrolment token is readable exactly once, in the response that mints it.
+ */
+export type RelayNode = {
+  id: number;
+  name: string;
+  slug: string;
+  description: string | null;
+  status: "pending" | "approved" | "revoked";
+  /** An enrolment token has been issued and not yet spent. */
+  enrolment_pending: boolean;
+  enrolment_token_expires_at: string | null;
+  enrolled_at: string | null;
+  last_seen_at: string | null;
+  /** Whether its connection is held open right now. */
+  online: boolean;
+  version: string | null;
+  reported_hostname: string | null;
+  networks: string[];
+  owner_id: number | null;
+  grants: NodeGrant[];
+  /** owner | manage | use, or "" for an admin seeing one only to approve it. */
+  my_level: "owner" | "manage" | "use" | "";
+  target_count: number;
+  created_at: string;
+};
+
+export type NodeGrant = {
+  user_id: number;
+  level: "use" | "manage";
+};
+
+/** The one response that carries a readable enrolment token. */
+export type NodeEnrolment = {
+  node: RelayNode;
+  enrolment_token: string;
+  expires_at: string | null;
+  install_hint: string;
 };
 
 /** Just enough about another user to share something with them. */

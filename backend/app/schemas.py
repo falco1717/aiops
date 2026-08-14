@@ -423,6 +423,9 @@ class TargetIn(BaseModel):
     host_key_policy: str = "accept-new"
     known_host_key: str | None = None
     grants: list[TargetGrant] | None = None
+    #: Reach it through this relay node instead of directly. Null connects
+    #: from the AIOps server, which is what everything did before relays.
+    relay_node_id: int | None = None
 
 
 class TargetPatch(BaseModel):
@@ -439,6 +442,7 @@ class TargetPatch(BaseModel):
     known_host_key: str | None = None
     grants: list[TargetGrant] | None = None
     owner_id: int | None = None
+    relay_node_id: int | None = None
 
 
 class TargetOut(BaseModel):
@@ -461,4 +465,79 @@ class TargetOut(BaseModel):
     grants: list[TargetGrant]
     #: owner | manage | use — what the caller may do with it.
     my_level: str
+    relay_node_id: int | None
     created_at: datetime
+
+
+# --- relay nodes -------------------------------------------------------
+class NodeGrant(BaseModel):
+    user_id: int
+    level: str = "use"  # use | manage
+
+
+class NodeIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = None
+    grants: list[NodeGrant] | None = None
+
+
+class NodePatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    grants: list[NodeGrant] | None = None
+    owner_id: int | None = None
+
+
+class NodeOut(BaseModel):
+    """Never carries a token or a credential — only whether one is outstanding."""
+
+    id: int
+    name: str
+    slug: str
+    description: str | None
+    status: str  # pending | approved | revoked
+    #: True while an unspent enrolment token exists for this node.
+    enrolment_pending: bool
+    enrolment_token_expires_at: datetime | None
+    enrolled_at: datetime | None
+    last_seen_at: datetime | None
+    #: Whether the node's control channel is held open right now.
+    online: bool
+    version: str | None
+    reported_hostname: str | None
+    networks: list[str]
+    owner_id: int | None
+    grants: list[NodeGrant]
+    #: owner | manage | use — what the caller may do with it.
+    my_level: str
+    #: How many stored systems route through it, so revoking says what it costs.
+    target_count: int
+    created_at: datetime
+
+
+class NodeEnrolmentOut(BaseModel):
+    """The one and only time an enrolment token is readable."""
+
+    node: NodeOut
+    enrolment_token: str
+    expires_at: datetime | None
+    #: A ready-to-paste installer invocation, so the token is never retyped.
+    install_hint: str
+
+
+class NodeEnrolIn(BaseModel):
+    """What a node presents to trade its one-time token for a credential."""
+
+    token: str = Field(min_length=1)
+    version: str | None = None
+    hostname: str | None = None
+    networks: list[str] = []
+
+
+class NodeEnrolOut(BaseModel):
+    node_id: int
+    slug: str
+    name: str
+    status: str
+    credential: str
+    message: str

@@ -19,10 +19,12 @@ from .config import settings
 from .db import SessionLocal, init_db
 from .models import Run, Session, User
 from .migrate import run_migrations
+from .relay import hub as relay_hub
 from .routers import (
     accounts,
     approvals,
     auth,
+    nodes,
     presets,
     providers,
     runs,
@@ -98,6 +100,10 @@ async def lifespan(app: FastAPI):
     await reap_orphaned_runs()
     await reap_pending_approvals()
     await backfill_next_runs()
+    # The loopback listener a run's ProxyCommand hands its bytes to. Started
+    # unconditionally: it costs one socket, and a relay node that connects
+    # before anyone configures anything must have somewhere to be used from.
+    await relay_hub.start_forwarder()
 
     task: asyncio.Task | None = None
     if settings.scheduler_enabled:
@@ -115,6 +121,7 @@ async def lifespan(app: FastAPI):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         await runner.shutdown()
+        await relay_hub.stop_forwarder()
 
 
 app = FastAPI(title="AIOps", version="1.0.0", lifespan=lifespan)
@@ -141,6 +148,7 @@ for module in (
     schedules,
     approvals,
     targets,
+    nodes,
     teams,
     ws,
 ):
@@ -148,6 +156,9 @@ for module in (
 
 # Token-authenticated callback used by the in-container approval bridge.
 app.include_router(approvals.internal)
+# Node-facing relay endpoints. Authenticated by a node's own credential rather
+# than a session cookie, so they are mounted separately from the router above.
+app.include_router(nodes.relay_router)
 
 
 @app.get("/api/health")

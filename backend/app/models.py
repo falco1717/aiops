@@ -312,6 +312,13 @@ class Target(Base):
     host_key_policy: Mapped[str] = mapped_column(String(32), default="accept-new")
     known_host_key: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Reach this host through a relay node instead of from the AIOps server.
+    # Null means "connect directly", which is what every system did before
+    # relays existed and still the right answer for anything on this network.
+    relay_node_id: Mapped[int | None] = mapped_column(
+        ForeignKey("relay_nodes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -346,6 +353,90 @@ class TargetAccess(Base):
     level: Mapped[str] = mapped_column(String(16), default="use")
 
     __table_args__ = (UniqueConstraint("target_id", "user_id", name="uq_target_user"),)
+
+
+class RelayNode(Base):
+    """A machine on some other network that AIOps can open connections through.
+
+    It is a jump point and nothing else: the agents keep running on the AIOps
+    server, and a node only ever opens the one TCP connection it is asked for
+    and copies bytes. It never holds a provider login, an SSH key, or a
+    prompt — what crosses it is an already-encrypted SSH stream whose endpoints
+    are the AIOps container and the far host.
+
+    The node dials *out* and holds the connection open, so it works behind NAT
+    with no inbound rule. That inverts the usual trust question: since anything
+    holding the credential can present itself as this node, the credential is
+    checked on every reconnect rather than once at enrolment, and a node stays
+    `pending` — unusable — until an administrator says otherwise.
+    """
+
+    __tablename__ = "relay_nodes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    #: What a stored system points at, and what appears in a ProxyCommand.
+    slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # pending | approved | revoked. Only "approved" may carry traffic; the other
+    # two are refused at the socket, not merely hidden from the UI.
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+
+    # Hashed like a password, never stored or logged in the clear. The
+    # enrolment token is shown once when it is minted and is single-use: it is
+    # cleared the moment a node exchanges it for a credential, so a token left
+    # in a shell history or a config management repo is already spent.
+    enrolment_token_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    enrolment_token_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: The long-lived secret the agent presents on every reconnect.
+    credential_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Agent version and what the node says about itself. Self-reported, so it
+    #: describes the node rather than authorising anything.
+    version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reported_hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    networks: Mapped[list] = mapped_column(JSON, default=list)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # Same rule as a stored system: a route into somebody's network is theirs,
+    # and administering AIOps does not confer it. Approval is separate, and is
+    # an administrator's call.
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    grants: Mapped[list[RelayNodeAccess]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class RelayNodeAccess(Base):
+    """Who may route through a node besides its owner.
+
+    Deliberately identical in shape and meaning to TargetAccess: a node is a way
+    into a network, so it is private by default and administrators get no
+    implicit access to one they were not given.
+    """
+
+    __tablename__ = "relay_node_access"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    node_id: Mapped[int] = mapped_column(
+        ForeignKey("relay_nodes.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # use: stored systems this user can reach may be routed through it.
+    # manage: additionally edit it, re-issue its enrolment token, and grant others.
+    level: Mapped[str] = mapped_column(String(16), default="use")
+
+    __table_args__ = (UniqueConstraint("node_id", "user_id", name="uq_relay_node_user"),)
 
 
 class Approval(Base):

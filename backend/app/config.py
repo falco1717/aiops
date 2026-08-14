@@ -68,6 +68,25 @@ class Settings(BaseSettings):
     # listener; nothing is published to the host.
     internal_api_url: str = "http://127.0.0.1:8000"
 
+    # --- relay nodes ---------------------------------------------------
+    # Where a run's ProxyCommand helper hands its bytes to the app. Loopback
+    # only: the helper is a process inside this container, and nothing outside
+    # it has any business speaking that protocol. Port 0 takes an ephemeral one
+    # — both ends are in this container, and the run's ssh config is written
+    # against whatever was actually bound, so nothing has to agree in advance.
+    relay_forwarder_host: str = "127.0.0.1"
+    relay_forwarder_port: int = 0
+    # How long to wait for a node to reach the far host. Long enough for a
+    # sluggish link, short enough that `ssh` reports a failure rather than
+    # appearing to hang.
+    relay_connect_timeout_seconds: int = 20
+    # A node is a jump point, not a load balancer. The cap is here so a runaway
+    # agent cannot turn one into a port scanner's worth of open sockets.
+    relay_max_streams_per_node: int = 64
+    # How long an unused enrolment token stays good. It is single-use anyway;
+    # this bounds the window in which a leaked one is worth anything.
+    relay_enrolment_token_ttl_hours: int = 24
+
     # --- sign-in throttling -------------------------------------------
     # AIOps may be the only thing between the internet and an agent that runs
     # shell commands, so the login endpoint locks out after repeated failures.

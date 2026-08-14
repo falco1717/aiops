@@ -64,6 +64,10 @@ browser ──HTTPS──> FastAPI ──subprocess──> claude -p --output-fo
 - **Scheduler** (`backend/app/scheduler.py`) polls for due cron entries every 20
   seconds and fires them, either into a fresh session per run or appending to one
   long-lived session.
+- **Relay nodes** (`backend/app/relay.py`) let an agent running here reach a
+  network this server cannot. A node dials out, holds a websocket open, and is
+  asked to open one TCP connection at a time; a run's generated ssh config
+  reaches it through a `ProxyCommand`. See *Relay nodes* below.
 
 ---
 
@@ -311,6 +315,44 @@ Two deliberate asymmetries:
   it — send turns, rename it, change its approval mode — but a session shared
   into a team is other people's work too, so only its owner (or an admin) can
   delete it or change who else is in.
+
+### Relay nodes
+
+A stored system is normally dialled from this server. When the host is on a
+network this server cannot reach, put a **relay node** on that network and set
+the system's *Reach it via* to it. The agent still types `ssh <name>`; the
+connection is made from the node instead.
+
+The node is a jump point, not a second AIOps. `claude` and `codex` keep running
+here. A node is told a host and a port, opens that one TCP connection, and
+copies bytes — it never holds a provider login, an SSH key, a prompt, or
+anything an agent said, and the SSH session is encrypted end-to-end between
+this container and the far host regardless.
+
+Mechanically: the run's generated ssh config gets a `ProxyCommand` that hands
+its bytes to a loopback forwarder inside this container, which asks the node —
+over the websocket the node dialled out on — to open the connection and dial
+back with a socket for it. The node opens the far socket *first*, so its arrival
+is what tells `ssh` the host answered.
+
+- **The node dials out**, so there is no inbound rule and NAT is fine.
+- **Enrolment is a one-time token**, stored hashed and spent on use. The
+  credential it returns is checked on every reconnect and on every proxied
+  connection, not once at enrolment.
+- **A node is `pending` until an administrator approves it**, and is refused at
+  the socket until then. Approving one does *not* grant the approver the right
+  to route through it: a node is owned and shared exactly like a stored
+  credential, and administrators get no implicit access to either.
+- **Revoking is immediate** — the live connection closes and the credential
+  stops authorising anything. A system bound to a revoked or missing node then
+  fails to connect; it never quietly falls back to dialling direct.
+- **A run can only ask for what it was given.** The forwarder accepts a
+  per-run token naming the exact host and port materialised for that run.
+
+Installers for systemd, Windows and Docker are in `deploy/relay/`, each with a
+one-command uninstall. The node runs as a named service under its own account
+and logs every address it is asked to connect to; it is deliberately easy to
+see and easy to remove.
 
 ### Permission modes
 

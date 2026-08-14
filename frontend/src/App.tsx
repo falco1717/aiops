@@ -6,6 +6,7 @@ import type { User } from "./types";
 import Account, { ChangePassword } from "./views/Account";
 import Accounts from "./views/Accounts";
 import Login from "./views/Login";
+import Nodes from "./views/Nodes";
 import Usage from "./views/Usage";
 import Presets from "./views/Presets";
 import Providers from "./views/Providers";
@@ -22,6 +23,7 @@ const NAV = [
   { to: "/accounts", label: "Accounts" },
   { to: "/workspaces", label: "Workspaces" },
   { to: "/targets", label: "Systems" },
+  { to: "/nodes", label: "Relay nodes" },
   { to: "/teams", label: "Teams" },
   { to: "/usage", label: "Usage" },
   { to: "/providers", label: "Providers" },
@@ -128,6 +130,7 @@ export default function App() {
         <Route path="/usage" element={<Usage />} />
         <Route path="/workspaces" element={<Workspaces />} />
         <Route path="/targets" element={<Targets me={user} />} />
+        <Route path="/nodes" element={<Nodes me={user} />} />
         <Route path="/teams" element={<Teams me={user} />} />
         <Route path="/providers" element={<Providers />} />
         <Route path="/account" element={<Account me={user} onChanged={refresh} />} />
