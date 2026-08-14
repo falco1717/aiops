@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -435,7 +434,7 @@ async def download_session_file(
     target = store.resolve_inside(root, path)
     if not target.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
-    name = store.safe_filename(os.path.basename(target.name))
+    name = store.safe_filename(target.name)
     return FileResponse(
         target,
         media_type=store.download_type(name),
