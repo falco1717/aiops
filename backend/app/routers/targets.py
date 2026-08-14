@@ -57,6 +57,7 @@ def _out(target: Target, user: User) -> TargetOut:
         has_known_host_key=bool(target.known_host_key),
         allowed_user_ids=granted,
         usable_by_me=user.is_admin or not granted or user.id in granted,
+        created_at=target.created_at,
     )
 
 

@@ -28,6 +28,11 @@ services:
     environment:
       AIOPS_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aiops}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-aiops}
       AIOPS_JWT_SECRET: ${AIOPS_JWT_SECRET:?set AIOPS_JWT_SECRET in .env}
+      # Encrypts stored system credentials. Unset is allowed — the app then
+      # refuses to store credentials rather than keeping them in the clear.
+      AIOPS_SECRET_KEY: ${AIOPS_SECRET_KEY:-}
+      AIOPS_APPROVAL_TIMEOUT_SECONDS: ${AIOPS_APPROVAL_TIMEOUT_SECONDS:-600}
+      AIOPS_DEFAULT_APPROVAL_MODE: ${AIOPS_DEFAULT_APPROVAL_MODE:-ask}
       AIOPS_ADMIN_USERNAME: ${AIOPS_ADMIN_USERNAME:-admin}
       AIOPS_ADMIN_PASSWORD: ${AIOPS_ADMIN_PASSWORD:-}
       AIOPS_WORKSPACE_ROOT: /workspaces
