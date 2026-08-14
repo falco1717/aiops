@@ -681,8 +681,13 @@ button.big { font-size: 15px; padding: 11px 18px; }
 }
 .exposure-collapsed:hover { border-color: var(--warn); color: var(--text); }
 .exposure-more { margin-left: auto; color: var(--accent); white-space: nowrap; }
+/* The heading is a row so the ✕ sits at its top-right however many names wrap
+   into it. min-height is overridden because the global button rule would
+   otherwise make this a 40px block inside a line of text. */
+.exposure-note > strong { display: flex; align-items: flex-start; gap: 10px; }
+.exposure-note > strong > span { flex: 1; }
 .exposure-hide {
-  float: right; width: auto; margin: -2px 0 0 10px; padding: 0 6px;
+  flex: none; width: auto; min-height: 0; margin: -2px -4px 0 0; padding: 0 6px;
   background: none; border: none; color: var(--text-dim);
   font-size: 14px; line-height: 1.2; cursor: pointer;
 }

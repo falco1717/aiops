@@ -1124,6 +1124,14 @@ function ExposureNotice({
     }
   };
 
+  // Agreeing is the moment it becomes old news, so it folds away then rather
+  // than at the next page load. Keyed on the transition, so re-expanding it by
+  // hand afterwards sticks.
+  useEffect(() => {
+    if (exposure.acknowledged && !exposure.needs_acknowledgement) setAndRemember(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exposure.acknowledged, exposure.needs_acknowledgement]);
+
   // A re-arm forces it back open whatever was remembered: somebody new can read
   // this now, which is exactly when it stops being old news.
   if (collapsed && !confirming && !exposure.needs_acknowledgement) {
@@ -1144,16 +1152,25 @@ function ExposureNotice({
   return (
     <div className={`exposure-note${confirming ? " confirming" : ""}`}>
       <strong>
-        {confirming
-          ? `Use your stored systems in a session ${readers} can read?`
-          : `${readers} can read this session, and your stored systems are reachable from it.`}
-        {!confirming && (
+        {/* A flex row, not a float: the heading wraps as soon as two people can
+            read the session, and a right float cannot rise above the line box
+            it occurs in — so the ✕ ended up beside the last line. */}
+        <span>
+          {confirming
+            ? `Use your stored systems in a session ${readers} can read?`
+            : `${readers} can read this session, and your stored systems are reachable from it.`}
+        </span>
+        {/* Only when collapsing would actually do something. While a re-arm is
+            pending the guard below re-expands regardless, so offering the
+            control there is offering a button that does nothing. */}
+        {!confirming && !exposure.needs_acknowledgement && (
           <button
             type="button"
             className="exposure-hide"
             onClick={() => setAndRemember(true)}
             aria-label="Collapse this warning"
-            title="Collapse — it stays one line at the top"
+            aria-expanded={true}
+            title="Collapse it"
           >
             ✕
           </button>
