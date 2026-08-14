@@ -243,6 +243,25 @@ from `.claude/commands`, the container's `~/.claude`, and the slash commands the
 CLI itself reported at startup (so `/goal`, `/context`, `/usage` and anything a
 plugin adds appear automatically). Terminal-only commands are filtered out.
 
+### Attachments and files
+
+Attach files to a message with the paperclip, by dropping them on the composer,
+or — the one that matters — by pasting a screenshot straight out of the
+clipboard. The agent is told the container path of each file and reads it from
+disk; both CLIs can do that, and Claude reads images that way too. Uploads live
+in their own volume, not in your workspaces, so a `git clean` in a repo cannot
+take them with it.
+
+Going the other way, the session's **Files** panel lists what is in the
+directory the agent ran in and offers each file for download. The walk is
+bounded — a few hundred files, a few levels deep, `.git` and dependency trees
+skipped — because a workspace is usually a repo with a build tree in it. The
+panel prints that rule; it does not truncate quietly.
+
+Both directions resolve every path and require it to stay inside their root, and
+downloads are always served as attachments with a content type that no browser
+will execute.
+
 ### Accounts and roles
 
 Two roles. Everyone who can sign in can drive agents; **admins** additionally
@@ -295,6 +314,10 @@ Every setting is an `AIOPS_`-prefixed environment variable.
 | `AIOPS_ADMIN_USERNAME` | `admin` | Bootstrap account, created only when the user table is empty |
 | `AIOPS_ADMIN_PASSWORD` | — | Blank generates one and logs it once |
 | `AIOPS_WORKSPACE_ROOT` | `/workspaces` | Hard boundary for every workspace path |
+| `AIOPS_ATTACHMENTS_ROOT` | `/attachments` | Where uploaded files are stored (its own volume) |
+| `AIOPS_MAX_ATTACHMENT_BYTES` | `26214400` | Largest single upload, enforced while streaming |
+| `AIOPS_SESSION_FILES_MAX` | `400` | Files the download panel will list before saying it stopped |
+| `AIOPS_SESSION_FILES_MAX_DEPTH` | `3` | Directory levels that panel walks |
 | `AIOPS_CLAUDE_BIN` / `AIOPS_CODEX_BIN` | `claude` / `codex` | Override CLI locations |
 | `AIOPS_MAX_CONCURRENT_RUNS` | `4` | Agents allowed to run simultaneously |
 | `AIOPS_RUN_TIMEOUT_SECONDS` | `3600` | Per-turn wall clock before the process group is killed |

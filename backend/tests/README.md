@@ -53,6 +53,25 @@ code path:
 The stand-in only speaks Claude's schema. Codex's `--json` output is parsed
 defensively for the reasons in the root README, and is not covered here.
 
+## `test_attachments.py`
+
+Files in both directions, weighted almost entirely towards paths chosen by
+somebody else. Uploads: `../../etc/passwd`, `/etc/passwd` and
+`..\..\windows\system32\x` are each asserted to land at the generated path
+inside the attachments root and nowhere else; two uploads of `screenshot.png`
+are asserted to survive independently; an oversize upload is refused and leaves
+nothing on disk. Downloads: `..` traversal, its URL-encoded spellings, an
+absolute path and a symlink pointing at `/etc/passwd` are all refused, and the
+listing's depth and count caps are checked against real files.
+
+It also covers the two properties that make serving user content on this origin
+safe — every download is `Content-Disposition: attachment` and no upload is ever
+labelled a type a browser will execute — and that every new endpoint is 401
+without a session.
+
+Set `AIOPS_ATTACHMENTS_ROOT` to a throwaway directory before running it; the
+suite does that for itself, but nothing else should be pointed at the real one.
+
 ## `test_users.py`
 
 Accounts, roles, and the schema migration. It builds a **pre-upgrade database**
