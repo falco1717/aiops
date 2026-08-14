@@ -469,6 +469,12 @@ class Schedule(Base):
     )
     # "new": a fresh session each firing. "continue": keep appending to one session.
     session_mode: Mapped[str] = mapped_column(String(16), default="new")
+    # Whose schedule this is. The sessions it creates inherit it, so an
+    # unattended run reaches exactly the stored systems its author can reach
+    # rather than none at all.
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     target_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
