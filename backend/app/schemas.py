@@ -282,6 +282,7 @@ class ScheduleOut(ORM):
     preset_id: int | None
     workspace_id: int | None
     session_mode: str
+    owner_id: int | None
     target_session_id: str | None
     enabled: bool
     last_run_at: datetime | None

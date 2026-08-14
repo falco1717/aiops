@@ -55,7 +55,7 @@ async def create_schedule(
     await _validate(payload, db, user)
     if await db.scalar(select(Schedule).where(Schedule.name == payload.name)):
         raise HTTPException(status.HTTP_409_CONFLICT, "A schedule with that name already exists")
-    sched = Schedule(**payload.model_dump())
+    sched = Schedule(**payload.model_dump(), owner_id=user.id)
     sched.next_run_at = compute_next_run(sched)
     db.add(sched)
     await db.commit()

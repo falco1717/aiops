@@ -103,7 +103,7 @@ async def build_session(
         account_id=account_id,
         approval_mode=approval_mode,
         team_id=team_id,
-        owner_id=user.id if user else None,
+        owner_id=owner_id if owner_id is not None else (user.id if user else None),
     )
     db.add(sess)
     return sess

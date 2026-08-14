@@ -41,6 +41,7 @@ COLUMNS: dict[str, dict[str, str]] = {
     },
     "schedules": {
         "account_id": "INTEGER",
+        "owner_id": "INTEGER",
     },
     "runs": {
         "account_id": "INTEGER",
@@ -138,7 +139,11 @@ async def _backfill_owners() -> None:
         )
         if admin is None:
             return
-        for table, label in (("sessions", "session"), ("targets", "stored system")):
+        for table, label in (
+            ("sessions", "session"),
+            ("targets", "stored system"),
+            ("schedules", "schedule"),
+        ):
             result = await db.execute(
                 text(f"UPDATE {table} SET owner_id = :owner WHERE owner_id IS NULL"),
                 {"owner": admin.id},

@@ -58,6 +58,7 @@ async def fire_schedule(db: AsyncSession, schedule: Schedule, *, advance_next: b
             preset_id=schedule.preset_id,
             workspace_id=schedule.workspace_id,
             account_id=schedule.account_id,
+            owner_id=schedule.owner_id,
         )
         await db.commit()
         await db.refresh(session)

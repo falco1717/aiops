@@ -251,6 +251,7 @@ export type Schedule = {
   preset_id: number | null;
   workspace_id: number | null;
   session_mode: string;
+  owner_id: number | null;
   target_session_id: string | null;
   enabled: boolean;
   last_run_at: string | null;
