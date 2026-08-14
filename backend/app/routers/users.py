@@ -5,7 +5,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..models import Session, SessionShare, Target, TeamMember, User
+from ..models import Session, SessionShare, Target, TargetAccess, TeamMember, User
 from ..schemas import UserCreate, UserOut, UserPasswordReset, UserPatch, UserSummary
 from ..security import current_admin, current_user, hash_password
 
@@ -154,6 +154,13 @@ async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:
             continue
         target.owner_id = heir.user_id
         await db.delete(heir)
+    # Grants this user held on other people's systems. The foreign key says
+    # cascade, but SQLite neither enforces ON DELETE nor avoids reusing integer
+    # ids, so a leftover row is access lying in wait for whoever is created
+    # next — and access to a credential is the worst thing to inherit by
+    # accident. Done after the loop so a refusal below leaves nothing removed.
+    if not stranded:
+        await db.execute(delete(TargetAccess).where(TargetAccess.user_id == leaving.id))
     if stranded:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
