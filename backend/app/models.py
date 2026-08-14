@@ -200,6 +200,12 @@ class Session(Base):
     )
     # The provider CLI's own session identifier, used to resume.
     provider_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Set when the provider was changed under a conversation that already has
+    # history. Neither CLI can load the other's state, so the next turn carries
+    # a written briefing instead (see handoff.py) — and this is what says the
+    # briefing is still owed. Cleared when a turn claims it, so a switch briefs
+    # the incoming agent exactly once rather than on every turn afterwards.
+    handoff_pending: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(32), default="idle")  # idle|running|error
     # ask | auto | bypass — how tool permissions are handled for this session.
     # Null means "use the instance default", so changing that default moves
@@ -501,6 +507,16 @@ class Run(Base):
         ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True
     )
     prompt: Mapped[str] = mapped_column(Text)
+    # Who answered this turn, recorded rather than read off the session. A
+    # session's provider and model can both change under it, and inferring them
+    # from the current values would retroactively relabel every earlier turn as
+    # having been produced by whatever is selected now.
+    provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # True on the one turn that carries the handoff briefing after a provider
+    # switch. Decided when the turn is queued rather than when it starts, so a
+    # failover retry rebuilds the same prompt instead of losing the briefing.
+    carries_handoff: Mapped[bool] = mapped_column(Boolean, default=False)
     # Who asked for this turn. Stored credentials are materialised for *this*
     # user, not the session's owner: a session can be shared, and anyone able
     # to prompt one would otherwise inherit the owner's keys by typing into it.
@@ -546,6 +562,9 @@ class Event(Base):
     seq: Mapped[int] = mapped_column(Integer)
     kind: Mapped[str] = mapped_column(String(32))
     # system | assistant | user | tool_use | tool_result | thinking | result | error | stderr
+    # plus provider_switch, which AIOps writes itself rather than parsing out of
+    # an agent's output: a switch is a fact about the conversation, and burying
+    # it in a column would leave the transcript reading as one unbroken thread.
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Set when the message came from a subagent: the id of the tool call that

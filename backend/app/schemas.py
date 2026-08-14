@@ -148,6 +148,9 @@ class SessionIn(BaseModel):
 class SessionPatch(BaseModel):
     title: str | None = None
     archived: bool | None = None
+    #: Hands the conversation to the other CLI. Not a resume — see handoff.py —
+    #: so it clears the provider session id and owes the next turn a briefing.
+    provider: str | None = None
     model: str | None = None
     effort: str | None = None
     account_id: int | None = None
@@ -172,6 +175,10 @@ class SessionOut(ORM):
     workspace_id: int | None
     approval_mode: str | None
     provider_session_id: str | None
+    #: A provider switch has happened and the briefing has not been sent yet, so
+    #: the next turn is the handoff. The UI says so rather than letting the
+    #: conversation look continuous.
+    handoff_pending: bool
     status: str
     archived: bool
     owner_id: int | None
@@ -192,6 +199,12 @@ class RunOut(ORM):
     session_id: str
     schedule_id: int | None
     prompt: str
+    #: Who answered *this* turn. A session can be switched between providers, so
+    #: this is recorded per turn and must not be inferred from the session.
+    provider: str | None
+    model: str | None
+    #: True on the turn that carried the post-switch briefing.
+    carries_handoff: bool
     status: str
     exit_code: int | None
     error: str | None

@@ -27,6 +27,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "owner_id": "INTEGER",
         "team_id": "INTEGER",
         "effort": "VARCHAR(16)",
+        "handoff_pending": "BOOLEAN NOT NULL DEFAULT FALSE",
     },
     "agent_presets": {
         "effort": "VARCHAR(16)",
@@ -49,6 +50,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "owner_id": "INTEGER",
     },
     "runs": {
+        "provider": "VARCHAR(32)",
+        "model": "VARCHAR(128)",
+        "carries_handoff": "BOOLEAN NOT NULL DEFAULT FALSE",
         "requested_by_id": "INTEGER",
         "account_id": "INTEGER",
         "failed_over_from_id": "INTEGER",
@@ -93,6 +97,7 @@ async def run_migrations() -> None:
     await _ensure_an_admin_exists()
     await _adopt_existing_logins()
     await _backfill_owners()
+    await _backfill_run_providers()
 
 
 # Where each CLI keeps credentials when no per-account directory is set. An
@@ -174,6 +179,42 @@ async def _backfill_owners() -> None:
         )
         if result.rowcount:
             log.info("migration: dropped %d self-grant(s) on stored systems", result.rowcount)
+        await db.commit()
+
+
+async def _backfill_run_providers() -> None:
+    """Give existing turns the provider and model they were actually answered by.
+
+    Before this column, the UI read both off the session — which was correct
+    exactly as long as a session could never change provider. It can now, so an
+    unlabelled turn would be drawn as having been produced by whatever is
+    selected today. Every existing row predates switching, so its session's
+    current provider *is* the one that answered it; that stops being true the
+    moment anyone switches, which is why this runs on the upgrade rather than
+    being computed on read.
+
+    Only NULL rows, so it is idempotent and never overwrites a recorded fact.
+    """
+    async with SessionLocal() as db:
+        for column in ("provider", "model"):
+            result = await db.execute(
+                text(
+                    f"UPDATE runs SET {column} = "
+                    f"(SELECT s.{column} FROM sessions s WHERE s.id = runs.session_id) "
+                    f"WHERE runs.{column} IS NULL AND EXISTS "
+                    # A session with no model of its own leaves nothing to copy,
+                    # and without this the statement would "update" those rows
+                    # from null to null on every boot and log that it had.
+                    f"(SELECT 1 FROM sessions s WHERE s.id = runs.session_id "
+                    f"AND s.{column} IS NOT NULL)"
+                )
+            )
+            if result.rowcount:
+                log.info(
+                    "migration: labelled %d run(s) with the %s of their session",
+                    result.rowcount,
+                    column,
+                )
         await db.commit()
 
 

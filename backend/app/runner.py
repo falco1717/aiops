@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
-from . import agent_env
+from . import agent_env, handoff
 from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
@@ -288,6 +288,18 @@ class Runner:
                 )
                 agent_prompt = run.prompt + attachments.prompt_suffix(attached)
 
+                # The first turn after a provider switch is talking to an agent
+                # that has never seen this conversation: its CLI cannot load the
+                # other's session, so the only continuity available is a summary
+                # AIOps writes from its own transcript. It goes in front of the
+                # operator's words and nowhere near `run.prompt`, exactly as the
+                # attachment paths above go after them — the transcript shows
+                # what the operator actually typed.
+                if run.carries_handoff:
+                    briefing = await handoff.build_digest(db, sess, before_run_id=run.id)
+                    if briefing:
+                        agent_prompt = f"{briefing}\n\n{agent_prompt}"
+
                 adapter: CodexAppServerAdapter | None = None
                 if interactive_codex:
                     # A preset that pins a tier wins; otherwise the instance-wide
@@ -344,6 +356,12 @@ class Runner:
                 run.status = "running"
                 run.started_at = run.started_at or datetime.now(timezone.utc)
                 run.command = argv
+                # Confirmed against what is actually about to run: the row was
+                # stamped when the turn was queued, and the session's model can
+                # be re-pointed while it waits. The provider cannot — a switch is
+                # refused while a turn is outstanding.
+                run.provider = sess.provider
+                run.model = sess.model or (preset.model if preset else None)
                 run.account_id = account.id if account else None
                 sess.status = "running"
                 await db.commit()

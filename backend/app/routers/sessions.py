@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import attachments as store
+from .. import attachments as store, handoff
 from ..access import can_see_session, sessions_visible_to
 from ..config import settings
 from ..db import get_db
@@ -33,6 +33,7 @@ from ..services import (
     APPROVAL_MODES,
     ValidationError,
     build_session,
+    plan_provider_switch,
     queue_run,
     validate_effort,
     validate_session_targets,
@@ -91,6 +92,78 @@ async def _resolve_team(db: AsyncSession, team_id: int | None, user: User) -> No
 
 #: Patch fields that change who can reach a session rather than what it does.
 SHARING_FIELDS = ("team_id", "shared_user_ids", "owner_id")
+
+
+async def _active_run_id(db: AsyncSession, session_id: str) -> int | None:
+    """The turn this session is in the middle of, if any."""
+    return await db.scalar(
+        select(Run.id)
+        .where(Run.session_id == session_id, Run.status.in_(("queued", "running")))
+        .limit(1)
+    )
+
+
+async def _switch_provider(
+    db: AsyncSession, sess: Session, data: dict, user: User
+) -> None:
+    """Move a session to another provider, in place, mid-conversation.
+
+    Not a state transfer, because there is no such thing here: each CLI can only
+    resume a session it created itself, so the incoming agent necessarily starts
+    a fresh conversation. What carries over is a briefing AIOps writes out of its
+    own transcript (handoff.py), owed to the next turn and flagged as such.
+
+    `data` is the patch, and is mutated: the coherence fixes this switch forces
+    (an account belonging to the old provider, a model the new CLI has never
+    heard of) are folded in underneath whatever the caller asked for explicitly,
+    so the caller's own choices still go through the ordinary validation below.
+    """
+    incoming = data["provider"]
+    outgoing = sess.provider
+
+    # Only the owner. Anyone who can see a session can prompt it, but a switch
+    # changes which agent every later turn runs on and throws away the resumable
+    # session id — that is not a guest's call to make in somebody else's work.
+    if not user.is_admin and sess.owner_id != user.id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only this session's owner can change which agent it runs on. A switch "
+            "abandons the provider session behind the conversation, so it is not "
+            "something a shared session can have done to it.",
+        )
+
+    # Mid-turn there is no answer to "which provider ran this": the prompt has
+    # gone to one CLI and the reply would be attributed to another.
+    if await _active_run_id(db, sess.id) is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This session is in the middle of a turn. Let it finish or stop it "
+            "first — switching now would leave the turn attributed to the wrong "
+            "agent and its output unresumable by either.",
+        )
+
+    try:
+        data.update(
+            {
+                **await plan_provider_switch(db, sess, incoming, requested=data),
+                **data,
+            }
+        )
+    except ValidationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    # The old id names a conversation inside the old CLI's own store. The new one
+    # cannot load it, and leaving it set would have the runner pass it to
+    # `--resume`/`thread/resume` and fail on an id that provider never issued.
+    sess.provider_session_id = None
+    # available_commands was reported by the outgoing CLI at its startup; the
+    # incoming one advertises its own on the next turn.
+    sess.available_commands = None
+    # No history means nothing to hand over: setting the provider before the
+    # first message is just choosing one.
+    sess.handoff_pending = await handoff.record_switch(
+        db, sess, outgoing=outgoing, incoming=incoming, username=user.username
+    )
 
 
 async def _apply_sharing(
@@ -211,6 +284,13 @@ async def patch_session(
         await _owned(db, session_id, user)
         await _apply_sharing(db, sess, sharing, user)
 
+    # A provider change is the one patch that invalidates the rest of the row, so
+    # it settles what the session will look like before anything is validated
+    # against it. Naming the provider it already runs on is not a switch.
+    if data.get("provider") is not None and data["provider"] != sess.provider:
+        await _switch_provider(db, sess, data, user)
+    provider = data.get("provider") or sess.provider
+
     # Re-point fields go through the same validation as creation. Without this
     # a user could create a session on an account they may use and then patch
     # it onto a restricted one, and a bad id would surface as a 500 from the
@@ -218,7 +298,7 @@ async def patch_session(
     try:
         await validate_session_targets(
             db,
-            provider=sess.provider,
+            provider=provider,
             account_id=data.get("account_id", sess.account_id),
             preset_id=data.get("preset_id", sess.preset_id),
             workspace_id=data.get("workspace_id", sess.workspace_id),
@@ -227,11 +307,12 @@ async def patch_session(
         # Against the model this patch leaves behind, not the one it replaces:
         # switching to a model with a shorter effort list has to be caught here.
         validate_effort(
-            sess.provider,
+            provider,
             data.get("model", sess.model),
             data.get("effort", sess.effort),
         )
     except ValidationError as exc:
+        await db.rollback()
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
     mode = data.get("approval_mode")

@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     account_limit_cooldown_seconds: int = 3600
     max_concurrent_runs: int = 4
     run_timeout_seconds: int = 3600
+    # Size of the briefing handed to an agent that has just been switched into a
+    # conversation partway through (see handoff.py). Neither CLI can load the
+    # other's session, so this summary is the *only* thing the incoming agent
+    # knows about what came before — but it is also the front of a prompt whose
+    # real content is the operator's new message, so it cannot grow without
+    # bound. Raising it briefs more history; lowering it drops older turns,
+    # which the briefing then says out loud rather than truncating quietly.
+    handoff_digest_max_chars: int = 24000
 
     # --- agent isolation -----------------------------------------------
     # The setuid helper that starts an agent process as its own unprivileged

@@ -43,6 +43,72 @@ def validate_effort(provider: str, model: str | None, effort: str | None) -> Non
         )
 
 
+async def plan_provider_switch(
+    db: AsyncSession,
+    sess: Session,
+    new_provider: str,
+    *,
+    requested: dict,
+) -> dict:
+    """What a session must also change to be coherent on another provider.
+
+    Almost nothing about a session survives a provider change. An account is one
+    provider's sign-in; a preset pins a model, a permission mode and usually a
+    system prompt in one provider's vocabulary; the two model lists do not
+    overlap at a single name; and which reasoning levels exist depends on the
+    model. Left alone, a switched session would name an account belonging to the
+    provider it just left and a model the new CLI has never heard of, and would
+    fail at the first turn with whatever those CLIs say about a bad argument.
+
+    So each of them is cleared back to "whatever the new provider does by
+    default" rather than carried — except where the caller said what it wants in
+    the same request, which wins and is validated like any other patch. Returns
+    the overrides to apply; `requested` is the patch's own fields, so a caller's
+    explicit choice is never silently replaced by a clear.
+    """
+    if new_provider not in PROVIDERS:
+        raise ValidationError(
+            f"Unknown provider {new_provider!r}. Known: {', '.join(PROVIDERS)}"
+        )
+    adapter = PROVIDERS[new_provider]
+    plan: dict = {}
+
+    if "account_id" not in requested and sess.account_id is not None:
+        account = await db.get(ProviderAccount, sess.account_id)
+        if account is None or account.provider != new_provider:
+            plan["account_id"] = None
+
+    if "preset_id" not in requested and sess.preset_id is not None:
+        preset = await db.get(AgentPreset, sess.preset_id)
+        if preset is None or preset.provider != new_provider:
+            plan["preset_id"] = None
+
+    model = requested.get("model", sess.model)
+    if "model" in requested:
+        # Free-text models are accepted elsewhere because a CLI can gain one
+        # between releases. Not here: on a switch an unrecognised name is almost
+        # always the *other* provider's model pasted through, and letting it
+        # stand produces a 500-shaped failure one turn later instead of an
+        # answer now.
+        if model and model not in adapter.models:
+            raise ValidationError(
+                f"{new_provider} does not run a model called {model!r}. "
+                f"It runs: {', '.join(adapter.models)}"
+            )
+    elif model and model not in adapter.models:
+        plan["model"] = None
+        model = None
+
+    # Against the model the session is left with, not the one it had: clearing
+    # the model above widens the allowed levels, and clearing the preset can
+    # remove the only model there was.
+    effort = requested.get("effort", sess.effort)
+    if effort and "effort" not in requested and effort not in adapter.effort_choices(model):
+        plan["effort"] = None
+
+    return plan
+
+
 async def validate_session_targets(
     db: AsyncSession,
     *,
@@ -155,12 +221,24 @@ async def queue_run(
 
     attached = await _claimable_attachments(db, session.id, attachment_ids or [])
 
+    # Claimed here rather than read by the runner, and cleared in the same
+    # commit: the briefing is owed to the *next* turn, and deciding it at queue
+    # time means a failover retry rebuilds the same prompt instead of silently
+    # dropping the briefing on the attempt that actually reaches the model.
+    carries_handoff = bool(session.handoff_pending)
+    session.handoff_pending = False
+
     run = Run(
         session_id=session.id,
         prompt=prompt,
         schedule_id=schedule_id,
         requested_by_id=requested_by_id,
         status="queued",
+        # Stamped on the turn, so a session that later switches providers does
+        # not retroactively relabel who answered this one.
+        provider=session.provider,
+        model=session.model or (session.preset.model if session.preset else None),
+        carries_handoff=carries_handoff,
     )
     db.add(run)
     await db.flush()

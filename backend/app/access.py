@@ -59,13 +59,18 @@ def sessions_visible_to(user: User) -> ColumnElement[bool]:
     """The clause that narrows a session query to what this user may see.
 
     Its owner, anyone it was shared with by name, and everyone in the team that
-    owns it. Administrators are included here — the reverse of the rule above,
-    and for an operational reason rather than a symmetric one: a session left
-    behind by somebody who has gone still has a stopped agent in it, and only an
-    administrator can be relied on to still be here to unstick it.
+    owns it. **Administrators get nothing extra**, the same as for a stored
+    system: a session is somebody's work, and being able to administer AIOps is
+    not the same as being entitled to read it.
+
+    Admins did once see everything, so that a session abandoned by someone who
+    had left could still be unstuck. That is a real problem but this was the
+    wrong answer to it — on an instance where everyone is an admin it made every
+    session public. It is handled at the other end instead: deleting a user
+    hands their shared sessions to somebody who can see them and removes the
+    ones nobody else could (see routers/users.py), so there is nothing left
+    stranded for an admin to need to reach.
     """
-    if user.is_admin:
-        return true()
     return or_(
         Session.owner_id == user.id,
         Session.id.in_(select(SessionShare.session_id).where(SessionShare.user_id == user.id)),
@@ -75,8 +80,6 @@ def sessions_visible_to(user: User) -> ColumnElement[bool]:
 
 async def can_see_session(db: AsyncSession, session: Session, user: User) -> bool:
     """The same rule for one already-loaded session."""
-    if user.is_admin:
-        return True
     if session.owner_id is not None and session.owner_id == user.id:
         return True
     if any(share.user_id == user.id for share in session.shares):
