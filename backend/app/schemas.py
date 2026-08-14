@@ -105,6 +105,8 @@ class PresetIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     provider: str
     model: str | None = None
+    #: Reasoning effort, from the provider adapter's list. Null = CLI default.
+    effort: str | None = None
     description: str | None = None
     system_prompt: str | None = None
     permission_mode: str | None = None
@@ -118,6 +120,7 @@ class PresetOut(ORM):
     name: str
     provider: str
     model: str | None
+    effort: str | None
     description: str | None
     system_prompt: str | None
     permission_mode: str | None
@@ -128,9 +131,11 @@ class PresetOut(ORM):
 
 # --- sessions & runs ---------------------------------------------------
 class SessionIn(BaseModel):
+    #: Blank falls back to the first line of the opening prompt.
     title: str | None = None
     provider: str
     model: str | None = None
+    effort: str | None = None
     account_id: int | None = None
     preset_id: int | None = None
     workspace_id: int | None = None
@@ -144,6 +149,7 @@ class SessionPatch(BaseModel):
     title: str | None = None
     archived: bool | None = None
     model: str | None = None
+    effort: str | None = None
     account_id: int | None = None
     preset_id: int | None = None
     workspace_id: int | None = None
@@ -160,6 +166,7 @@ class SessionOut(ORM):
     title: str
     provider: str
     model: str | None
+    effort: str | None
     account_id: int | None
     preset_id: int | None
     workspace_id: int | None
@@ -296,6 +303,11 @@ class ProviderOut(BaseModel):
     label: str
     models: list[str]
     permission_modes: list[str]
+    #: Reasoning-effort levels, weakest first. Empty means this CLI has no such
+    #: control, and the UI hides the selector rather than offering a dead one.
+    efforts: list[str] = []
+    #: Models that accept fewer levels than `efforts`, keyed by model name.
+    efforts_by_model: dict[str, list[str]] = {}
     binary: str
     available: bool
     version: str | None = None

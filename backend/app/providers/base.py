@@ -54,6 +54,12 @@ class Provider:
     models: list[str] = []
     #: Values accepted by AgentPreset.permission_mode for this provider.
     permission_modes: list[str] = []
+    #: How hard the model is asked to think, weakest first. Empty when the CLI
+    #: has no such knob, which is how the UI knows not to offer the control.
+    efforts: list[str] = []
+    #: Levels a specific model accepts, where that is narrower than `efforts`.
+    #: Anything absent from here accepts the full list.
+    efforts_by_model: dict[str, list[str]] = {}
     #: True when this adapter can pause and ask a human mid-run.
     supports_interactive_approval: bool = False
 
@@ -71,8 +77,17 @@ class Provider:
         account_env: dict[str, str] | None = None,
         approval_mode: str = "ask",
         approval_token: str | None = None,
+        effort: str | None = None,
     ) -> RunSpec:
         raise NotImplementedError
+
+    # -- effort --------------------------------------------------------
+    @classmethod
+    def effort_choices(cls, model: str | None) -> list[str]:
+        """Levels this provider accepts, narrowed to *model* where it differs."""
+        if model and model in cls.efforts_by_model:
+            return list(cls.efforts_by_model[model])
+        return list(cls.efforts)
 
     def parse_line(self, line: str) -> NormalizedEvent | None:
         raise NotImplementedError

@@ -19,8 +19,29 @@ class CodexProvider(Provider):
     """
 
     name = "codex"
-    models = ["gpt-5.6-terra", "gpt-5.6", "gpt-5.6-codex", "gpt-5-codex"]
+    # Taken from `codex debug models` ("Render the raw model catalog as JSON")
+    # on codex-cli 0.147.0, in the catalog's own priority order and filtered to
+    # the entries it marks visibility="list" and supported_in_api=true. The list
+    # that used to be here named three models the catalog has never heard of.
+    models = [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+    ]
     permission_modes = ["read-only", "workspace-write", "danger-full-access"]
+    # Also from that catalog: `supported_reasoning_levels`. The union sits in
+    # `efforts` and the models that accept fewer are named below, because Codex
+    # takes any string here and only rejects it once the turn is under way.
+    efforts = ["low", "medium", "high", "xhigh", "max", "ultra"]
+    efforts_by_model = {
+        "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+        "gpt-5.5": ["low", "medium", "high", "xhigh"],
+        "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        "gpt-5.4-mini": ["low", "medium", "high", "xhigh"],
+    }
     #: True for the provider, not for this class: an "ask" turn is routed to
     #: CodexAppServerAdapter by the runner, because `codex exec` below has no
     #: way to stop and put a question to a human.
@@ -49,6 +70,7 @@ class CodexProvider(Provider):
         account_env: dict[str, str] | None = None,
         approval_mode: str = "ask",
         approval_token: str | None = None,
+        effort: str | None = None,
     ) -> RunSpec:
         argv = [settings.codex_bin, "exec"]
         if provider_session_id:
@@ -57,6 +79,12 @@ class CodexProvider(Provider):
 
         if model:
             argv += ["--model", model]
+        if effort:
+            # There is no --effort flag on this binary; the reasoning level is a
+            # config key. Spelling it wrong is not silent — `--strict-config`
+            # reports "unknown configuration field" — but the *value* is only
+            # checked when the model is called, hence the validation upstream.
+            argv += ["-c", f"model_reasoning_effort={effort}"]
         # `codex exec` cannot ask a human anything: --ask-for-approval is
         # rejected here (it belongs to the interactive command) and forcing
         # `-c approval_policy=...` still reports "approval: never". Interactive

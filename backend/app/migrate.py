@@ -26,6 +26,10 @@ COLUMNS: dict[str, dict[str, str]] = {
         "approval_mode": "VARCHAR(32)",
         "owner_id": "INTEGER",
         "team_id": "INTEGER",
+        "effort": "VARCHAR(16)",
+    },
+    "agent_presets": {
+        "effort": "VARCHAR(16)",
     },
     "targets": {
         "owner_id": "INTEGER",

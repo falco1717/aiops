@@ -2,6 +2,7 @@ import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, openSocket } from "../api";
+import { EFFORT_HINT, effortChoices } from "../effort";
 import type {
   Account,
   AgentEvent,
@@ -9,6 +10,8 @@ import type {
   ApprovalMode,
   Attachment,
   Capability,
+  Preset,
+  ProviderInfo,
   Run,
   Session,
   SessionFiles,
@@ -103,6 +106,12 @@ export default function Chat({
   const [shareOpen, setShareOpen] = useState(false);
   const [teams, setTeams] = useState<Team[]>([]);
   const [directory, setDirectory] = useState<UserSummary[]>([]);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [presets, setPresets] = useState<Preset[]>([]);
+  // Phone only: the settings and the destructive buttons live behind this, so
+  // the header does not spend a third of a small screen on things you press
+  // once a week. The stylesheet ignores it above 860px.
+  const [toolsOpen, setToolsOpen] = useState(false);
 
   const navigate = useNavigate();
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -164,6 +173,14 @@ export default function Chat({
   // Only needed to put a name to the account ids on a run.
   useEffect(() => {
     api.accounts().then(setAccounts).catch(() => setAccounts([]));
+  }, []);
+
+  // For the effort control: which levels this CLI accepts is the CLI's answer,
+  // not ours, so the list has to come from the server. The presets come along
+  // because a session that has not chosen an effort inherits its preset's.
+  useEffect(() => {
+    api.providers().then(setProviders).catch(() => setProviders([]));
+    api.presets().then(setPresets).catch(() => setPresets([]));
   }, []);
 
   // Names for the ids on the session itself — which team owns it, who it was
@@ -425,6 +442,15 @@ export default function Chat({
     setPickerOpen(false);
   };
 
+  const efforts = effortChoices(
+    providers.find((p) => p.name === session?.provider),
+    session?.model ?? null,
+  );
+  // What the turn will actually run at: a session that never chose falls back
+  // to its preset, which is what the runner does when it builds the command.
+  const effort =
+    session?.effort ?? presets.find((p) => p.id === session?.preset_id)?.effort ?? null;
+
   const eventsByRun = useMemo(() => {
     const map = new Map<number, ChatEvent[]>();
     for (const e of events) {
@@ -460,7 +486,9 @@ export default function Chat({
         ) : (
           <h1
             className="session-title"
-            title="Click to rename"
+            // Carries the name as well as the hint: the heading truncates, so
+            // this is the only place a long one can be read in full.
+            title={`${session?.title ?? ""}\nClick to rename`}
             onClick={() => {
               setDraftTitle(session?.title ?? "");
               setRenaming(true);
@@ -469,67 +497,119 @@ export default function Chat({
             {session?.title ?? "…"}
           </h1>
         )}
-        {session && !renaming && (
-          <>
-            <span className="pill">{session.provider}</span>
-            {session.model && <span className="pill">{session.model}</span>}
-            <span className={`pill ${session.status}`}>{session.status}</span>
-            {session.team_id !== null && (
-              <span className="pill" title="Everyone in this team can see this session">
-                {teams.find((t) => t.id === session.team_id)?.name ?? "team"}
-              </span>
+        {/* `display: contents` on desktop, so these two wrappers change nothing
+            there; on a phone they become their own rows and the second one
+            folds away behind the ⋯ button. */}
+        {!renaming && (
+          <div className="chat-meta">
+            {session && (
+              <>
+                <span className="pill">{session.provider}</span>
+                {session.model && <span className="pill">{session.model}</span>}
+                {effort && (
+                  <span className="pill" title="Reasoning effort for this session">
+                    effort {effort}
+                  </span>
+                )}
+                <span className={`pill ${session.status}`}>{session.status}</span>
+                {session.team_id !== null && (
+                  <span className="pill" title="Everyone in this team can see this session">
+                    {teams.find((t) => t.id === session.team_id)?.name ?? "team"}
+                  </span>
+                )}
+              </>
             )}
-          </>
+            <span className={`pill ${connected ? "ok" : "failed"}`}>
+              {connected ? "live" : "reconnecting"}
+            </span>
+          </div>
         )}
-        <span className={`pill ${connected ? "ok" : "failed"}`}>
-          {connected ? "live" : "reconnecting"}
-        </span>
-        {session && !renaming && (
-          <select
-            className="approval-select"
-            value={session.approval_mode ?? "ask"}
-            title="How this session handles tool permissions"
-            onChange={async (e) => {
-              const approval_mode = e.target.value as ApprovalMode;
-              try {
-                setSession(await api.patchSession(sessionId, { approval_mode }));
-              } catch (err) {
-                setError(err instanceof Error ? err.message : String(err));
-              }
-            }}
-          >
-            <option value="ask">Ask me each time</option>
-            <option value="auto">Auto-approve edits</option>
-            <option value="bypass">Bypass all checks</option>
-          </select>
-        )}
-        <button
-          type="button"
-          onClick={() => setFilesOpen((v) => !v)}
-          title="Files in this session's working directory"
-        >
-          Files
-        </button>
-        {session && !renaming && (
-          <button
-            type="button"
-            onClick={() => setShareOpen((v) => !v)}
-            title="Who else can see this session"
-          >
-            Share
-          </button>
-        )}
+        {/* Stopping a running agent is the one thing that must never be a tap
+            away behind a menu. */}
         {activeRun && (
           <button className="danger" onClick={cancel}>
             Stop
           </button>
         )}
-        {/* Deleting is the owner's call: a session shared into a team is other
-            people's work too. */}
-        {!renaming && session && (me.is_admin || session.owner_id === me.id) && (
-          <button className="danger" onClick={remove} title="Delete this session">
-            Delete
+        {!renaming && (
+          <button
+            type="button"
+            className={`icon-btn chat-more${toolsOpen ? " open" : ""}`}
+            aria-expanded={toolsOpen}
+            onClick={() => setToolsOpen((v) => !v)}
+            title="Session settings and actions"
+          >
+            ⋯
           </button>
+        )}
+        {!renaming && (
+          <div className={`chat-tools${toolsOpen ? " open" : ""}`}>
+            {session && (
+              <select
+                className="approval-select"
+                value={session.approval_mode ?? "ask"}
+                title="How this session handles tool permissions"
+                onChange={async (e) => {
+                  const approval_mode = e.target.value as ApprovalMode;
+                  try {
+                    setSession(await api.patchSession(sessionId, { approval_mode }));
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+              >
+                <option value="ask">Ask me each time</option>
+                <option value="auto">Auto-approve edits</option>
+                <option value="bypass">Bypass all checks</option>
+              </select>
+            )}
+            {session && efforts.length > 0 && (
+              <select
+                className="approval-select"
+                value={session.effort ?? ""}
+                title={EFFORT_HINT}
+                onChange={async (e) => {
+                  try {
+                    setSession(
+                      await api.patchSession(sessionId, { effort: e.target.value || null }),
+                    );
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+              >
+                <option value="">Default effort</option>
+                {efforts.map((level) => (
+                  <option key={level} value={level}>
+                    Effort: {level}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              onClick={() => setFilesOpen((v) => !v)}
+              title="Files in this session's working directory"
+            >
+              Files
+            </button>
+            {session && (
+              <button
+                type="button"
+                onClick={() => setShareOpen((v) => !v)}
+                title="Who else can see this session"
+              >
+                Share
+              </button>
+            )}
+            {/* Deleting is the owner's call: a session shared into a team is
+                other people's work too. */}
+            {session && (me.is_admin || session.owner_id === me.id) && (
+              <button className="danger" onClick={remove} title="Delete this session">
+                Delete
+              </button>
+            )}
+          </div>
         )}
       </div>
 

@@ -60,29 +60,46 @@ export default function Workspaces() {
     <div className="main">
       <h1>Workspaces</h1>
       <p className="subtitle">
-        Directories agents may read and write. Every path must live under the configured workspace
-        root, which is the boundary keeping agents away from the rest of the server.
+        A workspace is a project folder on this server. Point a session at one and that folder
+        becomes the agent's working directory: it starts there, reads and edits the files in it,
+        and runs its commands from it — so "fix the login bug in this repo" has a repo to mean.
+      </p>
+      <p className="subtitle">
+        Register one per repo or project you want agents to work on. A session with no workspace
+        starts in the workspace root instead, with no project around it — it can still answer
+        questions and reach your stored systems, but it has no code in front of it. Every path
+        must live under the configured root, which is the boundary keeping agents away from the
+        rest of the server.
       </p>
       {error && <div className="error-banner">{error}</div>}
 
       <form className="card" onSubmit={create}>
         <div className="grid-2">
           <label>
-            <span>Name</span>
-            <input value={name} onChange={(e) => setName(e.target.value)} required />
+            <span>Name — what you'll pick from the session's Workspace list</span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="My Project"
+              required
+            />
           </label>
           <label>
-            <span>Path (absolute, or relative to the workspace root)</span>
+            <span>Folder (absolute, or relative to the workspace root)</span>
             <input
               value={path}
               onChange={(e) => setPath(e.target.value)}
               placeholder="my-project"
               required
             />
+            <span className="field-hint">
+              Created if it does not exist. A git repo here is worth it: the Changes column and
+              Diff button below then show what the agent did before you keep it.
+            </span>
           </label>
         </div>
         <label>
-          <span>Description</span>
+          <span>Description — a note to yourself about what lives here</span>
           <input value={description} onChange={(e) => setDescription(e.target.value)} />
         </label>
         <button className="primary" type="submit">
@@ -91,7 +108,10 @@ export default function Workspaces() {
       </form>
 
       {items.length === 0 ? (
-        <div className="empty">No workspaces registered.</div>
+        <div className="empty">
+          No workspaces yet. Until you add one, every session runs in the workspace root with no
+          project around it.
+        </div>
       ) : (
         <table>
           <thead>

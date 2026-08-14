@@ -20,6 +20,29 @@ class ValidationError(ValueError):
 APPROVAL_MODES = ("ask", "auto", "bypass")
 
 
+def validate_effort(provider: str, model: str | None, effort: str | None) -> None:
+    """Reject a reasoning level the CLI would not act on.
+
+    Both CLIs take a bad level quietly — Claude warns and falls back to its
+    default, Codex accepts the config key and only fails once the turn is
+    already running — so "high" on a model that stops at "xhigh" would look
+    like it worked and silently be something else.
+    """
+    if not effort:
+        return
+    adapter = PROVIDERS.get(provider)
+    if adapter is None:
+        return  # the provider itself is reported by the caller's own check
+    allowed = adapter.effort_choices(model)
+    if not allowed:
+        raise ValidationError(f"The {provider} CLI has no reasoning-effort control")
+    if effort not in allowed:
+        where = f"{provider} {model}" if model else provider
+        raise ValidationError(
+            f"{where} accepts effort: {', '.join(allowed)} (got {effort!r})"
+        )
+
+
 async def validate_session_targets(
     db: AsyncSession,
     *,
@@ -73,6 +96,7 @@ async def build_session(
     provider: str,
     title: str | None,
     model: str | None,
+    effort: str | None = None,
     preset_id: int | None,
     workspace_id: int | None,
     account_id: int | None = None,
@@ -96,11 +120,14 @@ async def build_session(
         workspace_id=workspace_id,
         user=user,
     )
+    resolved_model = model or (preset.model if preset else None)
+    validate_effort(provider, resolved_model, effort)
 
     sess = Session(
         title=(title or "Untitled").strip()[:255] or "Untitled",
         provider=provider,
-        model=model or (preset.model if preset else None),
+        model=resolved_model,
+        effort=effort,
         preset_id=preset_id,
         workspace_id=workspace_id,
         account_id=account_id,

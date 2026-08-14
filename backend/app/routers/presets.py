@@ -9,6 +9,7 @@ from ..models import AgentPreset, User
 from ..providers import PROVIDERS
 from ..schemas import PresetIn, PresetOut
 from ..security import current_user
+from ..services import ValidationError, validate_effort
 
 router = APIRouter(prefix="/api/presets", tags=["presets"])
 
@@ -30,6 +31,10 @@ def _validate(payload: PresetIn) -> None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "allowed_tools is only supported for the claude provider"
         )
+    try:
+        validate_effort(payload.provider, payload.model, payload.effort)
+    except ValidationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 @router.get("", response_model=list[PresetOut])

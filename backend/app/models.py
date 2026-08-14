@@ -162,6 +162,9 @@ class AgentPreset(Base):
     name: Mapped[str] = mapped_column(String(128), unique=True)
     provider: Mapped[str] = mapped_column(String(32))  # claude | codex
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # How hard the model is asked to think. Validated against the provider
+    # adapter's own list, which comes from the CLI rather than from here.
+    effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Validated against the provider adapter's list, not this comment:
@@ -183,6 +186,9 @@ class Session(Base):
     title: Mapped[str] = mapped_column(String(255), default="Untitled")
     provider: Mapped[str] = mapped_column(String(32))
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Null falls back to the preset's, then to whatever the CLI does by itself,
+    # so raising a preset's effort moves every session that never chose one.
+    effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
     account_id: Mapped[int | None] = mapped_column(
         ForeignKey("provider_accounts.id", ondelete="SET NULL"), nullable=True
     )
@@ -231,6 +237,15 @@ class Session(Base):
     @property
     def shared_user_ids(self) -> list[int]:
         return [share.user_id for share in self.shares]
+
+    @property
+    def effective_effort(self) -> str | None:
+        """The reasoning level a turn in this session should run at.
+
+        Here rather than in services.py so the runner can ask for it without
+        importing that module, which imports the runner.
+        """
+        return self.effort or (self.preset.effort if self.preset else None)
 
 
 class SessionShare(Base):

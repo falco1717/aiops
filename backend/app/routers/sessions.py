@@ -34,6 +34,7 @@ from ..services import (
     ValidationError,
     build_session,
     queue_run,
+    validate_effort,
     validate_session_targets,
 )
 from ..skills import discover
@@ -161,6 +162,7 @@ async def create_session(
             provider=payload.provider,
             title=payload.title,
             model=payload.model,
+            effort=payload.effort,
             preset_id=payload.preset_id,
             workspace_id=payload.workspace_id,
             account_id=payload.account_id,
@@ -221,6 +223,13 @@ async def patch_session(
             preset_id=data.get("preset_id", sess.preset_id),
             workspace_id=data.get("workspace_id", sess.workspace_id),
             user=user,
+        )
+        # Against the model this patch leaves behind, not the one it replaces:
+        # switching to a model with a shorter effort list has to be caught here.
+        validate_effort(
+            sess.provider,
+            data.get("model", sess.model),
+            data.get("effort", sess.effort),
         )
     except ValidationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc

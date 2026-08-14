@@ -182,17 +182,25 @@ container's address changes on every recreate.
 
 ## Using it
 
-1. **Workspaces** — register a directory. Paths are relative to
-   `/workspaces` (the mount) or absolute but still confined to it. The page shows
-   each repo's branch, dirty file count, and uncommitted diff.
+1. **Workspaces** — a workspace is a project folder on the server, and it is
+   what a session's agent uses as its **working directory**: the agent starts
+   there, reads and edits the files in it, and runs its commands from it. Register
+   one per repo you want agents to work on. Paths are relative to `/workspaces`
+   (the mount) or absolute but still confined to it. The page shows each repo's
+   branch, dirty file count, and uncommitted diff.
+
+   A session with **no** workspace runs in the workspace root with no project
+   around it. That still works — it can answer questions and reach your stored
+   systems — but there is no code in front of it, so "fix the bug in this repo"
+   has no repo to mean.
 2. **Agents** — define presets: a name plus provider, model, permission mode /
    sandbox, standing instructions, auto-approved tools, and any extra CLI flags.
    This is what "choose which agent handles this task" means in practice — pick a
    preset instead of re-entering the same six settings.
-3. **Sessions** — create one against a provider/model/preset/workspace, send a
-   task, and watch tool calls and output stream in. Keep talking to it; each turn
-   resumes the provider-side session, so the agent keeps its context. `Ctrl+Enter`
-   sends.
+3. **Sessions** — create one against a provider/model/preset/workspace, name it
+   (or leave that blank and it is named after the first task), send a task, and
+   watch tool calls and output stream in. Keep talking to it; each turn resumes
+   the provider-side session, so the agent keeps its context. `Ctrl+Enter` sends.
 4. **Schedules** — cron entries that hand a prompt to an agent. Times are
    evaluated in the schedule's own timezone, so a 09:00 job stays at 09:00 across
    DST. "Run now" fires one immediately without disturbing the cron timing.
@@ -373,6 +381,30 @@ answer a prompt, so an agent that *would* have asked simply stalls or fails.
 Pair `acceptEdits`/`workspace-write` with a workspace that is a git repo you can
 `git reset`, and you get a useful blast radius: the agent can work freely, and
 you review the diff before anything leaves the box.
+
+### Models and reasoning effort
+
+Both CLIs let you choose how long the model thinks before it acts, and AIOps
+exposes it on the session, on a preset, and in the session header. Neither list
+is invented here:
+
+- **Claude** takes `--effort <level>`, and its own help names the levels: `low`,
+  `medium`, `high`, `xhigh`, `max`.
+- **Codex** has no such flag. The level is a config override,
+  `-c model_reasoning_effort=<level>`, and over the app-server (an interactive
+  "ask" turn) it is the `effort` field of `turn/start`. The accepted levels come
+  from `codex debug models`, which also **narrows them per model** — `sol` and
+  `terra` go up to `ultra`, `luna` stops at `max`, and the 5.4/5.5 family stops
+  at `xhigh`.
+
+The model list shown in the UI comes from that same catalog. Both are pinned by
+`backend/tests/test_effort.py`, because the failure mode is silent: Codex accepts
+any string for that config key and only fails once the turn is running, and
+Claude warns about an unknown level and then quietly uses its default. AIOps
+therefore validates the level against the chosen model before it stores it.
+
+A session's own effort wins; with none set it inherits its preset's; with neither
+set nothing is passed and each CLI uses its own default.
 
 ---
 

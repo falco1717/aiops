@@ -88,6 +88,8 @@ async def _describe(name: str) -> ProviderOut:
         label=LABELS.get(name, name),
         models=provider.models,
         permission_modes=provider.permission_modes,
+        efforts=provider.efforts,
+        efforts_by_model=provider.efforts_by_model,
         binary=binary,
         available=found,
         version=version,
