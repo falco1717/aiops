@@ -234,12 +234,44 @@ try:
     check("the private key is written where the run's ssh config points",
           os.path.exists(key_path) and open(key_path).read().startswith(KEY.splitlines()[0]))
 
+    # A strict host must be verified against the pinned file only. If the
+    # agent-writable file were offered to it as well, the agent could add an
+    # entry for a host it was about to dial and walk straight past
+    # StrictHostKeyChecking.
+    config_text = open(config_path).read()
+    check("an accept-new host may record what it learns",
+          "known_hosts.learned" in config_text, config_text)
+
+    strict_target = Target(
+        id=902, name="Strict Probe", slug="strict-probe", hostname="127.0.0.1",
+        username="probe", port=22, auth_type="key", private_key_enc=encrypt(KEY),
+        password_enc=None, known_host_key=None, host_key_policy="strict",
+        relay_node_id=None, description=None,
+    )
+    strict_ctx = ssh_targets.prepare([strict_target])
+    assert strict_ctx is not None
+    try:
+        strict_text = open(os.path.join(strict_ctx.root, "config")).read()
+        check("a strict host is never offered the agent-writable file",
+              "known_hosts.learned" not in strict_text, strict_text)
+        check("a strict host still gets the pinned file",
+              "UserKnownHostsFile" in strict_text and "known_hosts" in strict_text)
+    finally:
+        strict_ctx.cleanup()
+
     check("the run directory's mode is the one this module declares",
           ssh_targets.RUN_DIR_MODE == 0o750)
     check("secrets in it are readable by the agent's group and nobody else",
           ssh_targets.RUN_FILE_MODE == 0o640)
-    check("nothing in it is group-writable, so an agent cannot edit its own config",
+    check("an agent cannot edit its own config or keys",
           not (ssh_targets.RUN_FILE_MODE | ssh_targets.RUN_DIR_MODE) & stat.S_IWGRP)
+    # The single exception, and it is deliberate: ssh records a host key it has
+    # just learned, and the agent is what runs ssh. It gets its own file for
+    # that so the operator's pinned keys stay out of its reach.
+    check("only the learned-hosts file is group-writable",
+          ssh_targets.RUN_SHARED_MODE & stat.S_IWGRP
+          and not ssh_targets.RUN_SHARED_MODE & stat.S_IRWXO,
+          oct(ssh_targets.RUN_SHARED_MODE))
     check("nothing in it is readable by anyone else at all",
           not (ssh_targets.RUN_FILE_MODE | ssh_targets.RUN_DIR_MODE | ssh_targets.RUN_EXEC_MODE)
           & (stat.S_IRWXO))
@@ -252,6 +284,8 @@ try:
             ("private key", key_path, ssh_targets.RUN_FILE_MODE),
             ("ssh config", config_path, ssh_targets.RUN_FILE_MODE),
             ("known_hosts", os.path.join(ctx.root, "known_hosts"), ssh_targets.RUN_FILE_MODE),
+            ("learned known_hosts", os.path.join(ctx.root, "known_hosts.learned"),
+             ssh_targets.RUN_SHARED_MODE),
             ("ssh shim", shim_path, ssh_targets.RUN_EXEC_MODE),
         ):
             actual = stat.S_IMODE(os.stat(path).st_mode)
