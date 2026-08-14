@@ -697,3 +697,7 @@ button.big { font-size: 15px; padding: 11px 18px; }
   .exposure-collapsed { width: calc(100% - 24px); margin: 0 12px 8px; }
   .exposure-more { display: none; }
 }
+
+/* The session list's own failures, in the list rather than in the pane beside
+   it — a poll that starts failing should say so where it is failing. */
+.session-error { margin: 0 10px 8px; font-size: 12px; }
