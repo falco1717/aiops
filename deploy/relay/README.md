@@ -66,11 +66,18 @@ with the .NET Framework — nothing is downloaded — and that host runs the age
 and restarts it if it stops.
 
 The service runs as the virtual account `NT SERVICE\AIOpsRelayNode`, which has
-no password and no rights beyond its own state directory.
+no password and no rights beyond its own state directory. Both PowerShell
+scripts are ASCII-only and stored as UTF-8 with a BOM, because Windows
+PowerShell 5.1 reads a BOM-less `.ps1` as ANSI and one em-dash in a string is
+enough to stop the file parsing at all.
+
+The log lives in the state directory, which is the one place the service
+account can write. Reading it needs an elevated shell, as does uninstalling.
 
 ```powershell
 Get-Service AIOpsRelayNode
-Get-Content "$env:ProgramFiles\AIOps Relay Node\aiops-relay.log" -Wait
+Get-Content "$env:ProgramData\AIOps Relay Node\aiops-relay.log" -Wait
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='AIOpsRelayNode'}
 .\uninstall.ps1                       # add -KeepLog to keep the record
 ```
 

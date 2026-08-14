@@ -492,13 +492,81 @@ def read_credential(path: str) -> str | None:
         return None
 
 
+def _current_sid() -> str | None:
+    """The SID of the account this process is running as, or None.
+
+    By SID rather than by name because every name involved is either localised
+    (BUILTIN\\Administrators) or ambiguous once a domain is in the picture.
+    """
+    try:
+        result = subprocess.run(
+            ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = [field.strip('" ') for field in result.stdout.strip().split('",')]
+    for field in reversed(fields):
+        if field.startswith("S-1-"):
+            return field
+    return None
+
+
+def _restrict_on_windows(path: str) -> bool:
+    """Make `path` readable only by this account, SYSTEM and administrators.
+
+    The mode argument to os.open does nothing on Windows: the file lands with
+    whatever %ProgramData% hands down, which by default includes
+    BUILTIN\\Users:(OI)(CI)(RX). Measured on a real install, the credential came
+    out 0o100666 and every local user could read it. There is no stdlib call
+    that sets a Windows DACL, and this agent takes no dependencies, so it shells
+    out to icacls - which is on every Windows and is what the installer uses for
+    the same job.
+
+    Returns whether the permissions were actually tightened, so the caller can
+    decide whether writing a secret here is a good idea.
+    """
+    if os.name != "nt":
+        return True
+    sid = _current_sid()
+    if sid is None:
+        return False
+    grants = ["*S-1-5-18:(F)", "*S-1-5-32-544:(F)", f"*{sid}:(F)"]
+    try:
+        result = subprocess.run(
+            ["icacls.exe", path, "/inheritance:r", "/grant:r", *grants, "/Q"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        log.warning("could not restrict %s: %s", path, result.stdout.strip() or result.stderr.strip())
+        return False
+    return True
+
+
 def write_credential(path: str, credential: str) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    # Created private before anything is written to it, so the secret is never
-    # briefly world-readable.
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    # Created empty, made private, and only then written to, so the secret is
+    # never briefly world-readable. On POSIX the mode on os.open does that in
+    # one step; on Windows the mode is ignored entirely and the DACL has to be
+    # rewritten as a second step, which is why the file is opened empty first
+    # and the credential goes in afterwards.
     handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(handle, "w") as fh:
-        fh.write(credential + "\n")
+    try:
+        if not _restrict_on_windows(path):
+            log.warning(
+                "could not restrict the permissions on %s. It may be readable by "
+                "other users on this machine; check them before trusting this node.",
+                path,
+            )
+        with os.fdopen(handle, "w") as fh:
+            handle = None  # fdopen owns it now
+            fh.write(credential + "\n")
+    finally:
+        if handle is not None:
+            os.close(handle)
 
 
 def main(argv: list[str]) -> int:
