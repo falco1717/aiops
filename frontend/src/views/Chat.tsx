@@ -2,7 +2,7 @@ import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, openSocket } from "../api";
-import type { AgentEvent, Capability, Run, Session, WsMessage } from "../types";
+import type { Account, AgentEvent, Capability, Run, Session, WsMessage } from "../types";
 
 type ChatEvent = Pick<
   AgentEvent,
@@ -69,6 +69,7 @@ export default function Chat({
   const [draftTitle, setDraftTitle] = useState("");
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [accounts, setAccounts] = useState<Account[]>([]);
 
   const navigate = useNavigate();
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -122,6 +123,14 @@ export default function Chat({
       .then(setCapabilities)
       .catch(() => setCapabilities([]));
   }, [sessionId]);
+
+  // Only needed to put a name to the account ids on a run.
+  useEffect(() => {
+    api.accounts().then(setAccounts).catch(() => setAccounts([]));
+  }, []);
+
+  const accountName = (id: number | null) =>
+    accounts.find((a) => a.id === id)?.name ?? "an account";
 
   // Live feed. Reconnects on drop and refetches so nothing is missed.
   useEffect(() => {
@@ -363,6 +372,15 @@ export default function Chat({
               </div>
               <pre>{run.prompt}</pre>
             </div>
+
+            {/* A silent failover looks like the first account simply worked.
+                Say which one actually answered. */}
+            {run.failed_over_from_id !== null && (
+              <div className="msg system">
+                {accountName(run.failed_over_from_id)} hit its limit — switched to{" "}
+                {accountName(run.account_id)}.
+              </div>
+            )}
 
             {groupSubagents(eventsByRun.get(run.id) ?? []).map((row) =>
               row.type === "event" ? (
