@@ -78,6 +78,9 @@ async def build_session(
     account_id: int | None = None,
     approval_mode: str | None = None,
     team_id: int | None = None,
+    # Set explicitly by callers with no request user behind them — the
+    # scheduler, which owns its sessions on behalf of whoever wrote the job.
+    owner_id: int | None = None,
     user: User | None = None,
 ) -> Session:
     """Create (but do not commit) a session, resolving preset and workspace."""
