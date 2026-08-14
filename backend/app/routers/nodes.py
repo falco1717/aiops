@@ -25,6 +25,7 @@ from ..db import SessionLocal, get_db
 from ..models import RelayNode, RelayNodeAccess, Target, User
 from ..ratelimit import client_address, throttle
 from ..schemas import (
+    InstallCommand,
     NodeEnrolIn,
     NodeEnrolOut,
     NodeEnrolmentOut,
@@ -133,8 +134,47 @@ def _issue_token(node: RelayNode) -> str:
 
 
 def _install_hint(request: Request, node: RelayNode, token: str) -> str:
+    """Kept as the Linux one-liner, for anything reading the older field."""
     base = str(request.base_url).rstrip("/")
     return f"sudo ./install.sh --url {base} --token {token} --name {node.slug}"
+
+
+def _install_commands(request: Request, node: RelayNode, token: str) -> list[InstallCommand]:
+    """One command per platform, spelled the way each installer actually takes it.
+
+    Written out rather than templated from a single string: the three
+    installers do not share a flag between them — `--url` against `-Url`
+    against an environment variable — and a UI that guesses at that teaches
+    people a command that does not work.
+    """
+    base = str(request.base_url).rstrip("/")
+    return [
+        InstallCommand(
+            platform="linux",
+            label="Linux (systemd)",
+            command=f"sudo ./install.sh --url {base} --token {token} --name {node.slug}",
+            note="Run it from deploy/relay. Installs a systemd unit and starts it.",
+        ),
+        InstallCommand(
+            platform="windows",
+            label="Windows (service)",
+            command=f".\\install.ps1 -Url {base} -Token {token}",
+            note=(
+                "Run from deploy/relay in a PowerShell started as Administrator — "
+                "creating a service needs it. Python 3 must be installed first: "
+                "winget install --id Python.Python.3.12 --scope machine"
+            ),
+        ),
+        InstallCommand(
+            platform="docker",
+            label="Docker",
+            command=(
+                f"AIOPS_RELAY_URL={base} AIOPS_RELAY_TOKEN={token} "
+                "docker compose up -d --build"
+            ),
+            note="Run it from deploy/relay, where the compose file lives.",
+        ),
+    ]
 
 
 # --- management --------------------------------------------------------
@@ -216,6 +256,7 @@ async def create_node(
         enrolment_token=token,
         expires_at=node.enrolment_token_expires_at,
         install_hint=_install_hint(request, node, token),
+        install=_install_commands(request, node, token),
     )
 
 
@@ -251,6 +292,7 @@ async def reissue_token(
         enrolment_token=token,
         expires_at=node.enrolment_token_expires_at,
         install_hint=_install_hint(request, node, token),
+        install=_install_commands(request, node, token),
     )
 
 

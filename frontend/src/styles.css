@@ -701,3 +701,16 @@ button.big { font-size: 15px; padding: 11px 18px; }
 /* The session list's own failures, in the list rather than in the pane beside
    it — a poll that starts failing should say so where it is failing. */
 .session-error { margin: 0 10px 8px; font-size: 12px; }
+
+/* --- relay install commands, per platform ------------------------------
+   The three installers share no argument, so the command has to be shown
+   rather than described. */
+.install-picker { margin-bottom: 10px; }
+.install-tabs { gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.install-tab {
+  width: auto; min-height: 0; padding: 6px 12px; font-size: 12px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+  color: var(--text-dim); cursor: pointer;
+}
+.install-tab:hover { color: var(--text); }
+.install-tab.active { color: var(--accent); border-color: var(--accent); }

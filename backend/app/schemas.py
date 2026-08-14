@@ -591,6 +591,16 @@ class NodeOut(BaseModel):
     created_at: datetime
 
 
+class InstallCommand(BaseModel):
+    """How to install the node agent on one kind of machine."""
+
+    platform: str  # linux | windows | docker
+    label: str
+    command: str
+    #: What has to be true before the command works — elevation, a runtime.
+    note: str | None = None
+
+
 class NodeEnrolmentOut(BaseModel):
     """The one and only time an enrolment token is readable."""
 
@@ -599,6 +609,9 @@ class NodeEnrolmentOut(BaseModel):
     expires_at: datetime | None
     #: A ready-to-paste installer invocation, so the token is never retyped.
     install_hint: str
+    #: The same, per platform. Windows and Docker were previously only
+    #: mentioned in prose, which meant guessing at their arguments.
+    install: list[InstallCommand] = []
 
 
 class NodeEnrolIn(BaseModel):

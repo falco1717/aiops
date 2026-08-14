@@ -414,12 +414,22 @@ export type NodeGrant = {
   level: "use" | "manage";
 };
 
+/** How to install the node agent on one kind of machine. */
+export type InstallCommand = {
+  platform: "linux" | "windows" | "docker";
+  label: string;
+  command: string;
+  /** What has to be true first — elevation, a runtime. */
+  note: string | null;
+};
+
 /** The one response that carries a readable enrolment token. */
 export type NodeEnrolment = {
   node: RelayNode;
   enrolment_token: string;
   expires_at: string | null;
   install_hint: string;
+  install: InstallCommand[];
 };
 
 /** Just enough about another user to share something with them. */

@@ -1,7 +1,14 @@
 import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import type { NodeEnrolment, NodeGrant, RelayNode, User, UserSummary } from "../types";
+import type {
+  InstallCommand,
+  NodeEnrolment,
+  NodeGrant,
+  RelayNode,
+  User,
+  UserSummary,
+} from "../types";
 
 /**
  * Relay nodes — machines on other networks that agents reach through.
@@ -126,11 +133,10 @@ export default function Nodes({ me }: { me: User }) {
             It works once, and expires
             {issued.expires_at ? ` on ${new Date(issued.expires_at).toLocaleString()}` : " shortly"}.
           </p>
-          <textarea className="mono" rows={2} readOnly value={issued.install_hint} />
+          <InstallPicker issued={issued} />
           <p className="hint">
-            Run that on the machine, from <code>deploy/relay</code>. There is a PowerShell
-            installer and a Docker Compose file beside it. The node will enrol and then
-            wait: it carries no traffic until an administrator approves it below.
+            The node enrols and then waits: it carries no traffic until an administrator
+            approves it below.
           </p>
           <div className="row">
             <button onClick={() => void navigator.clipboard?.writeText(issued.enrolment_token)}>
@@ -305,4 +311,67 @@ function statusTone(node: RelayNode): string {
   if (node.status === "revoked") return "failed";
   if (node.status === "approved" && node.online) return "ok";
   return "";
+}
+
+
+/**
+ * The install command, per platform.
+ *
+ * Three tabs rather than one line plus prose: the installers share no argument
+ * between them — `--url` against `-Url` against an environment variable — so
+ * "there is a PowerShell installer beside it" left the reader to guess at a
+ * command, which is how you end up pasting Linux flags into PowerShell.
+ */
+function InstallPicker({ issued }: { issued: NodeEnrolment }) {
+  // Older servers only sent install_hint; keep working against one.
+  const commands: InstallCommand[] = issued.install?.length
+    ? issued.install
+    : [{ platform: "linux", label: "Linux (systemd)", command: issued.install_hint, note: null }];
+
+  const [platform, setPlatform] = useState(() => guessPlatform(commands));
+  const chosen = commands.find((c) => c.platform === platform) ?? commands[0];
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(chosen.command);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked; the box is selectable */
+    }
+  };
+
+  return (
+    <div className="install-picker">
+      <div className="row install-tabs" role="tablist" aria-label="Install command">
+        {commands.map((c) => (
+          <button
+            key={c.platform}
+            type="button"
+            role="tab"
+            aria-selected={c.platform === chosen.platform}
+            className={`install-tab${c.platform === chosen.platform ? " active" : ""}`}
+            onClick={() => setPlatform(c.platform)}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+      <textarea className="mono" rows={2} readOnly value={chosen.command} />
+      {chosen.note && <p className="hint">{chosen.note}</p>}
+      <div className="row">
+        <button type="button" onClick={() => void copy()}>
+          {copied ? "Copied" : "Copy command"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Open on the platform the operator is most likely standing on. */
+function guessPlatform(commands: InstallCommand[]): string {
+  const ua = navigator.userAgent;
+  const guess = /Windows/i.test(ua) ? "windows" : "linux";
+  return commands.some((c) => c.platform === guess) ? guess : commands[0].platform;
 }
