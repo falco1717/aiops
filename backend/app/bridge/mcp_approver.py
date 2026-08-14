@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -137,6 +138,12 @@ def _handle_call(request_id, params: dict) -> None:
 
 
 def main() -> None:
+    # Calls are answered on their own threads so a human deliberating over one
+    # request does not block another. They must be joined before returning:
+    # when stdin closes, the interpreter would otherwise tear the threads down
+    # mid-flight and the reply would never be written.
+    in_flight: list[threading.Thread] = []
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -165,13 +172,14 @@ def main() -> None:
         elif method == "tools/list":
             _reply(request_id, {"tools": TOOLS})
         elif method == "tools/call":
-            # Each call blocks on a human, so concurrent requests must not
-            # queue behind one another.
-            threading.Thread(
+            worker = threading.Thread(
                 target=_handle_call,
                 args=(request_id, message.get("params") or {}),
                 daemon=True,
-            ).start()
+            )
+            worker.start()
+            in_flight.append(worker)
+            in_flight = [t for t in in_flight if t.is_alive()]
         elif method in ("ping",):
             _reply(request_id, {})
         else:
@@ -182,6 +190,11 @@ def main() -> None:
                     "error": {"code": -32601, "message": f"Method not found: {method}"},
                 }
             )
+
+    # Bounded, so a wedged request cannot keep this process alive forever.
+    deadline = time.monotonic() + HTTP_TIMEOUT + 5
+    for worker in in_flight:
+        worker.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
 if __name__ == "__main__":
