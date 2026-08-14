@@ -21,6 +21,10 @@ class CodexProvider(Provider):
     name = "codex"
     models = ["gpt-5.6-terra", "gpt-5.6", "gpt-5.6-codex", "gpt-5-codex"]
     permission_modes = ["read-only", "workspace-write", "danger-full-access"]
+    #: True for the provider, not for this class: an "ask" turn is routed to
+    #: CodexAppServerAdapter by the runner, because `codex exec` below has no
+    #: way to stop and put a question to a human.
+    supports_interactive_approval = True
 
     #: Sandbox tier used when a preset has not pinned one. "ask" maps to the
     #: same tier as "auto" because this adapter cannot pause for a human — the

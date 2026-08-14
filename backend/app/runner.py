@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import signal
 from datetime import datetime, timedelta, timezone
 
@@ -16,6 +17,8 @@ from .events import hub
 from .models import Event, ProviderAccount, Run, Session
 from . import ssh_targets
 from .providers import get_provider
+from .providers.base import NormalizedEvent
+from .providers.codex_appserver import CodexAppServerAdapter
 
 log = logging.getLogger("aiops.runner")
 
@@ -26,13 +29,41 @@ STREAM_LIMIT = 16 * 1024 * 1024
 # SIGKILL is POSIX-only; on Windows fall back to the terminate signal.
 _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
+#: How bubblewrap reports that the kernel or the container's seccomp profile
+#: will not let it build a sandbox. Codex's own error text is unhelpful about
+#: what an operator can actually change, so we say it ourselves.
+_BWRAP_ERROR = re.compile(r"bwrap:[^\n]*(namespace|permission|seccomp)", re.IGNORECASE)
+
+BWRAP_HINT = (
+    "This command was approved but bubblewrap could not build its sandbox, so "
+    "it never ran. Codex's sandbox tiers below 'danger-full-access' need an "
+    "unprivileged user namespace and a mount, and Docker's default seccomp and "
+    "AppArmor profiles each block one of those. Either run this container with "
+    "both `seccomp=unconfined` and `apparmor=unconfined` (neither alone is "
+    "enough), or set AIOPS_CODEX_INTERACTIVE_SANDBOX=danger-full-access to run "
+    "approved commands unsandboxed — in that mode the human approval is the "
+    "only control left."
+)
+
 
 class Runner:
-    """Owns the lifecycle of every agent subprocess."""
+    """Owns the lifecycle of every agent turn.
+
+    A turn runs one of two ways. Most of them are a one-shot CLI subprocess
+    streaming NDJSON on stdout. The exception is Codex in "ask" mode: `codex
+    exec` has no way to stop and put a question to a human, so that turn is a
+    JSON-RPC conversation with `codex app-server` held open by this process
+    instead (see CodexAppServerAdapter). The two paths differ only in how bytes
+    arrive — everything after an event is parsed is shared, in _EventSink.
+    """
 
     def __init__(self) -> None:
         self._sem = asyncio.Semaphore(settings.max_concurrent_runs)
         self._procs: dict[int, asyncio.subprocess.Process] = {}
+        # An interactive Codex turn is not a one-shot subprocess we can signal:
+        # it is a JSON-RPC conversation this process is holding open, so it is
+        # tracked separately and stopped by closing the adapter.
+        self._adapters: dict[int, CodexAppServerAdapter] = {}
         self._tasks: dict[int, asyncio.Task] = {}
         # Cancellation is recorded, not inferred: a signalled process reports
         # -SIGTERM on POSIX, 1 on Windows, and 143 only when the agent traps the
@@ -48,19 +79,27 @@ class Runner:
     async def cancel(self, run_id: int) -> bool:
         self._cancelled.add(run_id)
         proc = self._procs.get(run_id)
-        if proc is None:
-            task = self._tasks.get(run_id)
-            if task:
-                task.cancel()
-                return True
-            self._cancelled.discard(run_id)
-            return False
-        _terminate(proc)
-        return True
+        if proc is not None:
+            _terminate(proc)
+            return True
+        adapter = self._adapters.get(run_id)
+        if adapter is not None:
+            # Release anything parked on a human first: the adapter's approval
+            # callback is awaiting the broker inside this same process, and
+            # closing the transport underneath it would not wake it up.
+            await broker.cancel_run(run_id)
+            await adapter.close()
+            return True
+        task = self._tasks.get(run_id)
+        if task:
+            task.cancel()
+            return True
+        self._cancelled.discard(run_id)
+        return False
 
     async def shutdown(self) -> None:
         """Best-effort teardown; nothing here may prevent the process from exiting."""
-        for run_id in list(self._procs):
+        for run_id in [*self._procs, *self._adapters]:
             try:
                 await self.cancel(run_id)
             except Exception:  # noqa: BLE001
@@ -175,9 +214,25 @@ class Runner:
             # runs at the session's non-interactive equivalent instead.
             if approval_mode == "ask" and run.schedule_id is not None:
                 approval_mode = "auto"
+
+            # `codex exec` cannot ask a human anything, so an interactive Codex
+            # turn is driven over the app-server's JSON-RPC protocol instead of
+            # as a one-shot subprocess. Every other combination — Codex on auto
+            # or bypass, and Claude in all three modes — keeps the CLI path.
+            interactive_codex = (
+                sess.provider == "codex"
+                and approval_mode == "ask"
+                and provider.supports_interactive_approval
+            )
+            # Only the CLI path needs a token: it identifies a bridge running as
+            # a grandchild process. The adapter is in-process and calls the
+            # broker directly, so issuing one for it would be a secret with no
+            # holder.
             token = (
                 run_tokens.issue(run.id, sess.id)
-                if approval_mode == "ask" and provider.supports_interactive_approval
+                if approval_mode == "ask"
+                and provider.supports_interactive_approval
+                and not interactive_codex
                 else None
             )
 
@@ -193,26 +248,60 @@ class Runner:
             preset_prompt = preset.system_prompt if preset else None
             system_prompt = "\n\n".join(p for p in (preset_prompt, target_note) if p) or None
 
-            spec = provider.build_run(
-                prompt=run.prompt,
-                model=sess.model or (preset.model if preset else None),
-                provider_session_id=sess.provider_session_id,
-                permission_mode=preset.permission_mode if preset else None,
-                system_prompt=system_prompt,
-                allowed_tools=preset.allowed_tools if preset else None,
-                extra_args=(preset.extra_args if preset else []) or [],
-                stream_partials=settings.stream_partial_messages,
-                account_env=account_env,
-                approval_mode=approval_mode,
-                approval_token=token,
-            )
-
-            if spec.assigned_session_id and not sess.provider_session_id:
-                sess.provider_session_id = spec.assigned_session_id
+            adapter: CodexAppServerAdapter | None = None
+            if interactive_codex:
+                # A preset that pins a tier wins; otherwise the instance-wide
+                # setting decides, because which tiers actually work depends on
+                # what the container is allowed to do (see BWRAP_HINT).
+                sandbox = (
+                    preset.permission_mode if preset else None
+                ) or settings.codex_interactive_sandbox
+                adapter = CodexAppServerAdapter(
+                    prompt=run.prompt,
+                    cwd=cwd,
+                    model=sess.model or (preset.model if preset else None),
+                    sandbox=sandbox,
+                    resume_id=sess.provider_session_id,
+                    system_prompt=system_prompt,
+                    on_approval=self._approval_callback(run.id, sess.id),
+                    env={
+                        "NO_COLOR": "1",
+                        "FORCE_COLOR": "0",
+                        "TERM": "dumb",
+                        **account_env,
+                        **(ssh_ctx.env if ssh_ctx else {}),
+                    },
+                    stream_partials=settings.stream_partial_messages,
+                )
+                # No argv is ever exec'd with a prompt on it here, so `command`
+                # shows what really launches plus the tier the turn runs under —
+                # the two things an operator needs when a command dies.
+                argv = [
+                    settings.codex_bin,
+                    "app-server",
+                    f"(sandbox={sandbox}; approvals=untrusted)",
+                ]
+            else:
+                spec = provider.build_run(
+                    prompt=run.prompt,
+                    model=sess.model or (preset.model if preset else None),
+                    provider_session_id=sess.provider_session_id,
+                    permission_mode=preset.permission_mode if preset else None,
+                    system_prompt=system_prompt,
+                    allowed_tools=preset.allowed_tools if preset else None,
+                    extra_args=(preset.extra_args if preset else []) or [],
+                    stream_partials=settings.stream_partial_messages,
+                    account_env=account_env,
+                    approval_mode=approval_mode,
+                    approval_token=token,
+                )
+                argv = spec.argv
+                if spec.assigned_session_id and not sess.provider_session_id:
+                    sess.provider_session_id = spec.assigned_session_id
 
             run.status = "running"
             run.started_at = run.started_at or datetime.now(timezone.utc)
-            run.command = spec.argv
+            run.command = argv
             run.account_id = account.id if account else None
             sess.status = "running"
             await db.commit()
@@ -224,7 +313,7 @@ class Runner:
                     "session_id": sess.id,
                     "run_id": run.id,
                     "prompt": run.prompt,
-                    "command": _redact(spec.argv),
+                    "command": _redact(argv),
                     "account": account.name if account else None,
                     "failed_over_from": previous.name if previous else None,
                     # A retry after failover is a continuation, not a new turn;
@@ -233,73 +322,46 @@ class Runner:
                 },
             )
 
-            env = {**os.environ, **spec.env, "NO_COLOR": "1", "FORCE_COLOR": "0", "TERM": "dumb"}
-            if ssh_ctx:
-                env.update(ssh_ctx.env)
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *spec.argv,
-                    cwd=cwd,
-                    env=env,
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    limit=STREAM_LIMIT,
-                    start_new_session=True,
-                )
-            except FileNotFoundError:
-                await self._finalize(
-                    run_id,
-                    "failed",
-                    None,
-                    f"Executable not found: {spec.argv[0]}. Is the CLI installed in the container?",
-                )
-                return
-
-            self._procs[run_id] = proc
             state = _RunState()
-            stderr_task = asyncio.create_task(_drain(proc.stderr, state))
             try:
-                await asyncio.wait_for(
-                    self._pump_stdout(db, run, sess, provider, proc, state, account),
-                    timeout=settings.run_timeout_seconds,
-                )
-                exit_code = await asyncio.wait_for(proc.wait(), timeout=30)
-                await stderr_task
-                status = self._classify(run_id, exit_code, state)
-                if status == "failed" and state.rate_limited:
-                    status = "rate_limited"
-                    if account is not None:
-                        # Skip this account for a while rather than re-picking it
-                        # on the operator's next turn.
-                        account.limited_until = datetime.now(timezone.utc) + timedelta(
-                            seconds=settings.account_limit_cooldown_seconds
-                        )
-                        await db.commit()
-            except asyncio.TimeoutError:
-                _terminate(proc)
-                exit_code = await _wait_quietly(proc)
-                if run_id in self._cancelled:
-                    status = "cancelled"
-                    state.error = "Cancelled by operator"
+                if adapter is not None:
+                    status, exit_code = await self._drive_adapter(
+                        db, run, sess, adapter, state, account
+                    )
                 else:
-                    status = "timeout"
-                    state.error = state.error or (
-                        f"Run exceeded {settings.run_timeout_seconds}s and was terminated"
+                    env = {
+                        **os.environ,
+                        **spec.env,
+                        "NO_COLOR": "1",
+                        "FORCE_COLOR": "0",
+                        "TERM": "dumb",
+                    }
+                    if ssh_ctx:
+                        env.update(ssh_ctx.env)
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            *spec.argv,
+                            cwd=cwd,
+                            env=env,
+                            stdin=asyncio.subprocess.DEVNULL,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            limit=STREAM_LIMIT,
+                            start_new_session=True,
+                        )
+                    except FileNotFoundError:
+                        await self._finalize(
+                            run_id,
+                            "failed",
+                            None,
+                            f"Executable not found: {spec.argv[0]}. "
+                            "Is the CLI installed in the container?",
+                        )
+                        return
+                    status, exit_code = await self._drive_process(
+                        db, run, sess, provider, proc, state, account
                     )
             finally:
-                # Any exit from here — a DB error in the pump, a cancellation
-                # landing before the process was registered, an unexpected
-                # crash — must still reap the agent. Dropping it from _procs
-                # without signalling it leaves a subprocess running that
-                # nothing can reach any more.
-                if proc.returncode is None:
-                    _terminate(proc)
-                    await _wait_quietly(proc)
-                stderr_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await stderr_task
-                self._procs.pop(run_id, None)
                 self._cancelled.discard(run_id)
                 # Nothing may stay parked on a run that is ending: the bridge
                 # dies with the agent, so a still-pending request would leave
@@ -311,6 +373,121 @@ class Runner:
                     ssh_ctx.cleanup()
 
         return status, exit_code, state, account, next_account
+
+    # -- execution engines ---------------------------------------------
+    async def _drive_process(self, db, run: Run, sess: Session, provider, proc, state, account):
+        """Supervise one agent CLI subprocess, streaming its stdout."""
+        run_id = run.id
+        self._procs[run_id] = proc
+        stderr_task = asyncio.create_task(_drain(proc.stderr, state))
+        try:
+            await asyncio.wait_for(
+                self._pump_stdout(db, run, sess, provider, proc, state, account),
+                timeout=settings.run_timeout_seconds,
+            )
+            exit_code = await asyncio.wait_for(proc.wait(), timeout=30)
+            await stderr_task
+            status = self._classify(run_id, exit_code, state)
+            if status == "failed" and state.rate_limited:
+                status = "rate_limited"
+                await self._cool_down(db, account)
+        except asyncio.TimeoutError:
+            _terminate(proc)
+            exit_code = await _wait_quietly(proc)
+            status, state.error = self._interrupted(run_id, state)
+        finally:
+            # Any exit from here — a DB error in the pump, a cancellation
+            # landing before the process was registered, an unexpected
+            # crash — must still reap the agent. Dropping it from _procs
+            # without signalling it leaves a subprocess running that
+            # nothing can reach any more.
+            if proc.returncode is None:
+                _terminate(proc)
+                await _wait_quietly(proc)
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+            self._procs.pop(run_id, None)
+        return status, exit_code
+
+    async def _drive_adapter(
+        self, db, run: Run, sess: Session, adapter: CodexAppServerAdapter, state, account
+    ):
+        """Supervise one interactive Codex turn over the app-server protocol."""
+        run_id = run.id
+        self._adapters[run_id] = adapter
+        try:
+            await asyncio.wait_for(
+                self._pump_adapter(db, run, sess, adapter, state, account),
+                timeout=settings.run_timeout_seconds,
+            )
+            # There is no process exit code to read: the app-server is a
+            # conversation, not a one-shot command, and it is still healthy when
+            # the turn ends. What the turn reported is the whole verdict.
+            exit_code = 1 if state.saw_error else 0
+            status = self._classify(run_id, exit_code, state)
+            if status == "failed" and state.rate_limited:
+                status = "rate_limited"
+                await self._cool_down(db, account)
+        except asyncio.TimeoutError:
+            exit_code = None
+            status, state.error = self._interrupted(run_id, state)
+        finally:
+            await adapter.close()
+            self._adapters.pop(run_id, None)
+
+        # The thread id is what lets the operator's next turn continue this
+        # conversation instead of starting a fresh one.
+        if adapter.conversation_id and adapter.conversation_id != sess.provider_session_id:
+            sess.provider_session_id = adapter.conversation_id
+            await db.commit()
+        # `turn/completed` carries the usage that the sink has already folded
+        # in. Only when the turn never got that far — a denial that ended it, a
+        # dead server — does the adapter's own last-seen tally add anything.
+        if adapter.usage and not state.usage:
+            state.usage.update(adapter.usage)
+        return status, exit_code
+
+    def _approval_callback(self, run_id: int, session_id: str):
+        """Ask the operator, straight from the adapter's request handler.
+
+        Claude has to reach the broker through an MCP bridge subprocess holding
+        a run token, because the CLI owns the tool loop. The Codex adapter runs
+        inside this process, so it just calls the broker — no bridge, no token,
+        no HTTP hop that could fail open.
+        """
+
+        async def ask(kind, tool_name, summary, request):
+            decision = await broker.request(
+                run_id=run_id,
+                session_id=session_id,
+                provider="codex",
+                kind=kind,
+                tool_name=tool_name,
+                summary=summary,
+                request=request if isinstance(request, dict) else None,
+            )
+            return decision.allowed, decision.note
+
+        return ask
+
+    def _interrupted(self, run_id: int, state: "_RunState") -> tuple[str, str | None]:
+        """What a run that hit the wall clock should be recorded as."""
+        if run_id in self._cancelled:
+            return "cancelled", "Cancelled by operator"
+        return "timeout", state.error or (
+            f"Run exceeded {settings.run_timeout_seconds}s and was terminated"
+        )
+
+    @staticmethod
+    async def _cool_down(db, account) -> None:
+        """Skip a limited account for a while rather than re-picking it."""
+        if account is None:
+            return
+        account.limited_until = datetime.now(timezone.utc) + timedelta(
+            seconds=settings.account_limit_cooldown_seconds
+        )
+        await db.commit()
 
     # -- account selection ---------------------------------------------
     @staticmethod
@@ -359,13 +536,7 @@ class Runner:
     async def _pump_stdout(
         self, db, run: Run, sess: Session, provider, proc, state, account=None
     ) -> None:
-        # Continue the run's existing sequence: a failover attempt writes more
-        # events for the same run, and restarting at 1 collides with the events
-        # the first attempt already stored.
-        seq = (
-            await db.scalar(select(func.max(Event.seq)).where(Event.run_id == run.id))
-        ) or 0
-        spawn_names: dict[str, str] = {}
+        sink = await _EventSink.open(db, run, sess, state, account)
         while True:
             try:
                 raw_line = await proc.stdout.readline()
@@ -382,65 +553,15 @@ class Runner:
             event = provider.parse_line(line)
             if event is None:
                 continue
+            await sink.emit(event)
 
-            # Label a subagent's steps with the name it was spawned as; only the
-            # spawning tool call carries it, the child messages do not.
-            if event.spawns_tool_use_id and event.agent_name:
-                spawn_names[event.spawns_tool_use_id] = event.agent_name
-            if event.parent_tool_use_id and not event.agent_name:
-                event.agent_name = spawn_names.get(event.parent_tool_use_id)
-
-            if event.provider_session_id and event.provider_session_id != sess.provider_session_id:
-                sess.provider_session_id = event.provider_session_id
-                await db.commit()
-            if event.cost_usd is not None:
-                state.cost_usd = (state.cost_usd or 0) + event.cost_usd
-            if event.usage:
-                for key, value in event.usage.items():
-                    state.usage[key] = state.usage.get(key, 0) + value
-            if event.rate_limited:
-                state.rate_limited = True
-            if event.rate_limit_info and account is not None:
-                _apply_limit_info(account, event.rate_limit_info)
-                await db.commit()
-            if event.available_commands and not sess.available_commands:
-                sess.available_commands = event.available_commands
-                await db.commit()
-            if event.is_error and event.kind in ("result", "error"):
-                state.saw_error = True
-                state.error = state.error or event.text
-
-            payload = {
-                "type": "event",
-                "session_id": sess.id,
-                "run_id": run.id,
-                "kind": event.kind,
-                "text": event.text,
-                "tool_name": event.tool_name,
-                "is_error": event.is_error,
-                "parent_tool_use_id": event.parent_tool_use_id,
-                "agent_name": event.agent_name,
-            }
-
-            if event.persist:
-                seq += 1
-                db.add(
-                    Event(
-                        run_id=run.id,
-                        session_id=sess.id,
-                        seq=seq,
-                        kind=event.kind,
-                        text=event.text,
-                        tool_name=event.tool_name,
-                        raw=event.raw,
-                        parent_tool_use_id=event.parent_tool_use_id,
-                        agent_name=event.agent_name,
-                    )
-                )
-                await db.commit()
-                payload["seq"] = seq
-
-            hub.publish(sess.id, payload)
+    async def _pump_adapter(
+        self, db, run: Run, sess: Session, adapter: CodexAppServerAdapter, state, account=None
+    ) -> None:
+        """Same treatment for events that arrive as objects rather than lines."""
+        sink = await _EventSink.open(db, run, sess, state, account)
+        async for event in adapter.run():
+            await sink.emit(event)
 
     def _classify(self, run_id: int, exit_code: int | None, state: "_RunState") -> str:
         if run_id in self._cancelled:
@@ -515,6 +636,109 @@ class Runner:
                 "cost_usd": cost_usd,
             },
         )
+
+
+class _EventSink:
+    """Applies one parsed event to the run in progress.
+
+    Everything an event can carry beyond its text — a session id to remember,
+    tokens and cost to accumulate, a rate-limit window, the slash commands the
+    CLI advertised, the database row, the websocket fan-out — is handled here
+    and only here. Both execution paths (an agent CLI's stdout and the Codex
+    app-server adapter) push through this same object, so the interactive path
+    cannot quietly drift away from the one the CLIs use.
+    """
+
+    def __init__(self, db, run: Run, sess: Session, state: "_RunState", account, seq: int) -> None:
+        self.db = db
+        self.run = run
+        self.sess = sess
+        self.state = state
+        self.account = account
+        self.seq = seq
+        # Only the tool call that spawns a subagent carries its name; the
+        # child's own messages point back at it by id.
+        self.spawn_names: dict[str, str] = {}
+        self._warned_bwrap = False
+
+    @classmethod
+    async def open(cls, db, run: Run, sess: Session, state: "_RunState", account) -> "_EventSink":
+        # Continue the run's existing sequence: a failover attempt writes more
+        # events for the same run, and restarting at 1 collides with the events
+        # the first attempt already stored.
+        seq = (await db.scalar(select(func.max(Event.seq)).where(Event.run_id == run.id))) or 0
+        return cls(db, run, sess, state, account, seq)
+
+    async def emit(self, event: NormalizedEvent) -> None:
+        db, run, sess, state = self.db, self.run, self.sess, self.state
+
+        # Label a subagent's steps with the name it was spawned as; only the
+        # spawning tool call carries it, the child messages do not.
+        if event.spawns_tool_use_id and event.agent_name:
+            self.spawn_names[event.spawns_tool_use_id] = event.agent_name
+        if event.parent_tool_use_id and not event.agent_name:
+            event.agent_name = self.spawn_names.get(event.parent_tool_use_id)
+
+        if event.provider_session_id and event.provider_session_id != sess.provider_session_id:
+            sess.provider_session_id = event.provider_session_id
+            await db.commit()
+        if event.cost_usd is not None:
+            state.cost_usd = (state.cost_usd or 0) + event.cost_usd
+        if event.usage:
+            for key, value in event.usage.items():
+                state.usage[key] = state.usage.get(key, 0) + value
+        if event.rate_limited:
+            state.rate_limited = True
+        if event.rate_limit_info and self.account is not None:
+            _apply_limit_info(self.account, event.rate_limit_info)
+            await db.commit()
+        if event.available_commands and not sess.available_commands:
+            sess.available_commands = event.available_commands
+            await db.commit()
+        if event.is_error and event.kind in ("result", "error"):
+            state.saw_error = True
+            state.error = state.error or event.text
+
+        payload = {
+            "type": "event",
+            "session_id": sess.id,
+            "run_id": run.id,
+            "kind": event.kind,
+            "text": event.text,
+            "tool_name": event.tool_name,
+            "is_error": event.is_error,
+            "parent_tool_use_id": event.parent_tool_use_id,
+            "agent_name": event.agent_name,
+        }
+
+        if event.persist:
+            self.seq += 1
+            db.add(
+                Event(
+                    run_id=run.id,
+                    session_id=sess.id,
+                    seq=self.seq,
+                    kind=event.kind,
+                    text=event.text,
+                    tool_name=event.tool_name,
+                    raw=event.raw,
+                    parent_tool_use_id=event.parent_tool_use_id,
+                    agent_name=event.agent_name,
+                )
+            )
+            await db.commit()
+            payload["seq"] = self.seq
+
+        hub.publish(sess.id, payload)
+
+        # A sandbox that cannot start looks, in the transcript, exactly like a
+        # command that failed on its own. Say what it actually is, once.
+        if event.text and not self._warned_bwrap and _BWRAP_ERROR.search(event.text):
+            self._warned_bwrap = True
+            log.warning("run %s: %s", run.id, BWRAP_HINT)
+            await self.emit(
+                NormalizedEvent(kind="system", text=BWRAP_HINT, raw={"aiops_hint": "bubblewrap"})
+            )
 
 
 class _RunState:

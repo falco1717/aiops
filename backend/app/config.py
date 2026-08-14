@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     # How long an agent waits, parked, for a human answer before giving up. A
     # scheduled run at 3am has nobody to ask, so this must not be infinite.
     approval_timeout_seconds: int = 600
+    # Sandbox tier an interactive ("ask") Codex turn runs under. The human is
+    # the gate there, so the tier is only defence in depth — but under Docker's
+    # default seccomp and AppArmor profiles bubblewrap cannot build the
+    # "workspace-write" sandbox at all, and an *approved* command dies with a
+    # bwrap error instead of running. The safe tier stays the default;
+    # loosening it is a deliberate operator choice, not something AIOps does
+    # quietly (the runner logs what to change when it sees that failure).
+    codex_interactive_sandbox: str = "workspace-write"
     # Port the in-container approval bridge calls back on. This is the app's own
     # listener; nothing is published to the host.
     internal_api_url: str = "http://127.0.0.1:8000"
