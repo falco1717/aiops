@@ -300,6 +300,7 @@ class Runner:
                         prompt=agent_prompt,
                         cwd=cwd,
                         model=sess.model or (preset.model if preset else None),
+                        effort=sess.effective_effort,
                         sandbox=sandbox,
                         resume_id=sess.provider_session_id,
                         system_prompt=system_prompt,
@@ -325,6 +326,7 @@ class Runner:
                     spec = provider.build_run(
                         prompt=agent_prompt,
                         model=sess.model or (preset.model if preset else None),
+                        effort=sess.effective_effort,
                         provider_session_id=sess.provider_session_id,
                         permission_mode=preset.permission_mode if preset else None,
                         system_prompt=system_prompt,
