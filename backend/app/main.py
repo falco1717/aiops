@@ -104,6 +104,7 @@ async def lifespan(app: FastAPI):
 
     os.makedirs(settings.workspace_root, exist_ok=True)
     os.makedirs(settings.accounts_root, exist_ok=True)
+    os.makedirs(settings.attachments_root, exist_ok=True)
     log.info("AIOps ready. Workspace root: %s", settings.workspace_root)
     try:
         yield

@@ -106,6 +106,7 @@ class SessionIn(BaseModel):
     workspace_id: int | None = None
     approval_mode: str | None = None  # ask | auto | bypass
     prompt: str | None = None  # optional first turn
+    attachment_ids: list[str] = []
 
 
 class SessionPatch(BaseModel):
@@ -136,6 +137,8 @@ class SessionOut(ORM):
 
 class PromptIn(BaseModel):
     prompt: str = Field(min_length=1)
+    #: Already-uploaded attachments to hand to the agent with this turn.
+    attachment_ids: list[str] = []
 
 
 class RunOut(ORM):
@@ -177,10 +180,40 @@ class CapabilityOut(BaseModel):
     source: str
 
 
+class AttachmentOut(ORM):
+    id: str
+    session_id: str
+    #: Null while the file is still in the composer, set when the turn is sent.
+    run_id: int | None
+    filename: str
+    content_type: str
+    size: int
+    created_at: datetime
+
+
+class SessionFile(BaseModel):
+    """One file under the session's workspace, as offered for download."""
+
+    path: str
+    size: int
+    modified: datetime
+
+
+class SessionFilesOut(BaseModel):
+    root: str
+    files: list[SessionFile]
+    #: The listing hit its cap. Said out loud so nobody reads a bounded walk as
+    #: "this is everything the agent wrote".
+    truncated: bool
+    max_files: int
+    max_depth: int
+
+
 class TranscriptOut(BaseModel):
     session: SessionOut
     runs: list[RunOut]
     events: list[EventOut]
+    attachments: list[AttachmentOut] = []
 
 
 # --- schedules ---------------------------------------------------------

@@ -50,8 +50,11 @@ WORKDIR /app
 COPY backend/app ./app
 COPY --from=web /build/dist ./app/static
 
-RUN mkdir -p /workspaces /home/node/.claude /home/node/.codex \
-    && chown -R node:node /workspaces /home/node /app
+# /attachments must exist here, not just at startup: Docker seeds a fresh named
+# volume from the image, so a directory absent at build time gets mounted
+# root-owned and the app cannot write into it.
+RUN mkdir -p /workspaces /attachments /home/node/.claude /home/node/.codex \
+    && chown -R node:node /workspaces /attachments /home/node /app
 
 USER node
 EXPOSE 8000

@@ -24,6 +24,16 @@ class Settings(BaseSettings):
 
     # --- agent execution ----------------------------------------------
     workspace_root: str = "/workspaces"
+    # Files the operator attaches to a message. Kept out of the workspaces so an
+    # agent turned loose in a repo cannot rewrite what it was handed, and so a
+    # `git clean` does not take the evidence with it.
+    attachments_root: str = "/attachments"
+    max_attachment_bytes: int = 25 * 1024 * 1024
+    # A workspace can be a whole monorepo. The files panel is for picking up what
+    # the agent just produced, not for browsing a tree, so the walk is bounded on
+    # both axes and says so in the UI rather than truncating quietly.
+    session_files_max: int = 400
+    session_files_max_depth: int = 3
     # Per-account credential directories live here, inside the persisted home
     # volume, so several provider sign-ins coexist and survive a recreate.
     accounts_root: str = "/home/node/accounts"

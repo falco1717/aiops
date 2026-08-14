@@ -14,8 +14,8 @@ from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
 from .events import hub
-from .models import Event, ProviderAccount, Run, Session
-from . import ssh_targets
+from .models import Attachment, Event, ProviderAccount, Run, Session
+from . import attachments, ssh_targets
 from .providers import get_provider
 from .providers.base import NormalizedEvent
 from .providers.codex_appserver import CodexAppServerAdapter
@@ -248,6 +248,18 @@ class Runner:
             preset_prompt = preset.system_prompt if preset else None
             system_prompt = "\n\n".join(p for p in (preset_prompt, target_note) if p) or None
 
+            # The transcript keeps the operator's own words; the agent gets them
+            # plus where the files landed. Storing the paths on the run instead
+            # would put a block of container paths in every message bubble.
+            attached = list(
+                await db.scalars(
+                    select(Attachment)
+                    .where(Attachment.run_id == run.id)
+                    .order_by(Attachment.created_at)
+                )
+            )
+            agent_prompt = run.prompt + attachments.prompt_suffix(attached)
+
             adapter: CodexAppServerAdapter | None = None
             if interactive_codex:
                 # A preset that pins a tier wins; otherwise the instance-wide
@@ -257,7 +269,7 @@ class Runner:
                     preset.permission_mode if preset else None
                 ) or settings.codex_interactive_sandbox
                 adapter = CodexAppServerAdapter(
-                    prompt=run.prompt,
+                    prompt=agent_prompt,
                     cwd=cwd,
                     model=sess.model or (preset.model if preset else None),
                     sandbox=sandbox,
@@ -283,7 +295,7 @@ class Runner:
                 ]
             else:
                 spec = provider.build_run(
-                    prompt=run.prompt,
+                    prompt=agent_prompt,
                     model=sess.model or (preset.model if preset else None),
                     provider_session_id=sess.provider_session_id,
                     permission_mode=preset.permission_mode if preset else None,

@@ -7,9 +7,11 @@ import type {
   AgentEvent,
   Approval,
   ApprovalMode,
+  Attachment,
   Capability,
   Run,
   Session,
+  SessionFiles,
   WsMessage,
 } from "../types";
 
@@ -56,6 +58,15 @@ function groupSubagents(events: ChatEvent[]): Row[] {
 
 const eventKey = (e: ChatEvent) => `${e.run_id}:${e.seq}`;
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Sent with a message that carried files but no words of its own. */
+const ATTACHMENTS_ONLY_PROMPT = "Take a look at the attached file(s).";
+
 /** Kinds that mean the streaming buffer for this run has been superseded. */
 const FLUSHES_LIVE = new Set(["assistant", "thinking", "result", "tool_use"]);
 
@@ -80,10 +91,15 @@ export default function Chat({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
 
   const navigate = useNavigate();
   const bodyRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const pinnedRef = useRef(true);
 
   // Highest persisted event id we hold, so a reconnect can ask for just the
@@ -111,6 +127,9 @@ export default function Chat({
         const t = await api.transcript(sessionId, incremental ? lastEventIdRef.current : 0);
         setSession(t.session);
         setRuns(t.runs);
+        // Always the full set, including files still waiting in the composer, so
+        // an incremental refetch cannot make a staged upload disappear.
+        setAttachments(t.attachments);
         mergeEvents(t.events);
         setError(null);
       } catch (err) {
@@ -271,13 +290,56 @@ export default function Chat({
     [runs],
   );
 
+  /** Uploaded but not yet sent — what the composer is holding. */
+  const staged = useMemo(() => attachments.filter((a) => a.run_id === null), [attachments]);
+
+  const attachmentsByRun = useMemo(() => {
+    const map = new Map<number, Attachment[]>();
+    for (const a of attachments) {
+      if (a.run_id === null) continue;
+      map.set(a.run_id, [...(map.get(a.run_id) ?? []), a]);
+    }
+    return map;
+  }, [attachments]);
+
+  /** One shared path for the picker, the drop target and the paste handler. */
+  const stage = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) return;
+      setUploading(true);
+      setError(null);
+      try {
+        for (const file of files) {
+          const saved = await api.uploadAttachment(sessionId, file);
+          setAttachments((prev) => [...prev, saved]);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setUploading(false);
+      }
+    },
+    [sessionId],
+  );
+
+  const unstage = async (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+    try {
+      await api.deleteAttachment(sessionId, id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      await reload();
+    }
+  };
+
   const send = async (event: React.FormEvent | React.KeyboardEvent) => {
     event.preventDefault();
-    if (!prompt.trim() || activeRun) return;
+    const text = prompt.trim() || (staged.length ? ATTACHMENTS_ONLY_PROMPT : "");
+    if (!text || activeRun || uploading) return;
     setSending(true);
     setError(null);
     try {
-      await api.prompt(sessionId, prompt);
+      await api.prompt(sessionId, text, staged.map((a) => a.id));
       setPrompt("");
       pinnedRef.current = true;
       await reload();
@@ -421,6 +483,13 @@ export default function Chat({
             <option value="bypass">Bypass all checks</option>
           </select>
         )}
+        <button
+          type="button"
+          onClick={() => setFilesOpen((v) => !v)}
+          title="Files in this session's working directory"
+        >
+          Files
+        </button>
         {activeRun && (
           <button className="danger" onClick={cancel}>
             Stop
@@ -443,6 +512,13 @@ export default function Chat({
                 you{run.schedule_id ? " (scheduled)" : ""}
               </div>
               <pre>{run.prompt}</pre>
+              {(attachmentsByRun.get(run.id) ?? []).length > 0 && (
+                <div className="attach-strip sent">
+                  {(attachmentsByRun.get(run.id) ?? []).map((a) => (
+                    <AttachmentTile key={a.id} sessionId={sessionId} attachment={a} />
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* A silent failover looks like the first account simply worked.
@@ -509,7 +585,26 @@ export default function Chat({
         />
       ))}
 
-      <form className="chat-foot" onSubmit={send}>
+      {filesOpen && <FilesPanel sessionId={sessionId} onClose={() => setFilesOpen(false)} />}
+
+      <form
+        className={`chat-foot${dragging ? " dropping" : ""}`}
+        onSubmit={send}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          // Moving between children fires dragleave on the parent too; only the
+          // pointer actually leaving the form should clear the highlight.
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          void stage(Array.from(e.dataTransfer.files));
+        }}
+      >
         {pickerOpen && (
           <div className="picker">
             <div className="picker-head">
@@ -539,6 +634,19 @@ export default function Chat({
             )}
           </div>
         )}
+        {(staged.length > 0 || uploading) && (
+          <div className="attach-strip">
+            {staged.map((a) => (
+              <AttachmentTile
+                key={a.id}
+                sessionId={sessionId}
+                attachment={a}
+                onRemove={() => void unstage(a.id)}
+              />
+            ))}
+            {uploading && <span className="attach-status">Uploading…</span>}
+          </div>
+        )}
         <textarea
           ref={promptRef}
           rows={3}
@@ -546,17 +654,51 @@ export default function Chat({
           placeholder={
             activeRun
               ? "Agent is working — stop it or wait…"
-              : "Describe the task…  (Ctrl+Enter to send, / for skills)"
+              : "Describe the task…  (Ctrl+Enter to send, / for skills, paste or drop files)"
           }
           disabled={!!activeRun}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void send(e);
           }}
+          onPaste={(e) => {
+            // A screenshot on the clipboard arrives here as a file with no name
+            // and no other representation — this is the only place to catch it.
+            const pasted = e.clipboardData ? Array.from(e.clipboardData.files) : [];
+            if (pasted.length === 0) return;
+            e.preventDefault();
+            void stage(pasted);
+          }}
         />
         <div className="row" style={{ marginTop: 8 }}>
-          <button className="primary" type="submit" disabled={!!activeRun || sending || !prompt.trim()}>
+          <button
+            className="primary"
+            type="submit"
+            disabled={!!activeRun || sending || uploading || (!prompt.trim() && staged.length === 0)}
+          >
             {sending ? "Sending…" : "Send"}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              void stage(e.target.files ? Array.from(e.target.files) : []);
+              // Without this, re-picking the same file fires no change event.
+              e.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={!!activeRun}
+            title="Attach files or images to the next message"
+          >
+            📎 Attach
+            {staged.length > 0 && (
+              <span className="pill" style={{ marginLeft: 6 }}>{staged.length}</span>
+            )}
           </button>
           <button
             type="button"
@@ -575,6 +717,113 @@ export default function Chat({
           )}
         </div>
       </form>
+    </div>
+  );
+}
+
+/**
+ * One attached file. Images show themselves — a screenshot is unusable as a
+ * filename — and everything else gets a chip.
+ */
+function AttachmentTile({
+  sessionId,
+  attachment,
+  onRemove,
+}: {
+  sessionId: string;
+  attachment: Attachment;
+  onRemove?: () => void;
+}) {
+  const href = api.attachmentUrl(sessionId, attachment.id);
+  const isImage = attachment.content_type.startsWith("image/");
+  return (
+    <div className={`attach-tile${isImage ? " image" : ""}`}>
+      <a href={href} target="_blank" rel="noreferrer" title={attachment.filename}>
+        {isImage ? (
+          <img className="attach-thumb" src={href} alt={attachment.filename} />
+        ) : (
+          <span className="attach-icon">▤</span>
+        )}
+      </a>
+      <span className="attach-meta">
+        <a href={href} className="attach-name" title={attachment.filename}>
+          {attachment.filename}
+        </a>
+        <span className="attach-size">{formatSize(attachment.size)}</span>
+      </span>
+      {onRemove && (
+        <button type="button" className="attach-remove" onClick={onRemove} title="Remove">
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * What the agent left behind, for downloading.
+ *
+ * The listing is deliberately bounded — a workspace is usually a repo with a
+ * build tree in it — so the rule is printed rather than applied silently.
+ */
+function FilesPanel({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
+  const [data, setData] = useState<SessionFiles | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setData(await api.sessionFiles(sessionId));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <div className="files-panel">
+      <div className="files-head">
+        <strong>Files</strong>
+        <span className="files-root mono">{data?.root ?? "…"}</span>
+        <button type="button" onClick={() => void load()} disabled={loading}>
+          {loading ? "Reading…" : "Refresh"}
+        </button>
+        <button type="button" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      {error && <div className="error-banner">{error}</div>}
+      {data && (
+        <div className="files-rule">
+          Newest first · up to {data.max_files} files, {data.max_depth} levels deep · .git,
+          node_modules and cache directories skipped
+          {data.truncated && " · more files exist than are listed here"}
+        </div>
+      )}
+      {data && data.files.length === 0 && !error && (
+        <div className="empty" style={{ padding: 14 }}>
+          Nothing here yet.
+        </div>
+      )}
+      {data && data.files.length > 0 && (
+        <ul className="files-list">
+          {data.files.map((f) => (
+            <li key={f.path}>
+              <a href={api.sessionFileUrl(sessionId, f.path)} className="mono">
+                {f.path}
+              </a>
+              <span className="files-size">{formatSize(f.size)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

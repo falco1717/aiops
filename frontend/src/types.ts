@@ -191,10 +191,37 @@ export type Capability = {
   source: string;
 };
 
+/** A file the operator handed to the agent. `run_id` is null until it is sent. */
+export type Attachment = {
+  id: string;
+  session_id: string;
+  run_id: number | null;
+  filename: string;
+  content_type: string;
+  size: number;
+  created_at: string;
+};
+
+/** A file under the session's workspace, offered for download. */
+export type SessionFile = {
+  path: string;
+  size: number;
+  modified: string;
+};
+
+export type SessionFiles = {
+  root: string;
+  files: SessionFile[];
+  truncated: boolean;
+  max_files: number;
+  max_depth: number;
+};
+
 export type Transcript = {
   session: Session;
   runs: Run[];
   events: AgentEvent[];
+  attachments: Attachment[];
 };
 
 export type Schedule = {

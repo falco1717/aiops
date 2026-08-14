@@ -184,6 +184,36 @@ class Session(Base):
     )
 
 
+class Attachment(Base):
+    """A file the operator handed to the agent with a message.
+
+    `id` is generated here and becomes a directory of its own on disk, so the
+    client's filename never has to be unique: two uploads of screenshot.png
+    coexist, and neither can overwrite the other. `run_id` is null while the
+    file is still sitting in the composer and is set when the turn is sent.
+    """
+
+    __tablename__ = "attachments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), index=True
+    )
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    #: Sanitised. The name the client sent is never stored or used as a path.
+    filename: Mapped[str] = mapped_column(String(255))
+    #: What downloads are served as — derived from the extension, never from the
+    #: client's Content-Type, and never anything a browser will render inline.
+    content_type: Mapped[str] = mapped_column(String(128), default="application/octet-stream")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    uploaded_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Target(Base):
     """A system an agent can reach by name — a host plus how to log into it.
 

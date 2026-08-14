@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import AgentPreset, ProviderAccount, Run, Session, User, Workspace
+from .models import AgentPreset, Attachment, ProviderAccount, Run, Session, User, Workspace
 from .providers import PROVIDERS
 from .runner import runner
 
@@ -111,14 +112,20 @@ async def queue_run(
     prompt: str,
     *,
     schedule_id: int | None = None,
+    attachment_ids: list[str] | None = None,
 ) -> Run:
     """Persist a turn and hand it to the runner. Commits."""
     prompt = prompt.strip()
     if not prompt:
         raise ValidationError("Prompt must not be empty")
 
+    attached = await _claimable_attachments(db, session.id, attachment_ids or [])
+
     run = Run(session_id=session.id, prompt=prompt, schedule_id=schedule_id, status="queued")
     db.add(run)
+    await db.flush()
+    for row in attached:
+        row.run_id = run.id
     session.status = "running"
     session.updated_at = datetime.now(timezone.utc)
     if session.title == "Untitled":
@@ -128,3 +135,32 @@ async def queue_run(
 
     runner.submit(run.id)
     return run
+
+
+async def _claimable_attachments(
+    db: AsyncSession, session_id: str, ids: list[str]
+) -> list[Attachment]:
+    """The uploads this turn may claim.
+
+    Scoped to the session so an id from someone else's conversation cannot be
+    attached here, and to unsent rows so a file cannot be re-pointed at a later
+    turn once the agent has already been told where it is.
+    """
+    if not ids:
+        return []
+    rows = list(
+        await db.scalars(
+            select(Attachment).where(
+                Attachment.id.in_(ids),
+                Attachment.session_id == session_id,
+                Attachment.run_id.is_(None),
+            )
+        )
+    )
+    missing = set(ids) - {row.id for row in rows}
+    if missing:
+        raise ValidationError(
+            f"{len(missing)} attachment(s) are not available to this message. "
+            "They may have been removed, or already sent with an earlier turn."
+        )
+    return rows

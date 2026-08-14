@@ -36,6 +36,13 @@ services:
       AIOPS_ADMIN_USERNAME: ${AIOPS_ADMIN_USERNAME:-admin}
       AIOPS_ADMIN_PASSWORD: ${AIOPS_ADMIN_PASSWORD:-}
       AIOPS_WORKSPACE_ROOT: /workspaces
+      # Uploaded files. Fixed rather than ${}-expanded, like the workspace root
+      # above: the volume below is mounted at this exact path, and a setting the
+      # operator could move out from under it would only lose their uploads.
+      AIOPS_ATTACHMENTS_ROOT: /attachments
+      AIOPS_MAX_ATTACHMENT_BYTES: ${AIOPS_MAX_ATTACHMENT_BYTES:-26214400}
+      AIOPS_SESSION_FILES_MAX: ${AIOPS_SESSION_FILES_MAX:-400}
+      AIOPS_SESSION_FILES_MAX_DEPTH: ${AIOPS_SESSION_FILES_MAX_DEPTH:-3}
       AIOPS_MAX_CONCURRENT_RUNS: ${AIOPS_MAX_CONCURRENT_RUNS:-4}
       AIOPS_RUN_TIMEOUT_SECONDS: ${AIOPS_RUN_TIMEOUT_SECONDS:-3600}
       AIOPS_COOKIE_SECURE: ${AIOPS_COOKIE_SECURE:-true}
@@ -65,6 +72,9 @@ services:
     volumes:
       # Agent working directories. Point this at wherever your repos live.
       - ${AIOPS_WORKSPACES_HOST_PATH:-./workspaces}:/workspaces
+      # Files attached to messages. A named volume, so a rebuild or a recreate
+      # does not throw away the screenshot someone pasted into a conversation.
+      - attachments:/attachments
       # CLI credentials. The first two are the default accounts adopted from a
       # pre-accounts install; every named account lives under accounts/.
       # Pointing CLAUDE_CONFIG_DIR at these also keeps ~/.claude.json inside a
@@ -105,6 +115,7 @@ services:
 
 volumes:
   db-data:
+  attachments:
   claude-home:
   codex-home:
   agent-accounts:
