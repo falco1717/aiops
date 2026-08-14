@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Literal
 
-from .agent_env import agent_environ
+from . import agent_env
 from .config import settings
 
 log = logging.getLogger("aiops.auth_flows")
@@ -97,13 +96,12 @@ class LoginManager:
             argv = self._argv(provider)
             flow = LoginFlow(provider=provider)
             try:
-                flow._proc = await asyncio.create_subprocess_exec(
-                    *argv,
+                flow._proc = await agent_env.spawn(
+                    argv,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
                     env=self._env(account_env),
-                    start_new_session=True,
                 )
             except FileNotFoundError:
                 flow.status = "failed"
@@ -166,8 +164,8 @@ class LoginManager:
             "logout",
         ]
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
+            proc = await agent_env.spawn(
+                argv,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -180,7 +178,7 @@ class LoginManager:
             # otherwise hold this request worker open indefinitely.
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         except asyncio.TimeoutError:
-            proc.kill()
+            agent_env.kill_agent(proc)
             return False, "The CLI did not respond to the logout request."
         self._flows.pop(key, None)
         return proc.returncode == 0, _clean(out.decode("utf-8", "replace"))[:500]
@@ -198,13 +196,10 @@ class LoginManager:
 
     @staticmethod
     def _env(account_env: dict[str, str] | None = None) -> dict[str, str]:
-        import os
-
         # Force the non-graphical path; there is no browser in the container.
         # account_env carries CLAUDE_CONFIG_DIR / CODEX_HOME so the credentials
         # land in the right account's directory.
         return {
-            **agent_environ(),
             **(account_env or {}),
             "NO_COLOR": "1",
             "FORCE_COLOR": "0",
@@ -286,15 +281,11 @@ class LoginManager:
         proc = flow._proc
         if proc is None or proc.returncode is not None:
             return
-        import os
         import signal
 
-        if hasattr(os, "killpg"):
-            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                return
-        with contextlib.suppress(ProcessLookupError, OSError):
-            proc.terminate()
+        # A sign-in runs as the agent user like every other CLI invocation, so
+        # it is stopped the same way the runner stops a turn.
+        agent_env.signal_agent(proc, signal.SIGTERM)
 
 
 def _clean(text: str) -> str:

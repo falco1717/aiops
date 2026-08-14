@@ -26,11 +26,12 @@ import contextlib
 import json
 import os
 import re
+import signal
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
-from ..agent_env import agent_environ
+from .. import agent_env
 from ..config import settings
 from .base import NormalizedEvent
 
@@ -194,13 +195,13 @@ class CodexAppServerAdapter:
             if proc.stdin and not proc.stdin.is_closing():
                 proc.stdin.close()
         if proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
+            # Signalled through the isolation helper: an agent process runs as
+            # another user, so proc.terminate() from here is EPERM.
+            agent_env.signal_agent(proc, signal.SIGTERM)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except asyncio.TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
+                agent_env.kill_agent(proc)
                 with contextlib.suppress(Exception):
                     await proc.wait()
 
@@ -665,14 +666,13 @@ class CodexAppServerAdapter:
 
     # -- transport ------------------------------------------------------
     async def _spawn(self) -> None:
-        env = agent_environ()
+        env: dict[str, str] = {}
         if self.codex_home:
             env["CODEX_HOME"] = self.codex_home
         env.update(self.extra_env)
         try:
-            self._proc = await asyncio.create_subprocess_exec(
-                self.codex_bin,
-                "app-server",
+            self._proc = await agent_env.spawn(
+                [self.codex_bin, "app-server"],
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

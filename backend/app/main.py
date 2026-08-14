@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
+from . import agent_env
 from .approvals import reap_pending_approvals
 from .config import settings
 from .db import SessionLocal, init_db
@@ -112,6 +113,11 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.workspace_root, exist_ok=True)
     os.makedirs(settings.accounts_root, exist_ok=True)
     os.makedirs(settings.attachments_root, exist_ok=True)
+    # Agents run as their own user, so everything they legitimately need has to
+    # be group-reachable. These are volumes and bind mounts written before that
+    # was true, so it is settled at every boot rather than at image build.
+    agent_env.share_startup_paths()
+    log.info("Agent processes run as: %s", agent_env.probe_identity())
     log.info("AIOps ready. Workspace root: %s", settings.workspace_root)
     try:
         yield

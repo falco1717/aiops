@@ -7,13 +7,20 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..agent_env import helper_script
 from ..config import settings
 from .base import NormalizedEvent, Provider, RunSpec
 
 #: Key this server is registered under in --mcp-config; the permission tool is
 #: then addressed as mcp__<name>__ask.
 MCP_SERVER_NAME = "aiops"
-BRIDGE_SCRIPT = Path(__file__).resolve().parent.parent / "bridge" / "mcp_approver.py"
+#: The bridge is spawned by the CLI, so it runs as the agent user, which cannot
+#: read this package. The image installs a copy where that user can; outside the
+#: image this is the package's own file.
+BRIDGE_SCRIPT = helper_script(
+    "mcp_approver.py",
+    str(Path(__file__).resolve().parent.parent / "bridge" / "mcp_approver.py"),
+)
 
 
 class ClaudeProvider(Provider):

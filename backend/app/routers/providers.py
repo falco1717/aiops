@@ -7,6 +7,7 @@ import shutil
 
 from fastapi import APIRouter, Depends
 
+from .. import agent_env
 from ..config import settings
 from ..models import User
 from ..providers import PROVIDERS
@@ -21,8 +22,8 @@ LABELS = {"claude": "Claude Code", "codex": "OpenAI Codex"}
 
 async def _run(argv: list[str], timeout: float = 15.0) -> tuple[int | None, str]:
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
+        proc = await agent_env.spawn(
+            argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.DEVNULL,
@@ -32,7 +33,7 @@ async def _run(argv: list[str], timeout: float = 15.0) -> tuple[int | None, str]
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
+        agent_env.kill_agent(proc)
         return None, "timed out"
     return proc.returncode, out.decode("utf-8", errors="replace").strip()
 

@@ -6,10 +6,12 @@ endpoint returning 500 while 254 other checks passed: nothing exercised
 things that actually matter — that a secret never comes back out, and that an
 ordinary edit cannot destroy a stored credential.
 """
+import glob
 import os
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.getcwd())
 
@@ -24,6 +26,11 @@ os.environ.setdefault("AIOPS_COOKIE_SECURE", "false")
 os.environ.setdefault("AIOPS_SCHEDULER_ENABLED", "false")
 # Without this the API refuses to store anything, which is itself tested below.
 os.environ.setdefault("AIOPS_SECRET_KEY", "test-credential-encryption-key")
+# A real run is driven below, so the workspace root has to be somewhere this
+# process may create directories.
+os.environ.setdefault(
+    "AIOPS_WORKSPACE_ROOT", tempfile.mkdtemp(prefix="aiops-target-test-ws-")
+)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -251,8 +258,14 @@ if ctx:
     key_file = os.path.join(ctx.root, "keys", "example-box")
     check("the key is written for ssh to use", os.path.exists(key_file))
     if os.path.exists(key_file):
-        mode = oct(os.stat(key_file).st_mode & 0o777)
-        check("and only this user can read it", mode == "0o600", mode)
+        mode = os.stat(key_file).st_mode & 0o777
+        # 0640, not 0600: the agent that runs `ssh` is a different user in the
+        # same group, and this is the only thing it is allowed to read out of
+        # the run directory. Nobody outside that group gets anything, and the
+        # group cannot write — see backend/tests/test_isolation.py.
+        check("only the app and the agent user can read it",
+              mode == ssh_targets.RUN_FILE_MODE == 0o640, oct(mode))
+        check("and nobody else can read it at all", not mode & 0o007, oct(mode))
     check("ssh is reachable without flags, via a shim on PATH",
           os.path.exists(os.path.join(ctx.root, "bin", "ssh"))
           and ctx.env["PATH"].startswith(os.path.join(ctx.root, "bin")))
@@ -263,7 +276,53 @@ if ctx:
     ctx.cleanup()
     check("nothing is left on disk once the run ends", not os.path.exists(root), root)
 
+# --- a decrypted key must not outlive the attempt that wrote it -------
+# prepare() writes a plaintext private key to a temporary directory, and for a
+# long time the `finally` that removed it did not open until ninety lines later.
+# Everything in between — a commit that can fail on a row deleted underneath it,
+# an await an operator can cancel, a provider that refuses to build a command —
+# left the key on disk with nothing left to remove it. The check is written as
+# "what is in /tmp afterwards", because that is what an attacker would look at.
 import shutil  # noqa: E402
+
+from app import runner as runner_module  # noqa: E402
+
+_pattern = os.path.join(tempfile.gettempdir(), "aiops-ssh-*")
+_before = set(glob.glob(_pattern))
+_real_publish = runner_module.hub.publish
+
+
+def _explode(session_id, payload):
+    """Fail exactly where the old cleanup handler had not been installed yet."""
+    if isinstance(payload, dict) and payload.get("type") == "run.started":
+        raise RuntimeError("forced failure after the run was committed")
+    return _real_publish(session_id, payload)
+
+
+runner_module.hub.publish = _explode
+row = {}
+try:
+    with TestClient(app) as c:
+        c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
+        ws = c.post("/api/workspaces", json={"name": "cred-lifetime", "path": "cred-lifetime"})
+        sess = c.post("/api/sessions", json={
+            "provider": "claude", "workspace_id": ws.json()["id"], "approval_mode": "bypass",
+        }).json()
+        started = c.post(f"/api/sessions/{sess['id']}/prompt", json={"prompt": "anything"}).json()
+        for _ in range(120):
+            time.sleep(0.25)
+            row = c.get(f"/api/runs/{started['id']}").json()
+            if row.get("status") not in ("queued", "running"):
+                break
+finally:
+    runner_module.hub.publish = _real_publish
+
+check("a run that dies after being committed still settles as failed",
+      row.get("status") == "failed", str(row.get("status")))
+_leaked = sorted(set(glob.glob(_pattern)) - _before)
+check("and leaves no decrypted private key behind in /tmp", not _leaked, ", ".join(_leaked))
+for _path in _leaked:
+    shutil.rmtree(_path, ignore_errors=True)
 
 shutil.rmtree(tmpdir, ignore_errors=True)
 

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import agent_env
 from ..config import settings
 from ..db import get_db
 from ..models import User, Workspace
@@ -49,6 +50,11 @@ async def create_workspace(
     if await db.scalar(select(Workspace).where(Workspace.name == payload.name)):
         raise HTTPException(status.HTTP_409_CONFLICT, "A workspace with that name already exists")
     os.makedirs(path, exist_ok=True)
+    # A workspace the app just created belongs to the app, and an agent runs as
+    # somebody else: without this it would be handed a directory it cannot write
+    # to. Recursive because registering a directory that already has a checkout
+    # in it is the common case, not the exception.
+    agent_env.grant_agent_access(path, writable=True)
     ws = Workspace(name=payload.name, path=path, description=payload.description)
     db.add(ws)
     await db.commit()
@@ -113,10 +119,17 @@ async def workspace_diff(
 
 
 async def _git(cwd: str, *args: str, limit: int = 100_000) -> str:
+    """Read git state out of a working tree an agent has been editing.
+
+    Run on the agent's side of the boundary like everything else, and for a
+    sharper reason than consistency: a repository's own config can name
+    programs for git to run (pagers, hooks, fsmonitor), and this repository is
+    one an agent can write to. Reading it as the application's user would hand
+    an agent code execution there for the price of an edit to .git/config.
+    """
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "git",
-            *args,
+        proc = await agent_env.spawn(
+            ["git", *args],
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -127,7 +140,7 @@ async def _git(cwd: str, *args: str, limit: int = 100_000) -> str:
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
     except asyncio.TimeoutError:
-        proc.kill()
+        agent_env.kill_agent(proc)
         return ""
     text = out.decode("utf-8", errors="replace").strip()
     return text if len(text) <= limit else text[:limit] + "\n… [truncated]"
