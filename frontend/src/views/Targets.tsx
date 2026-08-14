@@ -165,182 +165,181 @@ export default function Targets({ me }: { me: User }) {
       {error && <div className="error-banner">{error}</div>}
 
       <form className="card" onSubmit={submit}>
-          <div className="grid-2">
-            <label>
-              <span>Name</span>
-              <input
-                value={draft.name}
-                onChange={(e) => set("name", e.target.value)}
-                placeholder="Example Box"
-                required
-              />
-            </label>
-            <label>
-              <span>Hostname or IP</span>
-              <input
-                value={draft.hostname}
-                onChange={(e) => set("hostname", e.target.value)}
-                placeholder="203.0.113.20"
-                required
-              />
-            </label>
-            <label>
-              <span>Username</span>
-              <input
-                value={draft.username}
-                onChange={(e) => set("username", e.target.value)}
-                required
-              />
-            </label>
-            <label>
-              <span>Port</span>
-              <input
-                value={draft.port}
-                onChange={(e) => set("port", e.target.value)}
-                inputMode="numeric"
-              />
-            </label>
-            <label>
-              <span>Authentication</span>
-              <select value={draft.auth_type} onChange={(e) => set("auth_type", e.target.value)}>
-                <option value="key">SSH key</option>
-                <option value="password">Password</option>
-              </select>
-            </label>
-            <label>
-              <span>Host key</span>
-              <select
-                value={draft.host_key_policy}
-                onChange={(e) => set("host_key_policy", e.target.value)}
-              >
-                <option value="accept-new">Trust on first use, then pin</option>
-                <option value="strict">Strict — must already be known</option>
-              </select>
-            </label>
-          </div>
-
+        <div className="grid-2">
           <label>
-            <span>Description</span>
-            <input value={draft.description} onChange={(e) => set("description", e.target.value)} />
+            <span>Name</span>
+            <input
+              value={draft.name}
+              onChange={(e) => set("name", e.target.value)}
+              placeholder="Example Box"
+              required
+            />
           </label>
+          <label>
+            <span>Hostname or IP</span>
+            <input
+              value={draft.hostname}
+              onChange={(e) => set("hostname", e.target.value)}
+              placeholder="203.0.113.20"
+              required
+            />
+          </label>
+          <label>
+            <span>Username</span>
+            <input
+              value={draft.username}
+              onChange={(e) => set("username", e.target.value)}
+              required
+            />
+          </label>
+          <label>
+            <span>Port</span>
+            <input
+              value={draft.port}
+              onChange={(e) => set("port", e.target.value)}
+              inputMode="numeric"
+            />
+          </label>
+          <label>
+            <span>Authentication</span>
+            <select value={draft.auth_type} onChange={(e) => set("auth_type", e.target.value)}>
+              <option value="key">SSH key</option>
+              <option value="password">Password</option>
+            </select>
+          </label>
+          <label>
+            <span>Host key</span>
+            <select
+              value={draft.host_key_policy}
+              onChange={(e) => set("host_key_policy", e.target.value)}
+            >
+              <option value="accept-new">Trust on first use, then pin</option>
+              <option value="strict">Strict — must already be known</option>
+            </select>
+          </label>
+        </div>
 
-          {draft.auth_type === "key" ? (
-            <>
-              <label>
-                <span>
-                  Private key{" "}
-                  {editingId && <em className="hint">— leave blank to keep the stored one</em>}
-                </span>
-                <div className="keydrop">
-                  <input
-                    type="file"
-                    id="keyfile"
-                    className="keyfile-input"
-                    onChange={(e) => readKeyFile(e.target.files?.[0])}
-                  />
-                  <label htmlFor="keyfile" className="keyfile-label">
-                    Choose key file…
-                  </label>
-                  <span className="hint">
-                    {keyFile ? `Loaded ${keyFile}` : "Usually ~/.ssh/id_ed25519 or id_rsa"}
-                  </span>
-                </div>
-                {keyError && <div className="error-banner">{keyError}</div>}
-                <details className="paste-key">
-                  <summary>or paste it instead</summary>
-                  <textarea
-                    rows={5}
-                    className="mono"
-                    value={draft.private_key}
-                    onChange={(e) => {
-                      set("private_key", e.target.value);
-                      setKeyFile(null);
-                      setKeyError(validateKey(e.target.value));
-                    }}
-                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                    autoComplete="off"
-                    spellCheck={false}
-                  />
-                </details>
-              </label>
-              <label>
-                <span>Key passphrase (if the key has one)</span>
-                <input
-                  type="password"
-                  value={draft.passphrase}
-                  onChange={(e) => set("passphrase", e.target.value)}
-                  autoComplete="new-password"
-                />
-              </label>
-            </>
-          ) : (
+        <label>
+          <span>Description</span>
+          <input value={draft.description} onChange={(e) => set("description", e.target.value)} />
+        </label>
+
+        {draft.auth_type === "key" ? (
+          <>
             <label>
               <span>
-                Password{" "}
+                Private key{" "}
                 {editingId && <em className="hint">— leave blank to keep the stored one</em>}
               </span>
+              <div className="keydrop">
+                <input
+                  type="file"
+                  id="keyfile"
+                  className="keyfile-input"
+                  onChange={(e) => readKeyFile(e.target.files?.[0])}
+                />
+                <label htmlFor="keyfile" className="keyfile-label">
+                  Choose key file…
+                </label>
+                <span className="hint">
+                  {keyFile ? `Loaded ${keyFile}` : "Usually ~/.ssh/id_ed25519 or id_rsa"}
+                </span>
+              </div>
+              {keyError && <div className="error-banner">{keyError}</div>}
+              <details className="paste-key">
+                <summary>or paste it instead</summary>
+                <textarea
+                  rows={5}
+                  className="mono"
+                  value={draft.private_key}
+                  onChange={(e) => {
+                    set("private_key", e.target.value);
+                    setKeyFile(null);
+                    setKeyError(validateKey(e.target.value));
+                  }}
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </details>
+            </label>
+            <label>
+              <span>Key passphrase (if the key has one)</span>
               <input
                 type="password"
-                value={draft.password}
-                onChange={(e) => set("password", e.target.value)}
+                value={draft.passphrase}
+                onChange={(e) => set("passphrase", e.target.value)}
                 autoComplete="new-password"
               />
             </label>
-          )}
-
+          </>
+        ) : (
           <label>
-            <span>Known host key (optional, required for strict)</span>
-            <textarea
-              rows={2}
-              className="mono"
-              value={draft.known_host_key}
-              onChange={(e) => set("known_host_key", e.target.value)}
-              placeholder="203.0.113.20 ssh-ed25519 AAAA..."
-              spellCheck={false}
+            <span>
+              Password{" "}
+              {editingId && <em className="hint">— leave blank to keep the stored one</em>}
+            </span>
+            <input
+              type="password"
+              value={draft.password}
+              onChange={(e) => set("password", e.target.value)}
+              autoComplete="new-password"
             />
           </label>
+        )}
 
-          <fieldset className="sharing">
-            <legend>Who else can reach it</legend>
-            <p className="hint">
-              This system is yours. Nobody else sees it — administrators included — until
-              you name them here. <strong>Use</strong> lets their agents connect through it;
-              <strong> manage</strong> also lets them edit it, replace the credential and
-              share it onward.
-            </p>
-            {users.filter((u) => u.id !== me.id).length === 0 ? (
-              <p className="hint">There is nobody else to share with yet.</p>
-            ) : (
-              users
-                .filter((u) => u.id !== me.id)
-                .map((u) => (
-                  <label key={u.id} className="row share-row">
-                    <span style={{ margin: 0, flex: 1 }}>{u.username}</span>
-                    <select
-                      value={levelOf(u.id)}
-                      onChange={(e) => setGrant(u.id, e.target.value as "" | "use" | "manage")}
-                    >
-                      <option value="">No access</option>
-                      <option value="use">Can use</option>
-                      <option value="manage">Can manage</option>
-                    </select>
-                  </label>
-                ))
-            )}
-          </fieldset>
+        <label>
+          <span>Known host key (optional, required for strict)</span>
+          <textarea
+            rows={2}
+            className="mono"
+            value={draft.known_host_key}
+            onChange={(e) => set("known_host_key", e.target.value)}
+            placeholder="203.0.113.20 ssh-ed25519 AAAA..."
+            spellCheck={false}
+          />
+        </label>
 
-          <div className="row">
-            <button className="primary" type="submit" disabled={busy || !draft.name.trim()}>
-              {editingId ? "Save changes" : "Add system"}
+        <fieldset className="sharing">
+          <legend>Who else can reach it</legend>
+          <p className="hint">
+            This system is yours. Nobody else sees it — administrators included — until
+            you name them here. <strong>Use</strong> lets their agents connect through it;
+            <strong> manage</strong> also lets them edit it, replace the credential and
+            share it onward.
+          </p>
+          {users.filter((u) => u.id !== me.id).length === 0 ? (
+            <p className="hint">There is nobody else to share with yet.</p>
+          ) : (
+            users
+              .filter((u) => u.id !== me.id)
+              .map((u) => (
+                <label key={u.id} className="row share-row">
+                  <span style={{ margin: 0, flex: 1 }}>{u.username}</span>
+                  <select
+                    value={levelOf(u.id)}
+                    onChange={(e) => setGrant(u.id, e.target.value as "" | "use" | "manage")}
+                  >
+                    <option value="">No access</option>
+                    <option value="use">Can use</option>
+                    <option value="manage">Can manage</option>
+                  </select>
+                </label>
+              ))
+          )}
+        </fieldset>
+
+        <div className="row">
+          <button className="primary" type="submit" disabled={busy || !draft.name.trim()}>
+            {editingId ? "Save changes" : "Add system"}
+          </button>
+          {editingId && (
+            <button type="button" onClick={reset}>
+              Cancel
             </button>
-            {editingId && (
-              <button type="button" onClick={reset}>
-                Cancel
-              </button>
-            )}
-          </div>
-        </form>
-      )}
+          )}
+        </div>
+      </form>
 
       {items.length === 0 ? (
         <div className="empty">No systems yet. Add one above.</div>
