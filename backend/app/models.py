@@ -42,6 +42,37 @@ class User(Base):
     )
 
 
+class Team(Base):
+    """A group of people who work in the same place.
+
+    The opposite of a stored system, deliberately: a credential is private to
+    whoever put it in, while a session is somewhere work happens, so it can
+    belong to a team and be everybody's. Administrators decide who is in one,
+    because membership is what grants that visibility.
+    """
+
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    members: Mapped[list[TeamMember]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    __table_args__ = (UniqueConstraint("team_id", "user_id", name="uq_team_user"),)
+
+
 class Workspace(Base):
     """A directory on the server that agents are allowed to run inside."""
 
@@ -174,6 +205,11 @@ class Session(Base):
     owner_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # The team this conversation belongs to, if any: every member of it sees
+    # this session, and keeps seeing it as people join and leave.
+    team_id: Mapped[int | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     # Slash commands the CLI reported for this session at startup — the
     # authoritative list, better than anything we could hardcode.
@@ -188,6 +224,31 @@ class Session(Base):
     account: Mapped[ProviderAccount | None] = relationship(
         lazy="joined", foreign_keys=[account_id]
     )
+    shares: Mapped[list[SessionShare]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    @property
+    def shared_user_ids(self) -> list[int]:
+        return [share.user_id for share in self.shares]
+
+
+class SessionShare(Base):
+    """One session handed to one named user.
+
+    Beside the team route rather than instead of it: a conversation often needs
+    one more pair of eyes without moving the whole thing into a team space.
+    """
+
+    __tablename__ = "session_shares"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+
+    __table_args__ = (UniqueConstraint("session_id", "user_id", name="uq_session_share_user"),)
 
 
 class Attachment(Base):

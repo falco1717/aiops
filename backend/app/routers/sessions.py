@@ -10,9 +10,10 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import attachments as store
+from ..access import can_see_session, sessions_visible_to
 from ..config import settings
 from ..db import get_db
-from ..models import Attachment, Event, Run, Session, User
+from ..models import Attachment, Event, Run, Session, SessionShare, Team, User
 from ..schemas import (
     AttachmentOut,
     CapabilityOut,
@@ -45,23 +46,102 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 _DOWNLOAD_HEADERS = {"X-Content-Type-Options": "nosniff"}
 
 
-async def _get(db: AsyncSession, session_id: str) -> Session:
+async def _get(db: AsyncSession, session_id: str, user: User) -> Session:
+    """The session, if this user may see it at all.
+
+    A session they may not see is reported missing rather than forbidden: a 403
+    would confirm that this id names a real conversation and invite guessing at
+    whose it is.
+    """
     sess = await db.get(Session, session_id)
-    if sess is None:
+    if sess is None or not await can_see_session(db, sess, user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     return sess
+
+
+async def _owned(db: AsyncSession, session_id: str, user: User) -> Session:
+    """The session, if this user is the one who may give it away or destroy it."""
+    sess = await _get(db, session_id, user)
+    if not user.is_admin and sess.owner_id != user.id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "This session was shared with you. Only its owner can share it further, "
+            "hand it on, or delete it.",
+        )
+    return sess
+
+
+async def _resolve_team(db: AsyncSession, team_id: int | None, user: User) -> None:
+    """Check a session may be put in this team before it is.
+
+    Membership is the gate: dropping a session into a team you are not in would
+    hand it to a group of people you cannot even enumerate.
+    """
+    if team_id is None:
+        return
+    team = await db.get(Team, team_id)
+    if team is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Team not found")
+    if not user.is_admin and not any(m.user_id == user.id for m in team.members):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"You are not a member of {team.name!r}"
+        )
+
+
+#: Patch fields that change who can reach a session rather than what it does.
+SHARING_FIELDS = ("team_id", "shared_user_ids", "owner_id")
+
+
+async def _apply_sharing(
+    db: AsyncSession, sess: Session, sharing: dict, user: User
+) -> None:
+    if "team_id" in sharing:
+        await _resolve_team(db, sharing["team_id"], user)
+        sess.team_id = sharing["team_id"]
+
+    if "owner_id" in sharing and sharing["owner_id"] != sess.owner_id:
+        heir = await db.get(User, sharing["owner_id"]) if sharing["owner_id"] else None
+        if heir is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "That user does not exist")
+        sess.owner_id = heir.id
+        # The new owner must not also hold a share of their own session: it
+        # would sit in the sharing list with nothing to switch it off.
+        for share in list(sess.shares):
+            if share.user_id == heir.id:
+                sess.shares.remove(share)
+                await db.delete(share)
+
+    if sharing.get("shared_user_ids") is not None:
+        await _apply_shares(db, sess, sharing["shared_user_ids"])
+
+
+async def _apply_shares(db: AsyncSession, sess: Session, user_ids: list[int]) -> None:
+    for existing in list(sess.shares):
+        await db.delete(existing)
+    sess.shares = []
+    await db.flush()
+    for user_id in dict.fromkeys(user_ids):
+        # Sharing with the owner is a second, weaker claim on something already
+        # theirs, and the UI has no way to show or withdraw it.
+        if user_id == sess.owner_id:
+            continue
+        if await db.get(User, user_id) is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, f"There is no user with id {user_id}"
+            )
+        db.add(SessionShare(session_id=sess.id, user_id=user_id))
 
 
 @router.get("", response_model=list[SessionOut])
 async def list_sessions(
     archived: bool = False,
     limit: int = Query(100, le=500),
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
     rows = await db.scalars(
         select(Session)
-        .where(Session.archived == archived)
+        .where(Session.archived == archived, sessions_visible_to(user))
         .order_by(desc(Session.updated_at))
         .limit(limit)
     )
@@ -74,6 +154,7 @@ async def create_session(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _resolve_team(db, payload.team_id, user)
     try:
         sess = await build_session(
             db,
@@ -84,6 +165,7 @@ async def create_session(
             workspace_id=payload.workspace_id,
             account_id=payload.account_id,
             approval_mode=payload.approval_mode,
+            team_id=payload.team_id,
             user=user,
         )
         await db.commit()
@@ -99,9 +181,9 @@ async def create_session(
 
 @router.get("/{session_id}", response_model=SessionOut)
 async def get_session(
-    session_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    session_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
-    return await _get(db, session_id)
+    return await _get(db, session_id, user)
 
 
 @router.patch("/{session_id}", response_model=SessionOut)
@@ -111,8 +193,16 @@ async def patch_session(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    sess = await _get(db, session_id)
+    sess = await _get(db, session_id, user)
     data = payload.model_dump(exclude_unset=True)
+
+    # Anyone who can see a session can work in it, but only its owner decides
+    # who else gets in and who it belongs to next.
+    sharing = {k: data.pop(k) for k in SHARING_FIELDS if k in data}
+    if sharing:
+        await _owned(db, session_id, user)
+        await _apply_sharing(db, sess, sharing, user)
+
     # Re-point fields go through the same validation as creation. Without this
     # a user could create a session on an account they may use and then patch
     # it onto a restricted one, and a bad id would surface as a 500 from the
@@ -145,9 +235,9 @@ async def patch_session(
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(
-    session_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    session_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
-    sess = await _get(db, session_id)
+    sess = await _owned(db, session_id, user)
     # Stop the agent first. Deleting the row out from under a running process
     # leaves it writing events against a session that no longer exists, which
     # fails on the foreign key and orphans the subprocess.
@@ -169,12 +259,12 @@ async def delete_session(
 async def transcript(
     session_id: str,
     since_event_id: int = 0,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Full conversation history. `since_event_id` lets a reconnecting client
     fetch only what it missed while the websocket was down."""
-    sess = await _get(db, session_id)
+    sess = await _get(db, session_id, user)
     runs = await db.scalars(
         select(Run).where(Run.session_id == session_id).order_by(Run.id)
     )
@@ -202,10 +292,10 @@ async def transcript(
 async def send_prompt(
     session_id: str,
     payload: PromptIn,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    sess = await _get(db, session_id)
+    sess = await _get(db, session_id, user)
     busy = await db.scalar(
         select(Run.id)
         .where(Run.session_id == session_id, Run.status.in_(("queued", "running")))
@@ -224,9 +314,9 @@ async def send_prompt(
 
 @router.get("/{session_id}/runs", response_model=list[RunOut])
 async def list_runs(
-    session_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    session_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
-    await _get(db, session_id)
+    await _get(db, session_id, user)
     rows = await db.scalars(select(Run).where(Run.session_id == session_id).order_by(Run.id))
     return list(rows)
 
@@ -235,10 +325,10 @@ async def list_runs(
 async def list_events(
     session_id: str,
     run_id: int | None = None,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await _get(db, session_id)
+    await _get(db, session_id, user)
     stmt = select(Event).where(Event.session_id == session_id)
     if run_id is not None:
         stmt = stmt.where(Event.run_id == run_id)
@@ -248,14 +338,14 @@ async def list_events(
 
 @router.get("/{session_id}/capabilities", response_model=list[CapabilityOut])
 async def capabilities(
-    session_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    session_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
     """Skills and slash commands this session can use.
 
     These already work by typing `/name` into the prompt; this endpoint just
     lets the composer show what exists rather than relying on memory.
     """
-    sess = await _get(db, session_id)
+    sess = await _get(db, session_id, user)
     workspace_path = sess.workspace.path if sess.workspace else None
     return [
         CapabilityOut(**vars(cap))
@@ -286,7 +376,7 @@ async def upload_attachment(
     generated id is the directory, so two uploads of screenshot.png cannot
     collide, and a name of `../../etc/passwd` is just a name.
     """
-    await _get(db, session_id)
+    await _get(db, session_id, user)
     filename = store.safe_filename(file.filename)
     attachment_id = str(uuid.uuid4())
     try:
@@ -318,10 +408,10 @@ async def upload_attachment(
 @router.get("/{session_id}/attachments", response_model=list[AttachmentOut])
 async def list_attachments(
     session_id: str,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await _get(db, session_id)
+    await _get(db, session_id, user)
     rows = await db.scalars(
         select(Attachment)
         .where(Attachment.session_id == session_id)
@@ -334,10 +424,10 @@ async def list_attachments(
 async def download_attachment(
     session_id: str,
     attachment_id: str,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    row = await _attachment(db, session_id, attachment_id)
+    row = await _attachment(db, session_id, attachment_id, user)
     path = store.stored_path(session_id, row.id, row.filename)
     if not path.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "The stored file is missing")
@@ -353,11 +443,11 @@ async def download_attachment(
 async def delete_attachment(
     session_id: str,
     attachment_id: str,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Drop a file from the composer before it is sent."""
-    row = await _attachment(db, session_id, attachment_id)
+    row = await _attachment(db, session_id, attachment_id, user)
     if row.run_id is not None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -369,7 +459,10 @@ async def delete_attachment(
     await db.commit()
 
 
-async def _attachment(db: AsyncSession, session_id: str, attachment_id: str) -> Attachment:
+async def _attachment(
+    db: AsyncSession, session_id: str, attachment_id: str, user: User
+) -> Attachment:
+    await _get(db, session_id, user)
     row = await db.get(Attachment, attachment_id)
     # Checking the session too keeps one conversation's ids from addressing
     # another's, even though they are unguessable.
@@ -379,14 +472,14 @@ async def _attachment(db: AsyncSession, session_id: str, attachment_id: str) -> 
 
 
 # --- files the agent produced ---------------------------------------------
-async def _files_root(db: AsyncSession, session_id: str) -> Path:
+async def _files_root(db: AsyncSession, session_id: str, user: User) -> Path:
     """The one directory this session's file endpoints may read.
 
     The session's workspace, which is the directory the agent actually ran in;
     sessions without one fall back to the workspace root, exactly as the runner
     does when it picks a cwd.
     """
-    sess = await _get(db, session_id)
+    sess = await _get(db, session_id, user)
     raw = sess.workspace.path if sess.workspace else settings.workspace_root
     return Path(raw).resolve()
 
@@ -394,10 +487,10 @@ async def _files_root(db: AsyncSession, session_id: str) -> Path:
 @router.get("/{session_id}/files", response_model=SessionFilesOut)
 async def list_session_files(
     session_id: str,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    root = await _files_root(db, session_id)
+    root = await _files_root(db, session_id, user)
     if not root.is_dir():
         return SessionFilesOut(
             root=str(root),
@@ -427,10 +520,10 @@ async def list_session_files(
 async def download_session_file(
     session_id: str,
     path: str = Query(..., description="Path relative to the session's workspace"),
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    root = await _files_root(db, session_id)
+    root = await _files_root(db, session_id, user)
     target = store.resolve_inside(root, path)
     if not target.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
@@ -447,9 +540,10 @@ async def download_session_file(
 async def event_raw(
     session_id: str,
     event_id: int,
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await _get(db, session_id, user)
     event = await db.get(Event, event_id)
     if event is None or event.session_id != session_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")

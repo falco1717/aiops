@@ -72,6 +72,28 @@ without a session.
 Set `AIOPS_ATTACHMENTS_ROOT` to a throwaway directory before running it; the
 suite does that for itself, but nothing else should be pointed at the real one.
 
+## `test_teams.py`
+
+Session visibility, which used to be "everyone signed in sees everything". The
+suite is written as the inverse of that: for each endpoint that reads or drives
+a conversation — fetch, transcript, runs, events, raw events, capabilities,
+files, attachments in both directions, prompt, patch, delete, per-session usage,
+and the run endpoints behind them — a user who was not let in must get a **404**,
+never a 403.
+
+The checks with teeth are the approvals: answering one runs the command the agent
+stopped on, so the suite asserts that an outsider's approval list is empty *and*
+that deciding one returns 404. It then walks the three ways in — a direct share,
+team membership, and being an administrator — and asserts each grants the list,
+the transcript and the approval, and that withdrawing the share or the membership
+takes all of it away again. Ownership transfer is checked from both ends: the new
+owner gains it, the old owner loses it.
+
+Last, it deletes a user who is in a team and holds a share, and asserts both rows
+are gone. SQLite does not enforce `ON DELETE` and reuses integer ids, so a
+leftover row there is a grant waiting to be inherited by the next account
+created.
+
 ## `test_users.py`
 
 Accounts, roles, and the schema migration. It builds a **pre-upgrade database**

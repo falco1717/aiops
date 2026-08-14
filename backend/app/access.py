@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from .models import Target, User
+from sqlalchemy import ColumnElement, or_, select, true
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .models import Session, SessionShare, Target, TeamMember, User
 
 #: use  — agents in this user's sessions may connect through the system.
 #: manage — additionally edit it, replace the credential, and grant others.
@@ -27,3 +30,39 @@ def level_for(target: Target, user: User | None) -> str | None:
         if grant.user_id == user.id:
             return grant.level if grant.level in LEVELS else "use"
     return None
+
+
+def sessions_visible_to(user: User) -> ColumnElement[bool]:
+    """The clause that narrows a session query to what this user may see.
+
+    Its owner, anyone it was shared with by name, and everyone in the team that
+    owns it. Administrators are included here — the reverse of the rule above,
+    and for an operational reason rather than a symmetric one: a session left
+    behind by somebody who has gone still has a stopped agent in it, and only an
+    administrator can be relied on to still be here to unstick it.
+    """
+    if user.is_admin:
+        return true()
+    return or_(
+        Session.owner_id == user.id,
+        Session.id.in_(select(SessionShare.session_id).where(SessionShare.user_id == user.id)),
+        Session.team_id.in_(select(TeamMember.team_id).where(TeamMember.user_id == user.id)),
+    )
+
+
+async def can_see_session(db: AsyncSession, session: Session, user: User) -> bool:
+    """The same rule for one already-loaded session."""
+    if user.is_admin:
+        return True
+    if session.owner_id is not None and session.owner_id == user.id:
+        return True
+    if any(share.user_id == user.id for share in session.shares):
+        return True
+    if session.team_id is None:
+        return False
+    membership = await db.scalar(
+        select(TeamMember.id).where(
+            TeamMember.team_id == session.team_id, TeamMember.user_id == user.id
+        )
+    )
+    return membership is not None

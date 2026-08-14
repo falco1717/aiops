@@ -29,6 +29,7 @@ from .routers import (
     schedules,
     sessions,
     targets,
+    teams,
     usage,
     users,
     workspaces,
@@ -140,6 +141,7 @@ for module in (
     schedules,
     approvals,
     targets,
+    teams,
     ws,
 ):
     app.include_router(module.router)

@@ -7,10 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..access import can_see_session, sessions_visible_to
 from ..approvals import broker, run_tokens
 from ..config import settings
 from ..db import get_db
-from ..models import Approval, User
+from ..models import Approval, Session, User
 from ..schemas import ApprovalDecision, ApprovalOut
 from ..security import current_user
 
@@ -29,10 +30,18 @@ async def list_approvals(
     run_id: int | None = None,
     status_filter: str | None = Query(None, alias="status"),
     limit: int = Query(100, le=500),
-    _: User = Depends(current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(Approval)
+    """Only approvals belonging to sessions this user can see.
+
+    Answering one runs a command on this server on the agent's behalf, so the
+    list has to follow session visibility exactly: anything shown here is an
+    action the viewer is entitled to authorise.
+    """
+    stmt = select(Approval).where(
+        Approval.session_id.in_(select(Session.id).where(sessions_visible_to(user)))
+    )
     if session_id:
         stmt = stmt.where(Approval.session_id == session_id)
     if run_id is not None:
@@ -52,6 +61,11 @@ async def decide(
 ):
     row = await db.get(Approval, approval_id)
     if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Approval not found")
+    # Checked before the status below, so an approval on a session this user
+    # cannot see gives nothing away — not even that it has already been answered.
+    sess = await db.get(Session, row.session_id)
+    if sess is None or not await can_see_session(db, sess, user):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Approval not found")
     if row.status != "pending":
         # Two people can be watching the same run. Losing the race is normal,

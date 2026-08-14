@@ -25,6 +25,7 @@ COLUMNS: dict[str, dict[str, str]] = {
         "available_commands": "JSON",
         "approval_mode": "VARCHAR(32)",
         "owner_id": "INTEGER",
+        "team_id": "INTEGER",
     },
     "targets": {
         "owner_id": "INTEGER",

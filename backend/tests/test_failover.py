@@ -181,6 +181,11 @@ with TestClient(app) as c:
     check("refusal names the account", "access" in r.text.lower(), r.text[:200])
 
     # --- usage reporting -----------------------------------------------
+    # Back as the admin: the session below belongs to them, and per-session
+    # usage now follows session visibility like everything else that reads one.
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
+
     u = c.get("/api/usage").json()
     labels = [w["label"] for w in u["windows"]]
     check("usage windows reported", "Last 5 hours" in labels and "Last 7 days" in labels, str(labels))

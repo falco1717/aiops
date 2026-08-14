@@ -53,6 +53,29 @@ class UserPasswordReset(BaseModel):
     must_change_password: bool = True
 
 
+# --- teams -------------------------------------------------------------
+class TeamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = None
+    member_ids: list[int] = []
+
+
+class TeamPatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    member_ids: list[int] | None = None
+
+
+class TeamOut(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    member_ids: list[int]
+    #: How many sessions this team owns, so deleting one can say what it costs.
+    session_count: int
+    created_at: datetime
+
+
 # --- workspaces --------------------------------------------------------
 class WorkspaceIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
@@ -111,6 +134,7 @@ class SessionIn(BaseModel):
     account_id: int | None = None
     preset_id: int | None = None
     workspace_id: int | None = None
+    team_id: int | None = None
     approval_mode: str | None = None  # ask | auto | bypass
     prompt: str | None = None  # optional first turn
     attachment_ids: list[str] = []
@@ -124,6 +148,11 @@ class SessionPatch(BaseModel):
     preset_id: int | None = None
     workspace_id: int | None = None
     approval_mode: str | None = None
+    # Sharing, and handing the session on. Unlike the fields above these are the
+    # owner's to change, so they are separated out by the router.
+    team_id: int | None = None
+    shared_user_ids: list[int] | None = None
+    owner_id: int | None = None
 
 
 class SessionOut(ORM):
@@ -138,6 +167,9 @@ class SessionOut(ORM):
     provider_session_id: str | None
     status: str
     archived: bool
+    owner_id: int | None
+    team_id: int | None
+    shared_user_ids: list[int]
     created_at: datetime
     updated_at: datetime
 

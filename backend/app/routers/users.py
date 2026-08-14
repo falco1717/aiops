@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..models import Target, User
+from ..models import Session, SessionShare, Target, TeamMember, User
 from ..schemas import UserCreate, UserOut, UserPasswordReset, UserPatch, UserSummary
 from ..security import current_admin, current_user, hash_password
 
@@ -116,8 +116,25 @@ async def delete_user(
     if user.is_admin and await _admin_count(db) <= 1:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot delete the only admin")
     await _hand_on_systems(db, user)
+    await _release_sessions(db, user)
     await db.delete(user)
     await db.commit()
+
+
+async def _release_sessions(db: AsyncSession, leaving: User) -> None:
+    """Take a departing user out of everything that grants session access.
+
+    The foreign keys say as much, but SQLite does not enforce ON DELETE and
+    reuses integer ids, so a leftover share is a grant lying in wait for whoever
+    is created next. Their own sessions are left ownerless rather than handed
+    on: administrators can still reach them, which is exactly why they keep
+    visibility of every session.
+    """
+    await db.execute(delete(SessionShare).where(SessionShare.user_id == leaving.id))
+    await db.execute(delete(TeamMember).where(TeamMember.user_id == leaving.id))
+    await db.execute(
+        update(Session).where(Session.owner_id == leaving.id).values(owner_id=None)
+    )
 
 
 async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:

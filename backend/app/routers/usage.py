@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..access import can_see_session
 from ..db import get_db
-from ..models import ProviderAccount, Run, User
+from ..models import ProviderAccount, Run, Session, User
 from ..schemas import SessionContextOut, UsageOut, UsageWindow
 from ..security import current_user
 
@@ -104,13 +105,16 @@ async def usage(_: User = Depends(current_user), db: AsyncSession = Depends(get_
 
 @router.get("/session/{session_id}", response_model=SessionContextOut)
 async def session_usage(
-    session_id: str, _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    session_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
     """Context pressure for one conversation.
 
     `last_context_tokens` is what the model had to read on the most recent turn,
     which is the number that grows as a conversation gets long.
     """
+    sess = await db.get(Session, session_id)
+    if sess is None or not await can_see_session(db, sess, user):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     row = (
         await db.execute(
             select(

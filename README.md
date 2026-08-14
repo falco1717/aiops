@@ -192,7 +192,9 @@ container's address changes on every recreate.
 4. **Schedules** — cron entries that hand a prompt to an agent. Times are
    evaluated in the schedule's own timezone, so a 09:00 job stays at 09:00 across
    DST. "Run now" fires one immediately without disturbing the cron timing.
-5. **Account** — change your own password, and (as an admin) add, promote,
+5. **Teams** — groups whose members all see the same sessions. Admins create
+   them and decide who is in one.
+6. **Account** — change your own password, and (as an admin) add, promote,
    reset, and remove users.
 
 ### Provider accounts, failover and access
@@ -279,6 +281,36 @@ remove the last remaining admin.
 
 Remember that an AIOps account is effectively shell access to the server through
 an agent. Add accounts sparingly.
+
+### Teams and who can see a session
+
+A session belongs to whoever created it. It is visible to four kinds of people
+and nobody else: its owner, anyone it was shared with by name, every member of
+the team it belongs to, and administrators. Anything you cannot see answers
+**404** — not 403, which would confirm the conversation exists.
+
+Teams are the unit for a shared space: an admin creates one and puts people in
+it, and every member sees every session that belongs to it, from the transcript
+and the files down to the live event feed. Direct sharing exists alongside that
+for the one-off case. The owner can also hand a session over outright, which is
+how work moves on when somebody changes team.
+
+**Approvals follow visibility.** If you can see a session you can answer the
+Accept/Deny prompts a paused agent is waiting on — which is to say, you can let
+it run the command it stopped on. That is the reason the sharing panel names
+everyone who can see the session rather than hiding the list.
+
+Two deliberate asymmetries:
+
+- **Administrators keep visibility of every session**, unlike stored systems,
+  where an admin gets no implicit access to somebody else's credential. The
+  reason is operational rather than principled: a session owned by someone who
+  has left can still hold a stopped agent, and somebody has to be able to
+  unstick it.
+- **Deleting is the owner's call.** Everyone who can see a session can work in
+  it — send turns, rename it, change its approval mode — but a session shared
+  into a team is other people's work too, so only its owner (or an admin) can
+  delete it or change who else is in.
 
 ### Permission modes
 

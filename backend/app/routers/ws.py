@@ -6,9 +6,11 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from ..access import can_see_session
 from ..config import settings
 from ..db import SessionLocal
 from ..events import hub
+from ..models import Session
 from ..security import user_from_token
 
 log = logging.getLogger("aiops.ws")
@@ -27,9 +29,21 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str | None = None
     token = websocket.cookies.get(settings.cookie_name)
     async with SessionLocal() as db:
         user = await user_from_token(token, db)
-    if user is None:
-        await websocket.close(code=4401, reason="Not authenticated")
-        return
+        if user is None:
+            await websocket.close(code=4401, reason="Not authenticated")
+            return
+        # This socket streams the agent's output as it is written, so it has to
+        # obey the same rule the transcript does — otherwise a session is private
+        # only until somebody watches it live. The unscoped feed carries every
+        # session at once, which nobody but an administrator can be entitled to.
+        if session_id is None:
+            allowed = user.is_admin
+        else:
+            sess = await db.get(Session, session_id)
+            allowed = sess is not None and await can_see_session(db, sess, user)
+        if not allowed:
+            await websocket.close(code=4404, reason="Session not found")
+            return
 
     await websocket.accept()
     topic = session_id or "*"
