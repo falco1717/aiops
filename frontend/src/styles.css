@@ -435,3 +435,17 @@ button.big { font-size: 15px; padding: 11px 18px; }
   .approval-actions button { flex: 1; }
   .approval-hint { width: 100%; }
 }
+
+/* --- SSH key upload ---------------------------------------------------
+   Uploading the file is the primary path; pasting is folded away behind a
+   disclosure because it is the fallback, not the norm. */
+.keydrop { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.keyfile-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.keyfile-label {
+  display: inline-block; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  background: var(--panel); border: 1px dashed var(--border); color: var(--text);
+  font-size: 13px; width: auto; margin: 0;
+}
+.keyfile-label:hover { border-color: var(--accent); color: var(--accent); }
+.paste-key summary { cursor: pointer; color: var(--text-dim); font-size: 12px; margin-bottom: 6px; }
+.paste-key textarea { margin-top: 6px; }

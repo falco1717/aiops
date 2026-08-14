@@ -33,6 +33,29 @@ export default function Targets({ me }: { me: User }) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [keyFile, setKeyFile] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
+
+  /** Load a key file straight from disk — nobody should have to cat and paste. */
+  const readKeyFile = async (file: File | undefined) => {
+    if (!file) return;
+    setKeyError(null);
+    if (file.size > 64 * 1024) {
+      setKeyError("That file is far too large to be an SSH key. Did you pick the right one?");
+      return;
+    }
+    const text = await file.text();
+    const problem = validateKey(text);
+    setKeyError(problem);
+    if (problem?.startsWith("That looks like a public key")) {
+      // A public key is useless here and the mistake is easy to make, so do not
+      // load it — otherwise it saves cleanly and only fails at connect time.
+      setKeyFile(null);
+      return;
+    }
+    set("private_key", text);
+    setKeyFile(file.name);
+  };
 
   const load = useCallback(async () => {
     try {
@@ -54,10 +77,14 @@ export default function Targets({ me }: { me: User }) {
   const reset = () => {
     setDraft(EMPTY);
     setEditingId(null);
+    setKeyFile(null);
+    setKeyError(null);
   };
 
   const edit = (t: Target) => {
     setEditingId(t.id);
+    setKeyFile(null);
+    setKeyError(null);
     setDraft({
       ...EMPTY,
       name: t.name,
@@ -204,15 +231,37 @@ export default function Targets({ me }: { me: User }) {
                   Private key{" "}
                   {editingId && <em className="hint">— leave blank to keep the stored one</em>}
                 </span>
-                <textarea
-                  rows={5}
-                  className="mono"
-                  value={draft.private_key}
-                  onChange={(e) => set("private_key", e.target.value)}
-                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
+                <div className="keydrop">
+                  <input
+                    type="file"
+                    id="keyfile"
+                    className="keyfile-input"
+                    onChange={(e) => readKeyFile(e.target.files?.[0])}
+                  />
+                  <label htmlFor="keyfile" className="keyfile-label">
+                    Choose key file…
+                  </label>
+                  <span className="hint">
+                    {keyFile ? `Loaded ${keyFile}` : "Usually ~/.ssh/id_ed25519 or id_rsa"}
+                  </span>
+                </div>
+                {keyError && <div className="error-banner">{keyError}</div>}
+                <details className="paste-key">
+                  <summary>or paste it instead</summary>
+                  <textarea
+                    rows={5}
+                    className="mono"
+                    value={draft.private_key}
+                    onChange={(e) => {
+                      set("private_key", e.target.value);
+                      setKeyFile(null);
+                      setKeyError(validateKey(e.target.value));
+                    }}
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </details>
               </label>
               <label>
                 <span>Key passphrase (if the key has one)</span>
@@ -333,6 +382,26 @@ export default function Targets({ me }: { me: User }) {
       )}
     </div>
   );
+}
+
+/**
+ * Catch the two mistakes that otherwise save cleanly and only surface as a
+ * failed connection much later: uploading the `.pub` file, or a key whose
+ * passphrase we will not be able to answer for.
+ */
+function validateKey(text: string): string | null {
+  const value = text.trim();
+  if (!value) return null;
+  if (/^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-)/.test(value)) {
+    return "That looks like a public key (.pub). AIOps needs the private key — the same filename without .pub.";
+  }
+  if (!value.includes("PRIVATE KEY")) {
+    return "That does not look like an SSH private key. It should start with -----BEGIN.";
+  }
+  if (value.includes("ENCRYPTED") || value.includes("Proc-Type: 4,ENCRYPTED")) {
+    return "This key is passphrase-protected — enter the passphrase below or it cannot be used.";
+  }
+  return null;
 }
 
 function credentialStored(t: Target): boolean {
