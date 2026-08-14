@@ -1125,10 +1125,18 @@ function ExposureNotice({
   };
 
   // Agreeing is the moment it becomes old news, so it folds away then rather
-  // than at the next page load. Keyed on the transition, so re-expanding it by
-  // hand afterwards sticks.
+  // than at the next page load.
+  //
+  // Genuinely on the transition, via a ref: an effect with these deps also runs
+  // after the first commit, and since `acknowledged` is already true by then for
+  // anyone who has agreed, a plain condition would re-collapse on every mount —
+  // overwriting a remembered "I expanded this" with "collapsed" and making the
+  // stored preference write-only.
+  const wasAcknowledged = useRef(exposure.acknowledged);
   useEffect(() => {
-    if (exposure.acknowledged && !exposure.needs_acknowledgement) setAndRemember(true);
+    const justAgreed = exposure.acknowledged && !wasAcknowledged.current;
+    wasAcknowledged.current = exposure.acknowledged;
+    if (justAgreed && !exposure.needs_acknowledgement) setAndRemember(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [exposure.acknowledged, exposure.needs_acknowledgement]);
 
@@ -1140,6 +1148,7 @@ function ExposureNotice({
         type="button"
         className="exposure-collapsed"
         onClick={() => setAndRemember(false)}
+        aria-expanded={false}
         title="What this exposes, and to whom"
       >
         <span className="pill warn">shared</span>
