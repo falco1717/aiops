@@ -65,7 +65,14 @@ async def fire_schedule(db: AsyncSession, schedule: Schedule, *, advance_next: b
         if schedule.session_mode == "continue":
             schedule.target_session_id = session.id
 
-    run = await queue_run(db, session, schedule.prompt, schedule_id=schedule.id)
+    # Nobody is present, so the turn runs as whoever wrote the schedule.
+    run = await queue_run(
+        db,
+        session,
+        schedule.prompt,
+        schedule_id=schedule.id,
+        requested_by_id=schedule.owner_id,
+    )
 
     now = datetime.now(timezone.utc)
     schedule.last_run_at = now

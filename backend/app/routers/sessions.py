@@ -171,7 +171,13 @@ async def create_session(
         await db.commit()
         await db.refresh(sess)
         if payload.prompt:
-            await queue_run(db, sess, payload.prompt, attachment_ids=payload.attachment_ids)
+            await queue_run(
+                db,
+                sess,
+                payload.prompt,
+                attachment_ids=payload.attachment_ids,
+                requested_by_id=user.id,
+            )
             await db.refresh(sess)
     except ValidationError as exc:
         await db.rollback()
@@ -307,7 +313,13 @@ async def send_prompt(
             "This session is still working on the previous turn. Cancel it or wait.",
         )
     try:
-        return await queue_run(db, sess, payload.prompt, attachment_ids=payload.attachment_ids)
+        return await queue_run(
+            db,
+            sess,
+            payload.prompt,
+            attachment_ids=payload.attachment_ids,
+            requested_by_id=user.id,
+        )
     except ValidationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 

@@ -4,13 +4,13 @@ import logging
 import os
 import shlex
 import shutil
-import stat
 import sys
 import tempfile
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .agent_env import helper_script
 from .config import settings
 from .crypto import SecretUnavailable, decrypt
 from .models import RelayNode, Target, User
@@ -21,8 +21,27 @@ log = logging.getLogger("aiops.ssh")
 
 #: The ProxyCommand helper, referenced where it is installed rather than copied
 #: into each run directory — it holds no secret, so there is nothing per-run
-#: about it.
-PROXY_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relay_connect.py")
+#: about it. `ssh` runs it as the agent user, which cannot read the application
+#: source, so in the image this resolves to the copy installed for that side of
+#: the boundary rather than to the one in this package.
+PROXY_HELPER = helper_script(
+    "relay_connect.py", os.path.join(os.path.dirname(os.path.abspath(__file__)), "relay_connect.py")
+)
+
+#: How a run's credentials are exposed. The agent runs as a different user in
+#: the same group as the app, so "the agent and nobody else" is the group bit
+#: with the world bits clear. Nothing here is group-writable: the agent reads
+#: its config and keys, it does not get to edit them into reaching a system it
+#: was not given.
+#:
+#: 0640 on a private key is below what ssh normally tolerates, but ssh only
+#: applies that rule to a key owned by the user running it (sshkey_perm_ok:
+#: "if the key owned by a different user, then we don't care"). These are owned
+#: by the app, read by the agent, so the check does not fire — verified end to
+#: end against a real host, because it is the kind of thing that changes.
+RUN_DIR_MODE = 0o750
+RUN_FILE_MODE = 0o640
+RUN_EXEC_MODE = 0o750
 
 
 class SshContext:
@@ -54,10 +73,18 @@ class SshContext:
 
 
 def _write_private(path: str, content: str) -> None:
-    """Write a secret so only this user can read it, before any content lands."""
-    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    """Write a secret at its final permissions, before any content lands.
+
+    The mode is applied by open() rather than a chmod afterwards, so there is no
+    instant at which the file exists with the process umask's idea of who may
+    read it.
+    """
+    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, RUN_FILE_MODE)
     with os.fdopen(handle, "w") as fh:
         fh.write(content if content.endswith("\n") else content + "\n")
+    # O_CREAT's mode is masked by the umask; these files have exactly one
+    # audience and it is not negotiable.
+    os.chmod(path, RUN_FILE_MODE)
 
 
 async def visible_targets(db: AsyncSession, user: User | None) -> list[Target]:
@@ -90,11 +117,13 @@ def prepare(
     nodes = nodes or {}
 
     root = tempfile.mkdtemp(prefix="aiops-ssh-")
-    os.chmod(root, stat.S_IRWXU)
+    os.chmod(root, RUN_DIR_MODE)
     keys_dir = os.path.join(root, "keys")
     bin_dir = os.path.join(root, "bin")
-    os.makedirs(keys_dir, mode=stat.S_IRWXU)
-    os.makedirs(bin_dir, mode=stat.S_IRWXU)
+    os.makedirs(keys_dir)
+    os.makedirs(bin_dir)
+    os.chmod(keys_dir, RUN_DIR_MODE)
+    os.chmod(bin_dir, RUN_DIR_MODE)
 
     known_hosts = os.path.join(root, "known_hosts")
     known_lines = [t.known_host_key.strip() for t in targets if t.known_host_key]
@@ -229,7 +258,7 @@ exec "{real}" -F "$CONFIG" "$@"
     path = os.path.join(bin_dir, command)
     with open(path, "w", newline="\n") as fh:
         fh.write(script)
-    os.chmod(path, stat.S_IRWXU)
+    os.chmod(path, RUN_EXEC_MODE)
 
 
 def describe(targets: list[Target], nodes: dict[int, RelayNode] | None = None) -> str:

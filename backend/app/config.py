@@ -45,6 +45,20 @@ class Settings(BaseSettings):
     account_limit_cooldown_seconds: int = 3600
     max_concurrent_runs: int = 4
     run_timeout_seconds: int = 3600
+
+    # --- agent isolation -----------------------------------------------
+    # The setuid helper that starts an agent process as its own unprivileged
+    # user. Empty means agents run as the application's user, which is only
+    # safe on a machine where nothing else matters: sharing a uid with the app
+    # lets an agent read the app's environment out of /proc and recover every
+    # secret AIOps was careful not to hand it. The image sets this; it is a
+    # setting so a checkout can be run without the helper compiled.
+    agent_runas: str = ""
+    # Where the image installs the two standalone scripts an agent has to be
+    # able to execute (the approval bridge and the relay ProxyCommand). The
+    # application's own source is unreadable to the agent user, so they cannot
+    # be run from there. Falls back to the package's copies when absent.
+    agent_helper_dir: str = "/opt/aiops-agent"
     # Stream token-level deltas over the websocket (not persisted to the DB).
     stream_partial_messages: bool = True
 

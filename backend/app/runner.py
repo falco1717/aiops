@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
+from . import agent_env
 from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
@@ -206,6 +207,13 @@ class Runner:
             account_env: dict[str, str] = {}
             if account is not None:
                 os.makedirs(account.config_dir, exist_ok=True)
+                # The agent writes its own credentials here, so the directory
+                # itself has to be reachable by it. Only the directory: what is
+                # already inside was shared at startup, and walking a CLI's
+                # whole state directory on every turn is not free.
+                agent_env.grant_agent_access(
+                    account.config_dir, writable=True, recursive=False
+                )
                 account_env = account.env()
 
             approval_mode = sess.approval_mode or settings.default_approval_mode
@@ -243,155 +251,167 @@ class Runner:
             # Scoped to whoever owns the session: stored credentials belong to
             # the person who saved them, so a turn only reaches systems that
             # person may reach.
-            owner = await db.get(User, sess.owner_id) if sess.owner_id else None
-            targets = await ssh_targets.visible_targets(db, owner)
+            # Whoever asked for this turn, not whoever owns the session: a
+            # shared session must not lend its owner's stored credentials to
+            # everyone able to type into it.
+            asker = (
+                await db.get(User, run.requested_by_id) if run.requested_by_id else None
+            )
+            targets = await ssh_targets.visible_targets(db, asker)
             # Systems bound to a relay node are reached through it. The nodes
             # are looked up here so the generated config can name them, and so
             # this run's permission to use one covers exactly these hosts.
             nodes = await relay.nodes_for_targets(db, targets)
             ssh_ctx = ssh_targets.prepare(targets, nodes)
-            target_note = ssh_targets.describe(
-                [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names], nodes
-            )
-            preset_prompt = preset.system_prompt if preset else None
-            system_prompt = "\n\n".join(p for p in (preset_prompt, target_note) if p) or None
-
-            # The transcript keeps the operator's own words; the agent gets them
-            # plus where the files landed. Storing the paths on the run instead
-            # would put a block of container paths in every message bubble.
-            attached = list(
-                await db.scalars(
-                    select(Attachment)
-                    .where(Attachment.run_id == run.id)
-                    .order_by(Attachment.created_at)
-                )
-            )
-            agent_prompt = run.prompt + attachments.prompt_suffix(attached)
-
-            adapter: CodexAppServerAdapter | None = None
-            if interactive_codex:
-                # A preset that pins a tier wins; otherwise the instance-wide
-                # setting decides, because which tiers actually work depends on
-                # what the container is allowed to do (see BWRAP_HINT).
-                sandbox = (
-                    preset.permission_mode if preset else None
-                ) or settings.codex_interactive_sandbox
-                adapter = CodexAppServerAdapter(
-                    prompt=agent_prompt,
-                    cwd=cwd,
-                    model=sess.model or (preset.model if preset else None),
-                    sandbox=sandbox,
-                    resume_id=sess.provider_session_id,
-                    system_prompt=system_prompt,
-                    on_approval=self._approval_callback(run.id, sess.id),
-                    env={
-                        "NO_COLOR": "1",
-                        "FORCE_COLOR": "0",
-                        "TERM": "dumb",
-                        **account_env,
-                        **(ssh_ctx.env if ssh_ctx else {}),
-                    },
-                    stream_partials=settings.stream_partial_messages,
-                )
-                # No argv is ever exec'd with a prompt on it here, so `command`
-                # shows what really launches plus the tier the turn runs under —
-                # the two things an operator needs when a command dies.
-                argv = [
-                    settings.codex_bin,
-                    "app-server",
-                    f"(sandbox={sandbox}; approvals=untrusted)",
-                ]
-            else:
-                spec = provider.build_run(
-                    prompt=agent_prompt,
-                    model=sess.model or (preset.model if preset else None),
-                    provider_session_id=sess.provider_session_id,
-                    permission_mode=preset.permission_mode if preset else None,
-                    system_prompt=system_prompt,
-                    allowed_tools=preset.allowed_tools if preset else None,
-                    extra_args=(preset.extra_args if preset else []) or [],
-                    stream_partials=settings.stream_partial_messages,
-                    account_env=account_env,
-                    approval_mode=approval_mode,
-                    approval_token=token,
-                )
-                argv = spec.argv
-                if spec.assigned_session_id and not sess.provider_session_id:
-                    sess.provider_session_id = spec.assigned_session_id
-
-            run.status = "running"
-            run.started_at = run.started_at or datetime.now(timezone.utc)
-            run.command = argv
-            run.account_id = account.id if account else None
-            sess.status = "running"
-            await db.commit()
-
-            hub.publish(
-                sess.id,
-                {
-                    "type": "run.started",
-                    "session_id": sess.id,
-                    "run_id": run.id,
-                    "prompt": run.prompt,
-                    "command": _redact(argv),
-                    "account": account.name if account else None,
-                    "failed_over_from": previous.name if previous else None,
-                    # A retry after failover is a continuation, not a new turn;
-                    # the UI must not clear what the first attempt streamed.
-                    "attempt": len(attempted) + 1,
-                },
-            )
-
-            state = _RunState()
+            # A decrypted private key is on disk from here until cleanup, so
+            # everything that follows runs inside this try. It used to be a
+            # `finally` that opened ninety lines further down, which left the
+            # key behind for every path that never reached it: an operator
+            # cancelling the run, a shutdown cancelling all of them, or the
+            # commit below failing on a row somebody deleted underneath it.
             try:
-                if adapter is not None:
-                    status, exit_code = await self._drive_adapter(
-                        db, run, sess, adapter, state, account
+                target_note = ssh_targets.describe(
+                    [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names], nodes
+                )
+                preset_prompt = preset.system_prompt if preset else None
+                system_prompt = "\n\n".join(p for p in (preset_prompt, target_note) if p) or None
+
+                # The transcript keeps the operator's own words; the agent gets them
+                # plus where the files landed. Storing the paths on the run instead
+                # would put a block of container paths in every message bubble.
+                attached = list(
+                    await db.scalars(
+                        select(Attachment)
+                        .where(Attachment.run_id == run.id)
+                        .order_by(Attachment.created_at)
                     )
+                )
+                agent_prompt = run.prompt + attachments.prompt_suffix(attached)
+
+                adapter: CodexAppServerAdapter | None = None
+                if interactive_codex:
+                    # A preset that pins a tier wins; otherwise the instance-wide
+                    # setting decides, because which tiers actually work depends on
+                    # what the container is allowed to do (see BWRAP_HINT).
+                    sandbox = (
+                        preset.permission_mode if preset else None
+                    ) or settings.codex_interactive_sandbox
+                    adapter = CodexAppServerAdapter(
+                        prompt=agent_prompt,
+                        cwd=cwd,
+                        model=sess.model or (preset.model if preset else None),
+                        sandbox=sandbox,
+                        resume_id=sess.provider_session_id,
+                        system_prompt=system_prompt,
+                        on_approval=self._approval_callback(run.id, sess.id),
+                        env={
+                            "NO_COLOR": "1",
+                            "FORCE_COLOR": "0",
+                            "TERM": "dumb",
+                            **account_env,
+                            **(ssh_ctx.env if ssh_ctx else {}),
+                        },
+                        stream_partials=settings.stream_partial_messages,
+                    )
+                    # No argv is ever exec'd with a prompt on it here, so `command`
+                    # shows what really launches plus the tier the turn runs under —
+                    # the two things an operator needs when a command dies.
+                    argv = [
+                        settings.codex_bin,
+                        "app-server",
+                        f"(sandbox={sandbox}; approvals=untrusted)",
+                    ]
                 else:
-                    env = {
-                        **os.environ,
-                        **spec.env,
-                        "NO_COLOR": "1",
-                        "FORCE_COLOR": "0",
-                        "TERM": "dumb",
-                    }
-                    if ssh_ctx:
-                        env.update(ssh_ctx.env)
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            *spec.argv,
-                            cwd=cwd,
-                            env=env,
-                            stdin=asyncio.subprocess.DEVNULL,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                            limit=STREAM_LIMIT,
-                            start_new_session=True,
-                        )
-                    except FileNotFoundError:
-                        await self._finalize(
-                            run_id,
-                            "failed",
-                            None,
-                            f"Executable not found: {spec.argv[0]}. "
-                            "Is the CLI installed in the container?",
-                        )
-                        return
-                    status, exit_code = await self._drive_process(
-                        db, run, sess, provider, proc, state, account
+                    spec = provider.build_run(
+                        prompt=agent_prompt,
+                        model=sess.model or (preset.model if preset else None),
+                        provider_session_id=sess.provider_session_id,
+                        permission_mode=preset.permission_mode if preset else None,
+                        system_prompt=system_prompt,
+                        allowed_tools=preset.allowed_tools if preset else None,
+                        extra_args=(preset.extra_args if preset else []) or [],
+                        stream_partials=settings.stream_partial_messages,
+                        account_env=account_env,
+                        approval_mode=approval_mode,
+                        approval_token=token,
                     )
+                    argv = spec.argv
+                    if spec.assigned_session_id and not sess.provider_session_id:
+                        sess.provider_session_id = spec.assigned_session_id
+
+                run.status = "running"
+                run.started_at = run.started_at or datetime.now(timezone.utc)
+                run.command = argv
+                run.account_id = account.id if account else None
+                sess.status = "running"
+                await db.commit()
+
+                hub.publish(
+                    sess.id,
+                    {
+                        "type": "run.started",
+                        "session_id": sess.id,
+                        "run_id": run.id,
+                        "prompt": run.prompt,
+                        "command": _redact(argv),
+                        "account": account.name if account else None,
+                        "failed_over_from": previous.name if previous else None,
+                        # A retry after failover is a continuation, not a new turn;
+                        # the UI must not clear what the first attempt streamed.
+                        "attempt": len(attempted) + 1,
+                    },
+                )
+
+                state = _RunState()
+                try:
+                    if adapter is not None:
+                        status, exit_code = await self._drive_adapter(
+                            db, run, sess, adapter, state, account
+                        )
+                    else:
+                        env = {
+                            **spec.env,
+                            "NO_COLOR": "1",
+                            "FORCE_COLOR": "0",
+                            "TERM": "dumb",
+                        }
+                        if ssh_ctx:
+                            env.update(ssh_ctx.env)
+                        try:
+                            proc = await agent_env.spawn(
+                                spec.argv,
+                                cwd=cwd,
+                                env=env,
+                                stdin=asyncio.subprocess.DEVNULL,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                                limit=STREAM_LIMIT,
+                            )
+                        except FileNotFoundError:
+                            await self._finalize(
+                                run_id,
+                                "failed",
+                                None,
+                                f"Executable not found: {spec.argv[0]}. "
+                                "Is the CLI installed in the container?",
+                            )
+                            return
+                        status, exit_code = await self._drive_process(
+                            db, run, sess, provider, proc, state, account
+                        )
+                finally:
+                    self._cancelled.discard(run_id)
+                    # Nothing may stay parked on a run that is ending: the bridge
+                    # dies with the agent, so a still-pending request would leave
+                    # buttons in the UI answering a process nobody can reach.
+                    run_tokens.revoke(run_id)
+                    await broker.cancel_run(run_id)
+
             finally:
-                self._cancelled.discard(run_id)
-                # Nothing may stay parked on a run that is ending: the bridge
-                # dies with the agent, so a still-pending request would leave
-                # buttons in the UI answering a process nobody can reach.
-                run_tokens.revoke(run_id)
-                await broker.cancel_run(run_id)
-                # Stored credentials exist on disk only for the life of the run.
+                # Stored credentials exist on disk only for the life of the
+                # attempt that wrote them — failover makes a fresh set.
                 if ssh_ctx:
                     ssh_ctx.cleanup()
-
         return status, exit_code, state, account, next_account
 
     # -- execution engines ---------------------------------------------
@@ -791,20 +811,11 @@ def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
     only the agent would orphan them. `start_new_session=True` puts each run in
     its own group so one signal reaches all of it. Windows has no process
     groups, so dev machines take the single-process path.
+
+    An isolated agent runs as another user, which the app cannot signal at all,
+    so this goes through the same helper that started it.
     """
-    if proc.returncode is not None:
-        return
-    if hasattr(os, "killpg"):
-        try:
-            os.killpg(os.getpgid(proc.pid), sig)
-            return
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    with contextlib.suppress(ProcessLookupError, OSError):
-        if sig == _SIGKILL and _SIGKILL != signal.SIGTERM:
-            proc.kill()
-        else:
-            proc.terminate()
+    agent_env.signal_agent(proc, sig)
 
 
 def _terminate(proc: asyncio.subprocess.Process) -> None:

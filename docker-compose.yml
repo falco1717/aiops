@@ -64,6 +64,14 @@ services:
       AIOPS_LOGIN_LOCKOUT_SECONDS: ${AIOPS_LOGIN_LOCKOUT_SECONDS:-900}
       AIOPS_JWT_TTL_HOURS: ${AIOPS_JWT_TTL_HOURS:-720}
       AIOPS_ACCOUNTS_ROOT: ${AIOPS_ACCOUNTS_ROOT:-/home/node/accounts}
+      # Agent isolation. Agent processes are started by this setuid helper as a
+      # separate unprivileged user, which is what keeps the app's environment,
+      # memory and private files out of an agent's reach. Setting it to an
+      # empty string runs agents as the application's own user again — the
+      # state in which an agent could read AIOPS_SECRET_KEY out of /proc and
+      # decrypt every stored credential. There is no good reason to do that.
+      AIOPS_AGENT_RUNAS: ${AIOPS_AGENT_RUNAS-/usr/local/bin/aiops-runas}
+      AIOPS_AGENT_HELPER_DIR: ${AIOPS_AGENT_HELPER_DIR:-/opt/aiops-agent}
       AIOPS_CLAUDE_BIN: ${AIOPS_CLAUDE_BIN:-claude}
       AIOPS_CODEX_BIN: ${AIOPS_CODEX_BIN:-codex}
       AIOPS_SCHEDULER_TICK_SECONDS: ${AIOPS_SCHEDULER_TICK_SECONDS:-20}

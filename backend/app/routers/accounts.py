@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth_flows import login_manager
+from .. import agent_env
 from ..config import settings
 from ..db import get_db
 from ..models import AccountAccess, ProviderAccount, User
@@ -51,17 +52,23 @@ async def _status(account: ProviderAccount) -> tuple[bool | None, str | None]:
         if account.provider == "claude"
         else [binary, "login", "status"]
     )
-    env = {**os.environ, **account.env(), "NO_COLOR": "1"}
+    env = {**account.env(), "NO_COLOR": "1"}
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
+        proc = await agent_env.spawn(
+            argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             stdin=asyncio.subprocess.DEVNULL,
             env=env,
         )
+    except FileNotFoundError:
+        return False, None
+    try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-    except (FileNotFoundError, asyncio.TimeoutError):
+    except asyncio.TimeoutError:
+        # Left running, it would hold a credential directory's lock files and
+        # the next status check would time out too.
+        agent_env.kill_agent(proc)
         return False, None
     text = out.decode("utf-8", "replace").strip()
     if account.provider == "claude":
@@ -137,6 +144,7 @@ async def create_account(
     # Created up front so the CLI has somewhere to write; Codex refuses to start
     # if CODEX_HOME points at a path that does not exist.
     os.makedirs(account.config_dir, exist_ok=True)
+    agent_env.grant_agent_access(account.config_dir, writable=True)
     db.add(account)
     if payload.is_default:
         await _clear_other_defaults(db, payload.provider, exclude_id=None)
@@ -207,6 +215,7 @@ async def start_login(
 ):
     account = await _get(db, account_id)
     os.makedirs(account.config_dir, exist_ok=True)
+    agent_env.grant_agent_access(account.config_dir, writable=True)
     flow = await login_manager.start(account.provider, _key(account), account.env())
     if flow.status == "failed" and flow.verification_url is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, flow.message or "Could not start sign-in")
