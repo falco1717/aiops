@@ -127,12 +127,21 @@ async def _apply_grants(
 @router.get("", response_model=list[TargetOut])
 async def list_targets(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Only what this user owns or has been granted — nothing else exists to them."""
+    # Subquery rather than join+DISTINCT, matching the node listing. Target has
+    # no JSON column today so DISTINCT works, but it is one added column away
+    # from the 500 that shape caused on relay_nodes — and nothing here needs a
+    # join in the first place.
     rows = await db.scalars(
         select(Target)
-        .outerjoin(TargetAccess, TargetAccess.target_id == Target.id)
-        .where(or_(Target.owner_id == user.id, TargetAccess.user_id == user.id))
+        .where(
+            or_(
+                Target.owner_id == user.id,
+                Target.id.in_(
+                    select(TargetAccess.target_id).where(TargetAccess.user_id == user.id)
+                ),
+            )
+        )
         .order_by(Target.name)
-        .distinct()
     )
     out = []
     for target in rows:

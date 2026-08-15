@@ -33,15 +33,24 @@ export default function Nodes({ me }: { me: User }) {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    try {
-      setItems(await api.nodes());
-      setUsers(await api.userDirectory().catch(() => []));
+    // Fetched independently, because these were sequential awaits in one try:
+    // the node list throwing meant the pending list was never even requested,
+    // so a broken listing also hid the approval card — and approving a node is
+    // the one thing you cannot do any other way from here.
+    const [nodes, directory, waiting] = await Promise.allSettled([
+      api.nodes(),
+      api.userDirectory(),
       // Not everyone may ask, and being refused is not an error worth showing.
-      setPending(me.is_admin ? await api.pendingNodes().catch(() => []) : []);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
+      me.is_admin ? api.pendingNodes() : Promise.resolve([]),
+    ]);
+    if (nodes.status === "fulfilled") setItems(nodes.value);
+    if (directory.status === "fulfilled") setUsers(directory.value);
+    if (waiting.status === "fulfilled") setPending(waiting.value);
+
+    const failed = nodes.status === "rejected" ? nodes.reason : null;
+    setError(
+      failed ? (failed instanceof Error ? failed.message : String(failed)) : null,
+    );
   }, [me.is_admin]);
 
   useEffect(() => {

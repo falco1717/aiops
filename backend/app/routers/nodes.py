@@ -194,12 +194,23 @@ def _install_commands(request: Request, node: RelayNode, token: str) -> list[Ins
 @router.get("", response_model=list[NodeOut])
 async def list_nodes(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Only nodes this user owns or was granted — the stored-systems rule."""
+    # A subquery rather than a join, so there are no duplicate rows to collapse
+    # and therefore no DISTINCT. That matters here and not only stylistically:
+    # DISTINCT compares every selected column, `networks` is JSON, and Postgres
+    # has no equality operator for json — so the join form returned 500 for
+    # every user on the real database while passing on SQLite, which compares
+    # it as text.
     rows = await db.scalars(
         select(RelayNode)
-        .outerjoin(RelayNodeAccess, RelayNodeAccess.node_id == RelayNode.id)
-        .where(or_(RelayNode.owner_id == user.id, RelayNodeAccess.user_id == user.id))
+        .where(
+            or_(
+                RelayNode.owner_id == user.id,
+                RelayNode.id.in_(
+                    select(RelayNodeAccess.node_id).where(RelayNodeAccess.user_id == user.id)
+                ),
+            )
+        )
         .order_by(RelayNode.name)
-        .distinct()
     )
     counts = await _target_counts(db)
     out = []
