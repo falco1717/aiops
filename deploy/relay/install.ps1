@@ -20,10 +20,22 @@
     which has no password and no rights beyond the state directory.
 
 .EXAMPLE
-    .\install.ps1 -Url https://aiops.example.com -Token <enrolment token>
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Url https://aiops.example.com -Token <enrolment token>
 
 .NOTES
-    Remove it with .\uninstall.ps1
+    Remove it with:
+
+        powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
+
+    Both commands are spelled the long way on purpose. This file and
+    uninstall.ps1 arrive inside a zip fetched with a browser, so each carries
+    Mark-of-the-Web and is treated as internet-sourced; that plus the
+    Restricted policy Windows client SKUs ship makes the bare .\script.ps1
+    form fail with "is not digitally signed", even on RemoteSigned.
+    -ExecutionPolicy Bypass clears both for that one process and changes
+    nothing on the machine. If it still refuses, the policy is coming from
+    Group Policy: check Get-ExecutionPolicy -List for a MachinePolicy or
+    UserPolicy entry.
 #>
 
 # House style everywhere else in this repo is a real em-dash in prose. Not
@@ -529,4 +541,4 @@ Write-Host ""
 Write-Host "  status:  Get-Service $ServiceName"
 Write-Host "  logs:    Get-Content '$logPath' -Wait"
 Write-Host "  errors:  Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='$ServiceName'}"
-Write-Host "  remove:  .\uninstall.ps1"
+Write-Host "  remove:  powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1"
