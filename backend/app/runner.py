@@ -262,7 +262,19 @@ class Runner:
             # are looked up here so the generated config can name them, and so
             # this run's permission to use one covers exactly these hosts.
             nodes = await relay.nodes_for_targets(db, targets)
-            ssh_ctx = ssh_targets.prepare(targets, nodes)
+            # And any node the asker may route through that has been opened to
+            # a subnet, so a host on it can be reached without being stored
+            # first. Scoped to the asker for the same reason the systems are.
+            subnet_nodes = await relay.subnet_nodes_for(db, asker)
+            ssh_ctx = ssh_targets.prepare(
+                targets,
+                nodes,
+                subnet_nodes,
+                who=(
+                    f"{asker.username if asker else 'nobody'} "
+                    f"(run {run.id}, session {sess.id})"
+                ),
+            )
             # A decrypted private key is on disk from here until cleanup, so
             # everything that follows runs inside this try. It used to be a
             # `finally` that opened ninety lines further down, which left the
@@ -271,7 +283,7 @@ class Runner:
             # commit below failing on a row somebody deleted underneath it.
             try:
                 usable = [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names]
-                target_note = ssh_targets.describe(usable, nodes)
+                target_note = ssh_targets.describe(usable, nodes, subnet_nodes)
 
                 # Say in the transcript that somebody's stored credentials were
                 # put to work in front of other people. Written here, next to the

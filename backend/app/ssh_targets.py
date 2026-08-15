@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import shlex
@@ -44,6 +45,15 @@ RUN_FILE_MODE = 0o640
 RUN_EXEC_MODE = 0o750
 #: For the one file the agent has to write back to rather than only read.
 RUN_SHARED_MODE = 0o660
+
+#: How many Host patterns one subnet may spend before the config stops trying
+#: to be exact and widens to the enclosing octet boundary. ssh matches Host
+#: patterns linearly and a config nobody can read is its own kind of hazard;
+#: /25 would need 128 addresses and /17 would need 128 globs.
+#:
+#: Widening is safe *only* because the config is not the boundary — see
+#: `subnet_patterns` and the gate in relay.py, which compares the real CIDR.
+MAX_HOST_PATTERNS = 32
 
 
 class SshContext:
@@ -103,8 +113,50 @@ async def visible_targets(db: AsyncSession, user: User | None) -> list[Target]:
     return [t for t in rows if level_for(t, user) is not None]
 
 
+def subnet_patterns(network: ipaddress.IPv4Network) -> list[str]:
+    """ssh_config Host globs covering a CIDR.
+
+    ssh matches a Host line with shell globs, which cannot express a prefix
+    length: `198.51.100.0/25` has no glob spelling at all. Three cases, and the
+    honest thing is to say which one each range falls into:
+
+    * A range that is octet-aligned (/24, /16) *is* a glob — `198.51.100.*` and
+      `192.168.*` match exactly its members and nothing else.
+    * A range that is not can still be covered exactly by a *set* of them: the
+      /24s inside a /20, or the individual addresses inside a /27. That is
+      preferred while the set stays small.
+    * Beyond that the set is collapsed to the enclosing octet boundary, which
+      is **wider than the range** — a /25 is written as the whole /24 around
+      it, so `198.51.100.200` matches a Host pattern for a node allowed only
+      `198.51.100.0/25`.
+
+    That last case is deliberate and safe for exactly one reason: the pattern
+    decides only whether ssh *tries* the relay, and the try lands on the gate
+    in relay.py, which holds the real network and refuses. A glob is a routing
+    hint. It is never permission.
+    """
+    if network.prefixlen >= 24:
+        addresses = list(network)
+        if len(addresses) <= MAX_HOST_PATTERNS:
+            return [str(a) for a in addresses]
+    else:
+        blocks = list(network.subnets(new_prefix=24))
+        if len(blocks) <= MAX_HOST_PATTERNS:
+            return [str(b.network_address).rsplit(".", 1)[0] + ".*" for b in blocks]
+    # Widen to the octet boundary at or above this prefix: /25..31 -> the /24,
+    # /17..23 -> the /16. Never below /16, which validation already refuses.
+    octets = network.prefixlen // 8
+    covering = network.supernet(new_prefix=octets * 8)
+    parts = str(covering.network_address).split(".")
+    return [".".join(parts[:octets]) + ".*"] if octets < 4 else [str(covering.network_address)]
+
+
 def prepare(
-    targets: list[Target], nodes: dict[int, RelayNode] | None = None
+    targets: list[Target],
+    nodes: dict[int, RelayNode] | None = None,
+    subnet_nodes: list[RelayNode] | None = None,
+    *,
+    who: str = "",
 ) -> SshContext | None:
     """Materialise an SSH config for one run. None when there is nothing to do.
 
@@ -113,8 +165,17 @@ def prepare(
     in: if the route cannot be made to work the connection has to fail, because
     an ssh config that quietly reaches the host another way is exactly the
     outcome someone bound it to a node to prevent.
+
+    `subnet_nodes` are nodes the requester may route through that have been
+    given an explicit CIDR, so `ssh user@198.51.100.42` works for a host nobody
+    stored. They carry no credential — reachability and authentication are
+    different grants, and spraying a stored key at every address on a subnet
+    would be the second one nobody asked for.
+
+    `who` names the requester and turn, for the relay's own log lines.
     """
-    if not targets:
+    subnet_nodes = subnet_nodes or []
+    if not targets and not subnet_nodes:
         return None
     nodes = nodes or {}
 
@@ -218,6 +279,29 @@ def prepare(
         lines.append("")
         usable.append(target.slug)
 
+    # Subnets, after every stored system: ssh takes the first value it is given
+    # for a keyword, so a host that is both stored and inside an allowed range
+    # keeps the credential and port its operator saved for it.
+    subnets: list[tuple[str, ipaddress.IPv4Network, tuple[int, ...]]] = []
+    for node in subnet_nodes:
+        rules = relay.subnet_rules(node)
+        subnets += rules
+        for _, network, ports in rules:
+            patterns = subnet_patterns(network)
+            lines += [
+                f"# {network} reached through relay node {node.slug}"
+                + (f" (ports {', '.join(str(p) for p in ports)})" if ports else ""),
+                "# No credential is stored for these hosts — supply a user and a key.",
+                # The patterns can be wider than the range; the relay refuses
+                # anything outside it. See subnet_patterns().
+                "Host " + " ".join(patterns),
+                f"    UserKnownHostsFile {learned_hosts} {known_hosts}",
+                "    StrictHostKeyChecking accept-new",
+                f"    ProxyCommand {shlex.quote(sys.executable)} {shlex.quote(PROXY_HELPER)} "
+                f"{shlex.quote(node.slug)} %h %p",
+                "",
+            ]
+
     config = os.path.join(root, "config")
     _write_private(config, "\n".join(lines))
 
@@ -240,12 +324,12 @@ def prepare(
         env[f"AIOPS_ASKPASS_{_env_key(slug)}"] = helper
 
     relay_token: str | None = None
-    if routes:
+    if routes or subnets:
         # In the environment rather than on the ProxyCommand line, for the same
         # reason as the passwords above: an argument list is readable by anyone
         # who can run `ps`. The token only ever authorises the connections
         # already materialised for this run, and dies with it.
-        relay_token = relay.tokens.issue(routes)
+        relay_token = relay.tokens.issue(routes, subnets, who)
         env["AIOPS_RELAY_TOKEN"] = relay_token
         env["AIOPS_RELAY_ADDR"] = (
             f"{settings.relay_forwarder_host}:{relay.hub.forwarder_port or 0}"
@@ -314,29 +398,64 @@ exec "{real}" -F "$CONFIG" "$@"
     os.chmod(path, RUN_EXEC_MODE)
 
 
-def describe(targets: list[Target], nodes: dict[int, RelayNode] | None = None) -> str:
+def describe(
+    targets: list[Target],
+    nodes: dict[int, RelayNode] | None = None,
+    subnet_nodes: list[RelayNode] | None = None,
+) -> str:
     """A line for the system prompt, so the agent knows what it can reach.
 
     A relayed system is named as such: the agent connects to it the same way,
     but knowing the hop exists is what lets it read "the relay node is not
     connected" as an infrastructure problem rather than a broken credential.
+
+    Subnets are described separately and in different words, because they are a
+    different offer. A stored system comes with its credential; a subnet is
+    reachability only, and an agent told otherwise would spend a turn hunting
+    for a password AIOps was never given.
     """
-    if not targets:
-        return ""
     nodes = nodes or {}
-    listed = "\n".join(
-        f"- `{t.slug}` — {t.username}@{t.hostname}:{t.port}"
-        + (f" ({t.description.strip()})" if t.description else "")
-        + (
-            f" [via relay node {nodes[t.relay_node_id].name}]"
-            if t.relay_node_id and t.relay_node_id in nodes
-            else ""
+    subnet_nodes = subnet_nodes or []
+    blocks: list[str] = []
+
+    if targets:
+        listed = "\n".join(
+            f"- `{t.slug}` — {t.username}@{t.hostname}:{t.port}"
+            + (f" ({t.description.strip()})" if t.description else "")
+            + (
+                f" [via relay node {nodes[t.relay_node_id].name}]"
+                if t.relay_node_id and t.relay_node_id in nodes
+                else ""
+            )
+            for t in targets
         )
-        for t in targets
-    )
-    return (
-        "Systems configured in AIOps that you can reach directly. Credentials are "
-        "already in place, so use the short name and do not ask for one:\n"
-        f"{listed}\n"
-        "Connect with `ssh <name>` (scp and sftp work the same way)."
-    )
+        blocks.append(
+            "Systems configured in AIOps that you can reach directly. Credentials are "
+            "already in place, so use the short name and do not ask for one:\n"
+            f"{listed}\n"
+            "Connect with `ssh <name>` (scp and sftp work the same way)."
+        )
+
+    ranges = [
+        (network, ports, node)
+        for node in subnet_nodes
+        for _, network, ports in relay.subnet_rules(node)
+    ]
+    if ranges:
+        listed = "\n".join(
+            f"- {network} on port{'' if len(ports) == 1 else 's'} "
+            f"{', '.join(str(p) for p in ports)} — via relay node {node.name}"
+            for network, ports, node in ranges
+        )
+        blocks.append(
+            "Networks reachable through a relay node. Any address in these ranges can be "
+            "connected to by writing it out — `ssh user@192.168.1.10` — and the connection "
+            "is routed through the node automatically:\n"
+            f"{listed}\n"
+            "No credential is stored for these, unlike the named systems above: give a "
+            "username and a key or password, or ask the operator for one. Addresses "
+            "outside these ranges, and other ports, are refused by AIOps rather than "
+            "attempted — that refusal is a policy limit, not a network fault."
+        )
+
+    return "\n\n".join(blocks)

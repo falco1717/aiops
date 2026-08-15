@@ -596,6 +596,11 @@ class NodePatch(BaseModel):
     description: str | None = None
     grants: list[NodeGrant] | None = None
     owner_id: int | None = None
+    #: Subnets a run may reach through this node, and on which ports. Only ever
+    #: set from here — never from what the node reports about itself. Validated
+    #: in the router, which turns a bad range into a 400 that says why.
+    allowed_cidrs: list[str] | None = None
+    allowed_ports: list[int] | None = None
 
 
 class NodeOut(BaseModel):
@@ -615,7 +620,12 @@ class NodeOut(BaseModel):
     online: bool
     version: str | None
     reported_hostname: str | None
+    #: What the node says it can see. Descriptive only — it authorises nothing.
     networks: list[str]
+    #: What it has been *allowed* to be used for, which is a different list and
+    #: only ever set by a person.
+    allowed_cidrs: list[str]
+    allowed_ports: list[int]
     owner_id: int | None
     grants: list[NodeGrant]
     #: owner | manage | use — what the caller may do with it.

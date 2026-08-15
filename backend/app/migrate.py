@@ -42,6 +42,15 @@ COLUMNS: dict[str, dict[str, str]] = {
     "target_access": {
         "level": "VARCHAR(16) NOT NULL DEFAULT 'use'",
     },
+    # Both spelled JSON because that is what the model declares
+    # (`mapped_column(JSON, ...)`), the same as sessions.available_commands
+    # above. Added with no default: an existing node arrives with NULL in both,
+    # which every reader treats as "no subnet reach", so an upgrade widens
+    # nothing until somebody says so in the UI.
+    "relay_nodes": {
+        "allowed_cidrs": "JSON",
+        "allowed_ports": "JSON",
+    },
     "provider_accounts": {
         "limit_status": "VARCHAR(32)",
         "limit_window": "VARCHAR(32)",

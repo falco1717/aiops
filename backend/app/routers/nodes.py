@@ -82,6 +82,10 @@ def _out(node: RelayNode, level: str, counts: dict[int, int]) -> NodeOut:
         version=node.version,
         reported_hostname=node.reported_hostname,
         networks=list(node.networks or []),
+        allowed_cidrs=list(node.allowed_cidrs or []),
+        # Null on a row that predates the column, and empty means the default
+        # rather than "every port" — shown as what it actually resolves to.
+        allowed_ports=list(node.allowed_ports or relay.DEFAULT_ALLOWED_PORTS),
         owner_id=node.owner_id,
         grants=[NodeGrant(user_id=g.user_id, level=g.level) for g in node.grants],
         my_level=level,
@@ -326,6 +330,10 @@ async def create_node(
         description=payload.description,
         status="pending",
         networks=[],
+        # A new node reaches nothing but the systems pointed at it. Widening
+        # that is a separate, deliberate edit — never part of registering one.
+        allowed_cidrs=[],
+        allowed_ports=list(relay.DEFAULT_ALLOWED_PORTS),
         created_by_id=user.id,
         owner_id=user.id,
     )
@@ -413,6 +421,27 @@ async def update_node(
         node.slug = _slugify(node.name)
     if "description" in data:
         node.description = data["description"]
+
+    # Subnet reach. Only from here, only with manage — `_require` above has
+    # already settled that — and never from anything the node itself said.
+    if "allowed_cidrs" in data or "allowed_ports" in data:
+        try:
+            if "allowed_cidrs" in data:
+                node.allowed_cidrs = relay.normalise_cidrs(data["allowed_cidrs"])
+            if "allowed_ports" in data:
+                node.allowed_ports = relay.normalise_ports(data["allowed_ports"])
+        except relay.SubnetRuleError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+        # Loud, like approval and revocation: this widens what can be reached
+        # through somebody's network, and it is the sort of change that has to
+        # be findable afterwards in a log rather than only in a database row.
+        log.warning(
+            "relay node %r subnet reach set to %s on port(s) %s by %r",
+            node.slug,
+            node.allowed_cidrs or "nothing",
+            node.allowed_ports or list(relay.DEFAULT_ALLOWED_PORTS),
+            user.username,
+        )
 
     await _apply_grants(
         db, node, [NodeGrant(**g) for g in grants] if grants is not None else None, user

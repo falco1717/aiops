@@ -462,6 +462,20 @@ class RelayNode(Base):
     reported_hostname: Mapped[str | None] = mapped_column(String(255), nullable=True)
     networks: Mapped[list] = mapped_column(JSON, default=list)
 
+    #: Subnets a run may reach through this node without a stored system for
+    #: every host — CIDR strings, validated and set only through the API by
+    #: someone who owns or manages the node.
+    #:
+    #: Deliberately *not* derived from `networks` above. That field is whatever
+    #: the node says about itself, and a node that has been taken over would
+    #: otherwise be able to widen its own reach simply by claiming a bigger
+    #: range on its next check-in. Reach is granted from this side or not at all.
+    allowed_cidrs: Mapped[list] = mapped_column(JSON, default=list)
+    #: The ports those subnets may be reached on. Empty means the default, 22:
+    #: a subnet route exists to let an agent ssh somewhere, and a blank list
+    #: opening every port would be the opposite of what it was asked for.
+    allowed_ports: Mapped[list] = mapped_column(JSON, default=lambda: [22])
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True

@@ -13,6 +13,8 @@ websocket, and a TCP listener the agent has to open on its side. That half
 exists because everything in the first half would still pass against a relay
 that generated correct-looking config and quietly moved no bytes at all.
 """
+import asyncio
+import fnmatch
 import hashlib
 import io
 import os
@@ -381,6 +383,161 @@ with TestClient(app) as c:
           orphan_config.split("ProxyCommand")[1].split("\n")[0][:200])
     orphan.cleanup()
 
+    # --- subnet routing: what may be allowed ----------------------------
+    # A node reaches a stored system's exact host and port. Reaching a whole
+    # LAN through it is a separate grant, made here and nowhere else.
+    r = c.post("/api/nodes", json={"name": "Insurance Net"})
+    subnet_id = r.json()["node"]["id"]
+    subnet_token = r.json()["enrolment_token"]
+    check("a new node starts with no subnet reach",
+          r.json()["node"]["allowed_cidrs"] == [], str(r.json()["node"]["allowed_cidrs"]))
+    check("and with the only port a subnet route defaults to",
+          r.json()["node"]["allowed_ports"] == [22], str(r.json()["node"]["allowed_ports"]))
+
+    # The node then says it can see a great deal. None of it is a grant.
+    c.post("/api/relay/enroll", json={
+        "token": subnet_token, "hostname": "198.51.100.5",
+        "networks": ["198.51.100.0/24", "10.0.0.0/8", "8.8.8.0/24"],
+    })
+    c.post(f"/api/nodes/{subnet_id}/approve")
+    row = next(n for n in c.get("/api/nodes").json() if n["id"] == subnet_id)
+    check("a node that enrolled claiming three networks still reaches none of them",
+          row["allowed_cidrs"] == [] and len(row["networks"]) == 3, str(row["allowed_cidrs"]))
+
+    refusals = {
+        "8.8.8.0/24": "it is public, which is the open-proxy case",
+        "10.0.0.0/8": "a /8 is wider than a node is ever a route to",
+        "0.0.0.0/0": "the whole internet is not a LAN",
+        "198.51.100.0/33": "it is not a network",
+        "not-a-network": "it is not anything",
+        "fd00::/16": "IPv6, which no generated Host pattern could match",
+    }
+    for bad, why in refusals.items():
+        r = c.patch(f"/api/nodes/{subnet_id}", json={"allowed_cidrs": [bad]})
+        check(f"{bad} is refused because {why}", r.status_code == 400,
+              f"{r.status_code} {r.text[:200]}")
+    r = c.patch(f"/api/nodes/{subnet_id}", json={"allowed_cidrs": ["8.8.8.0/24"]})
+    check("and a public range is refused in words that say why, not 'invalid'",
+          "open proxy" in r.text, r.text[:250])
+
+    r = c.patch(f"/api/nodes/{subnet_id}",
+                json={"allowed_cidrs": [f"10.{n}.0.0/16" for n in range(11)]})
+    check("a list longer than the cap is refused", r.status_code == 400,
+          f"{r.status_code} {r.text[:160]}")
+    for bad_port in ([0], [65536], ["ssh"], list(range(1, 12))):
+        r = c.patch(f"/api/nodes/{subnet_id}", json={"allowed_ports": bad_port})
+        check(f"port list {str(bad_port)[:24]} is refused", r.status_code == 400,
+              f"{r.status_code} {r.text[:160]}")
+
+    r = c.patch(f"/api/nodes/{subnet_id}",
+                json={"allowed_cidrs": ["198.51.100.0/24"], "allowed_ports": [22, 8006]})
+    check("a private /24 is accepted", r.status_code == 200, f"{r.status_code} {r.text[:250]}")
+    check("and is what the node is allowed, no more",
+          r.status_code == 200 and r.json()["allowed_cidrs"] == ["198.51.100.0/24"],
+          r.text[:200])
+    check("the ranges the node claimed for itself are still only claims",
+          r.status_code == 200 and "10.0.0.0/8" in r.json()["networks"]
+          and "10.0.0.0/8" not in r.json()["allowed_cidrs"], r.text[:250])
+    r = c.patch(f"/api/nodes/{subnet_id}", json={"allowed_cidrs": ["198.51.100.5/24"]})
+    check("a range written as an address inside it is stored as the range",
+          r.status_code == 200 and r.json()["allowed_cidrs"] == ["198.51.100.0/24"],
+          r.text[:200])
+    c.patch(f"/api/nodes/{subnet_id}", json={"allowed_ports": [22, 8006]})
+
+    # 'use' is permission to route through a node, never to widen it.
+    c.patch(f"/api/nodes/{subnet_id}", json={"grants": [{"user_id": users["walt"], "level": "use"}]})
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "walt", "password": "waltpassword1"})
+    r = c.patch(f"/api/nodes/{subnet_id}", json={"allowed_cidrs": ["10.10.0.0/16"]})
+    check("someone with 'use' cannot widen what the node reaches",
+          r.status_code == 403, f"{r.status_code} {r.text[:160]}")
+    c.post("/api/auth/logout")
+    c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
+    # A revoked node with a range set must still be worth nothing.
+    c.patch(f"/api/nodes/{node_id}", json={"allowed_cidrs": ["10.10.20.0/24"]})
+
+    # --- subnet routing: the gate ---------------------------------------
+    # Everything below asks the authorisation function the forwarder asks, at
+    # the point it asks it. The ssh config is checked separately and never
+    # stands in for this.
+    reach = RelayNode(id=11, name="Acme Insurance", slug="acme-insurance", status="approved",
+                      grants=[], networks=["172.31.0.0/16", "0.0.0.0/0"],
+                      allowed_cidrs=["198.51.100.0/24"], allowed_ports=[22, 8006])
+    ctx = ssh_targets.prepare([], {}, [reach], who="tester (run 1, session s-1)")
+    check("a node with a subnet gives a run a relay token with no stored systems at all",
+          ctx is not None and bool(ctx.env.get("AIOPS_RELAY_TOKEN")))
+    tok = ctx.env["AIOPS_RELAY_TOKEN"]
+    check("the gate allows an in-range address on an allowed port",
+          relay.tokens.allows(tok, "acme-insurance", "198.51.100.42", 22))
+    check("and on the second allowed port",
+          relay.tokens.allows(tok, "acme-insurance", "198.51.100.42", 8006))
+    check("the gate refuses an in-range address on a port that was not allowed",
+          not relay.tokens.allows(tok, "acme-insurance", "198.51.100.42", 3389))
+    check("the gate refuses an address outside the range",
+          not relay.tokens.allows(tok, "acme-insurance", "192.168.89.42", 22))
+    check("a subnet is reachable through the node it was set on and no other",
+          not relay.tokens.allows(tok, "salt-net", "198.51.100.42", 22))
+    check("what a node reports about itself authorises nothing — 172.31/16",
+          not relay.tokens.allows(tok, "acme-insurance", "172.31.4.4", 22))
+    check("nor does a node claiming the entire internet",
+          not relay.tokens.allows(tok, "acme-insurance", "8.8.8.8", 22))
+    check("a name is never matched against a range, only an address",
+          not relay.tokens.allows(tok, "acme-insurance", "printer.lan", 22))
+    ctx.cleanup()
+    check("and the subnet dies with the run like everything else",
+          not relay.tokens.allows(tok, "acme-insurance", "198.51.100.42", 22))
+
+    # --- the bypass test ------------------------------------------------
+    # A /25 has no glob spelling. The config is therefore written wider than
+    # the range it stands for — deliberately, and only because the config is
+    # not what decides. This is that gap, exercised on purpose.
+    narrow = RelayNode(id=12, name="Half A Subnet", slug="half-net", status="approved",
+                       grants=[], networks=[],
+                       allowed_cidrs=["198.51.100.0/25"], allowed_ports=[22])
+    half = ssh_targets.prepare([], {}, [narrow], who="tester (run 2, session s-2)")
+    with open(os.path.join(half.root, "config")) as fh:
+        half_config = fh.read()
+    host_line = next(
+        (ln.strip() for ln in half_config.splitlines() if ln.startswith("Host ")), ""
+    )
+    check("a /25 is written as the whole /24 around it, because a glob cannot say /25",
+          host_line == "Host 198.51.100.*", host_line)
+    check("so ssh really would route .200 — the glob matches it",
+          fnmatch.fnmatch("198.51.100.200", host_line.split(" ", 1)[1]), host_line)
+    half_tok = half.env["AIOPS_RELAY_TOKEN"]
+    check("BYPASS: the gate refuses .200 regardless, because the CIDR is what it checks",
+          not relay.tokens.allows(half_tok, "half-net", "198.51.100.200", 22))
+    check("while .100, genuinely inside the /25, is allowed",
+          relay.tokens.allows(half_tok, "half-net", "198.51.100.100", 22))
+    check("and the config says out loud that no credential comes with a subnet",
+          "No credential is stored" in half_config, half_config[:400])
+    check("a subnet host is routed through the node rather than dialled from here",
+          "ProxyCommand" in half_config and "half-net" in half_config)
+    half.cleanup()
+
+    # An octet-aligned range needs no widening, and must not get any.
+    exact = RelayNode(id=13, name="Exact", slug="exact-net", status="approved", grants=[],
+                      networks=[], allowed_cidrs=["10.20.30.0/24"], allowed_ports=[22])
+    exact_ctx = ssh_targets.prepare([], {}, [exact])
+    with open(os.path.join(exact_ctx.root, "config")) as fh:
+        exact_line = next(ln.strip() for ln in fh if ln.startswith("Host "))
+    check("a /24 is a glob exactly, and is written as one", exact_line == "Host 10.20.30.*",
+          exact_line)
+    exact_ctx.cleanup()
+
+    # --- what the agent is told -----------------------------------------
+    briefing = ssh_targets.describe([], {}, [reach])
+    check("the agent is told the subnet is reachable", "198.51.100.0/24" in briefing, briefing[:300])
+    check("and through which node", "Acme Insurance" in briefing, briefing[:300])
+    check("and on which ports", "22, 8006" in briefing, briefing[:300])
+    check("and that no credential comes with it",
+          "No credential is stored" in briefing, briefing[:400])
+    check("and that being refused is a policy limit, not a broken network",
+          "policy limit" in briefing, briefing[:600])
+    both = ssh_targets.describe([behind], {7: live}, [reach])
+    check("stored systems and subnets are described as the different offers they are",
+          "via relay node Salt Net" in both and "198.51.100.0/24" in both, both[:400])
+
     # --- what the installers promise ------------------------------------
     # Found live: with Restart=always, a node told it was revoked exits
     # cleanly, is restarted five seconds later, reconnects, is told again, and
@@ -397,6 +554,56 @@ with TestClient(app) as c:
           "aiops-relay-node.service" in installer and "[Service]" not in installer)
     check("and leaves one command that removes all of it",
           "/usr/local/sbin/aiops-relay-uninstall" in installer and "userdel" in installer)
+
+
+# =====================================================================
+# Who a subnet route is materialised for
+# =====================================================================
+# Against the real database rather than in-memory objects, because the whole
+# question is which rows come back for which person.
+
+
+async def subnet_scope_checks():
+    from sqlalchemy import select as sql_select  # noqa: E402
+
+    from app import relay as relay_mod  # noqa: E402
+    from app.db import SessionLocal  # noqa: E402
+    from app.models import User as UserRow  # noqa: E402
+
+    async with SessionLocal() as db:
+        people = {
+            name: await db.scalar(sql_select(UserRow).where(UserRow.username == name))
+            for name in ("admin", "walt", "otheradmin")
+        }
+        owner_sees = [n.slug for n in await relay_mod.subnet_nodes_for(db, people["admin"])]
+        check("the node's owner gets its subnet materialised",
+              owner_sees == ["insurance-net"], str(owner_sees))
+        check("a node of theirs with no CIDR set gives them nothing",
+              "salt-net" not in owner_sees, str(owner_sees))
+
+        granted = [n.slug for n in await relay_mod.subnet_nodes_for(db, people["walt"])]
+        check("someone granted 'use' on the node gets the subnet too",
+              granted == ["insurance-net"], str(granted))
+        check("but not through the node they own with nothing allowed on it",
+              "walt-net" not in granted, str(granted))
+
+        stranger = [n.slug for n in await relay_mod.subnet_nodes_for(db, people["otheradmin"])]
+        check("a user with no access to the node gets no subnet route at all",
+              stranger == [], str(stranger))
+        check("and that user is an administrator — approving a node is not routing through it",
+              people["otheradmin"].is_admin)
+        check("nobody at all gets a subnet route with no user to scope it to",
+              await relay_mod.subnet_nodes_for(db, None) == [])
+
+        # The revoked node had a range set on it above. It is still revoked.
+        node = await db.scalar(sql_select(relay_mod.RelayNode).where(
+            relay_mod.RelayNode.slug == "salt-net"))
+        check("the revoked node really does hold a CIDR, so the exclusion is the status",
+              node is not None and node.allowed_cidrs == ["10.10.20.0/24"],
+              str(node.allowed_cidrs if node else None))
+
+
+asyncio.run(subnet_scope_checks())
 
 
 # =====================================================================
@@ -529,6 +736,51 @@ try:
     check("the same run cannot point the node at a different host",
           denied.returncode == 1 and b"not permitted" in denied.stderr,
           denied.stderr.decode()[:200])
+
+    # --- the same thing again, but reached as a subnet -------------------
+    # Everything above went through an exact (node, host, port) route. This
+    # goes through a CIDR rule, over the same sockets, so the widened gate is
+    # exercised in the data path rather than only against its own function.
+    from app.models import RelayNode as NodeRow  # noqa: E402
+
+    ranged = NodeRow(
+        name="Live Net", slug=live_slug, status="approved", grants=[],
+        # A private /24 that happens to contain the loopback the echo server is
+        # on. 127.0.0.0/8 would be refused by validation; this is not.
+        networks=["10.0.0.0/8"], allowed_cidrs=["127.0.0.0/24"], allowed_ports=[ECHO_PORT],
+    )
+    subnet_env = {
+        **os.environ,
+        "AIOPS_RELAY_TOKEN": relay.tokens.issue(
+            set(), relay.subnet_rules(ranged), "tester (run 3, session s-3)"
+        ),
+        "AIOPS_RELAY_ADDR": f"127.0.0.1:{relay.hub.forwarder_port}",
+    }
+    ranged_proxy = subprocess.Popen(
+        [sys.executable, helper, live_slug, "127.0.0.1", str(ECHO_PORT)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=subnet_env,
+    )
+    banner = ranged_proxy.stdout.read(16)
+    check("a host inside an allowed subnet is reached with no stored system for it",
+          banner == b"FAR-HOST-BANNER\n", repr(banner))
+    ranged_proxy.stdin.close()
+    ranged_proxy.wait(timeout=15)
+
+    wrong_port = subprocess.run(
+        [sys.executable, helper, live_slug, "127.0.0.1", str(API_PORT)],
+        input=b"", capture_output=True, env=subnet_env, timeout=30,
+    )
+    check("the same host on a port the subnet does not allow is refused at the socket",
+          wrong_port.returncode == 1 and b"not permitted" in wrong_port.stderr,
+          wrong_port.stderr.decode()[:200])
+    outside = subprocess.run(
+        [sys.executable, helper, live_slug, "127.1.0.1", str(ECHO_PORT)],
+        input=b"", capture_output=True, env=subnet_env, timeout=30,
+    )
+    check("and an address outside the /24 is refused even on the allowed port",
+          outside.returncode == 1 and b"not permitted" in outside.stderr,
+          outside.stderr.decode()[:200])
+    relay.tokens.revoke(subnet_env["AIOPS_RELAY_TOKEN"])
 
     # --- revocation, against a live connection ---------------------------
     api.post(f"/api/nodes/{live_id}/revoke")

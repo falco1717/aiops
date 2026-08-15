@@ -22,15 +22,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import secrets
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
+from .access import node_level_for
 from .config import settings
 from .db import SessionLocal
-from .models import RelayNode
+from .models import RelayNode, RelayNodeAccess
 from .security import hash_password, verify_password
 
 log = logging.getLogger("aiops.relay")
@@ -47,6 +49,118 @@ PROTOCOL = "AIOPS-RELAY/1"
 
 class RelayError(Exception):
     """A connection could not be opened. The text reaches the agent's terminal."""
+
+
+# --- what a node is allowed to reach -----------------------------------
+#: No /8, and certainly no 0.0.0.0/0. Sixteen bits is already 65k hosts; the
+#: point of the floor is that a slip of the keyboard cannot turn one node into
+#: a route to everything the machine can see.
+MIN_CIDR_PREFIX = 16
+#: A node here serves one LAN. A list this length is a workable number of
+#: segments and a hard stop on somebody pasting a routing table in.
+MAX_ALLOWED_CIDRS = 10
+MAX_ALLOWED_PORTS = 10
+#: What an empty port list means. Never "everything".
+DEFAULT_ALLOWED_PORTS = (22,)
+
+
+class SubnetRuleError(ValueError):
+    """A CIDR or port list that cannot be accepted. The text reaches the user."""
+
+
+def normalise_cidrs(values) -> list[str]:
+    """Validate the subnets a node may be routed to, or explain the refusal.
+
+    The private-address rule is the anti-open-proxy guard and the reason this
+    is not merely a shape check: without it a node — which by design dials out
+    from inside somebody's network and copies bytes for whoever asks — becomes
+    a way to reach the public internet from an address that is not ours, and
+    AIOps becomes the thing that pointed it there.
+
+    IPv4 only, deliberately. Not because the gate could not compare a v6
+    address, but because the ssh config generated alongside it is built from
+    dotted-quad globs, and a range the gate allows but no generated Host
+    pattern matches is a feature that looks configured and does nothing.
+    """
+    if values is None:
+        return []
+    if not isinstance(values, (list, tuple)):
+        raise SubnetRuleError("Allowed networks must be a list of CIDRs, such as 198.51.100.0/24.")
+    if len(values) > MAX_ALLOWED_CIDRS:
+        raise SubnetRuleError(
+            f"At most {MAX_ALLOWED_CIDRS} networks per node (got {len(values)})."
+        )
+    out: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            network = ipaddress.ip_network(text, strict=False)
+        except ValueError as exc:
+            raise SubnetRuleError(f"{text!r} is not a network in CIDR form: {exc}") from None
+        if network.version != 4:
+            raise SubnetRuleError(
+                f"{text!r} is IPv6. Only IPv4 subnets can be routed through a node today."
+            )
+        if not network.is_private:
+            raise SubnetRuleError(
+                f"{text!r} is not a private network. A relay node may only be pointed at "
+                "private address space — routing public addresses through it would make "
+                "AIOps an open proxy."
+            )
+        if network.prefixlen < MIN_CIDR_PREFIX:
+            raise SubnetRuleError(
+                f"{text!r} is too broad. Use /{MIN_CIDR_PREFIX} or narrower — a node is a "
+                "route into one network, not into everything it can see."
+            )
+        # Stored normalised, so 198.51.100.5/24 is kept as the range it means
+        # rather than as an address that reads like a single host.
+        listed = str(network)
+        if listed not in out:
+            out.append(listed)
+    return out
+
+
+def normalise_ports(values) -> list[int]:
+    """Validate the ports a subnet route may use."""
+    if values is None:
+        return []
+    if not isinstance(values, (list, tuple)):
+        raise SubnetRuleError("Allowed ports must be a list of numbers, such as [22].")
+    if len(values) > MAX_ALLOWED_PORTS:
+        raise SubnetRuleError(f"At most {MAX_ALLOWED_PORTS} ports per node (got {len(values)}).")
+    out: list[int] = []
+    for value in values:
+        try:
+            port = int(str(value).strip())
+        except (TypeError, ValueError):
+            raise SubnetRuleError(f"{value!r} is not a port number.") from None
+        if not 1 <= port <= 65535:
+            raise SubnetRuleError(f"{port} is not a port number — ports run from 1 to 65535.")
+        if port not in out:
+            out.append(port)
+    return out
+
+
+def subnet_rules(node: RelayNode) -> list[tuple[str, ipaddress.IPv4Network, tuple[int, ...]]]:
+    """One node's subnet reach, as the gate compares it.
+
+    Whatever is in the column is re-validated on the way out rather than
+    trusted: the rows outlive the code that wrote them, and a rule that no
+    longer passes today's checks must stop working rather than keep its
+    grandfathered reach.
+    """
+    try:
+        cidrs = normalise_cidrs(node.allowed_cidrs)
+        ports = normalise_ports(node.allowed_ports)
+    except SubnetRuleError as exc:
+        log.warning("relay node %r has an unusable subnet rule, ignoring it: %s", node.slug, exc)
+        return []
+    if not cidrs:
+        return []
+    allowed = tuple(ports) or DEFAULT_ALLOWED_PORTS
+    return [(node.slug, ipaddress.ip_network(c), allowed) for c in cidrs]
 
 
 # --- credentials -------------------------------------------------------
@@ -88,29 +202,96 @@ async def node_for_credential(db, raw: str) -> RelayNode | None:
 
 
 # --- run-scoped permission to use a node -------------------------------
+class RelayGrant:
+    """Everything one run may ask the forwarder for, and who is asking.
+
+    Two kinds of reach, both fixed when the run's ssh config is written:
+
+    * `routes` — exact (node, host, port) triples, one per stored system the
+      requester may reach. A hostname is allowed here because an operator
+      typed it and it names one machine.
+    * `subnets` — (node, network, ports) rules, from nodes the requester may
+      route through that have been given an explicit CIDR. These match by
+      address only; see `allows` for why a name is never resolved against one.
+
+    `who` is carried so the stream log says which person and which turn a
+    connection belongs to, rather than only that some run opened one.
+    """
+
+    def __init__(
+        self,
+        routes: set[tuple[str, str, int]],
+        subnets: list[tuple[str, ipaddress.IPv4Network, tuple[int, ...]]] | None = None,
+        who: str = "",
+    ) -> None:
+        self.routes = set(routes)
+        self.subnets = list(subnets or [])
+        self.who = who
+
+
 class RelayTokens:
     """What a run is allowed to ask the forwarder for.
 
-    A token carries the exact set of (node, host, port) triples materialised for
-    that run — which is the set of systems its owner may already reach — so the
-    agent cannot point the helper at an arbitrary address on the node's network.
-    Tokens live in memory only and die with the run that owns them.
+    A token carries the reach materialised for that run — the systems its
+    requester may already use, plus any subnets the nodes they may route
+    through have been opened to — so the agent cannot point the helper at an
+    arbitrary address. Tokens live in memory only and die with the run.
+
+    The reach is a snapshot taken when the run started, deliberately: narrowing
+    a node's subnets takes effect for the next turn rather than mid-connection,
+    the same as removing a stored system does. Revoking the *node* is the thing
+    that stops traffic immediately, and it still does — it closes the control
+    channel, so nothing can be opened through it whatever a token says.
     """
 
     def __init__(self) -> None:
-        self._routes: dict[str, set[tuple[str, str, int]]] = {}
+        self._grants: dict[str, RelayGrant] = {}
 
-    def issue(self, routes: set[tuple[str, str, int]]) -> str:
+    def issue(
+        self,
+        routes: set[tuple[str, str, int]],
+        subnets: list[tuple[str, ipaddress.IPv4Network, tuple[int, ...]]] | None = None,
+        who: str = "",
+    ) -> str:
         token = secrets.token_urlsafe(32)
-        self._routes[token] = set(routes)
+        self._grants[token] = RelayGrant(routes, subnets, who)
         return token
 
     def allows(self, token: str, node_slug: str, host: str, port: int) -> bool:
-        return (node_slug, host, port) in self._routes.get(token, ())
+        """The authorisation check for one stream. Everything else defers to this.
+
+        A subnet rule matches an *address*, never a name. The helper is handed
+        ssh's `%h` verbatim, so a name would have to be resolved to be compared
+        — and the resolver that would do it is the AIOps container's, which
+        knows nothing about the far network and everything about ours. A name
+        that happened to resolve to an in-range address here would authorise a
+        connection the node then makes to a completely different machine. So
+        names are only ever reachable as the exact triples an operator stored.
+        """
+        grant = self._grants.get(token)
+        if grant is None:
+            return False
+        if (node_slug, host, port) in grant.routes:
+            return True
+        if not grant.subnets:
+            return False
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        return any(
+            slug == node_slug and port in ports and address in network
+            for slug, network, ports in grant.subnets
+        )
+
+    def describe(self, token: str) -> str:
+        """Who this token belongs to, for the log line. Never the token itself."""
+        grant = self._grants.get(token)
+        return grant.who if grant is not None else "unknown requester"
 
     def revoke(self, token: str | None) -> None:
         if token:
-            self._routes.pop(token, None)
+            self._grants.pop(token, None)
 
 
 tokens = RelayTokens()
@@ -350,12 +531,28 @@ class RelayHub:
                 await writer.drain()
                 return
 
-            # The token names exactly the connections this run was set up to
-            # make. Anything else is refused here, before a node is contacted.
+            # THE GATE. The token names exactly the reach this run was set up
+            # with — the stored systems its requester may use, and any subnet
+            # their nodes were explicitly opened to. Anything else is refused
+            # here, before a node is contacted.
+            #
+            # This is the only place that decides, on purpose. The ssh config
+            # written for a run is a convenience for the agent and is not a
+            # boundary: its Host patterns are globs, which cannot express a
+            # CIDR exactly, and nothing stops an agent from running the
+            # ProxyCommand helper itself with any address it likes. Both paths
+            # arrive here.
+            who = tokens.describe(token)
             if not tokens.allows(token, slug, host, port):
                 writer.write(b"ERR this run is not permitted to reach that host\n")
                 await writer.drain()
-                log.warning("relay: refused %s:%s via %s — not in the run's routes", host, port, slug)
+                log.warning(
+                    "relay: refused %s:%s via node %s for %s — outside this run's reach",
+                    host,
+                    port,
+                    slug,
+                    who,
+                )
                 return
 
             try:
@@ -369,7 +566,7 @@ class RelayHub:
             await writer.drain()
             # Only now may the far host's first bytes be delivered.
             stream.go.set()
-            log.info("relay: %s:%s opened via node %s", host, port, slug)
+            log.info("relay: %s:%s opened via node %s for %s", host, port, slug, who)
             await stream.finished.wait()
         except (ConnectionResetError, BrokenPipeError):
             pass
@@ -459,3 +656,37 @@ async def nodes_for_targets(db, targets) -> dict[int, RelayNode]:
         return {}
     rows = await db.scalars(select(RelayNode).where(RelayNode.id.in_(wanted)))
     return {node.id: node for node in rows}
+
+
+async def subnet_nodes_for(db, user) -> list[RelayNode]:
+    """Nodes this user may route a whole subnet through.
+
+    Scoped to the person, exactly like `visible_targets`: a node is a way into
+    somebody's network, so a turn gets the subnets of whoever *asked for the
+    turn* — not the session's owner, and not everything on the instance. An
+    administrator gets nothing here they were not given; see access.py, where
+    that asymmetry is spelled out and is deliberate.
+
+    A node with no CIDRs set is not returned at all, which is every node until
+    someone deliberately opens one. Only approved nodes: a pending or revoked
+    one carries no traffic anyway, and materialising routes for it would put
+    hosts in the agent's briefing that can never answer.
+    """
+    if user is None:
+        return []
+    rows = await db.scalars(
+        select(RelayNode)
+        .where(
+            RelayNode.status == "approved",
+            or_(
+                RelayNode.owner_id == user.id,
+                RelayNode.id.in_(
+                    select(RelayNodeAccess.node_id).where(RelayNodeAccess.user_id == user.id)
+                ),
+            ),
+        )
+        .order_by(RelayNode.name)
+    )
+    # The query narrows; `node_level_for` decides. Two rules that agree today,
+    # and only one of them is the one the rest of AIOps asks.
+    return [node for node in rows if node_level_for(node, user) is not None and subnet_rules(node)]

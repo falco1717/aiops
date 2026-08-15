@@ -415,7 +415,11 @@ export type RelayNode = {
   online: boolean;
   version: string | null;
   reported_hostname: string | null;
+  /** What the node says it can see. Descriptive — it grants nothing. */
   networks: string[];
+  /** What it is allowed to be used for. Set only here, by a person. */
+  allowed_cidrs: string[];
+  allowed_ports: number[];
   owner_id: number | null;
   grants: NodeGrant[];
   /** owner | manage | use, or "" for an admin seeing one only to approve it. */

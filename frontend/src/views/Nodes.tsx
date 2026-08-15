@@ -28,6 +28,8 @@ export default function Nodes({ me }: { me: User }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [grants, setGrants] = useState<NodeGrant[]>([]);
+  const [cidrs, setCidrs] = useState("");
+  const [ports, setPorts] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [issued, setIssued] = useState<NodeEnrolment | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +71,8 @@ export default function Nodes({ me }: { me: User }) {
     setName("");
     setDescription("");
     setGrants([]);
+    setCidrs("");
+    setPorts("");
     setEditingId(null);
   };
 
@@ -89,7 +93,16 @@ export default function Nodes({ me }: { me: User }) {
     event.preventDefault();
     await act(async () => {
       if (editingId) {
-        await api.updateNode(editingId, { name, description: description || null, grants });
+        await api.updateNode(editingId, {
+          name,
+          description: description || null,
+          grants,
+          // Sent on every save of an existing node, including when the box was
+          // cleared — that is how reach is taken away again, and leaving the
+          // field out would make clearing it a no-op.
+          allowed_cidrs: splitList(cidrs),
+          allowed_ports: splitList(ports).map(Number),
+        });
       } else {
         setIssued(await api.createNode({ name, description: description || null, grants }));
       }
@@ -102,6 +115,15 @@ export default function Nodes({ me }: { me: User }) {
     setName(node.name);
     setDescription(node.description ?? "");
     setGrants(node.grants.filter((g) => g.user_id !== node.owner_id));
+    // Prefilled with a *suggestion* when nothing has been allowed yet — the
+    // /24 around whatever address the node reported, which is the answer
+    // almost every single-LAN node wants. It is only a filled-in box: nothing
+    // is granted until this form is saved, and clearing it before saving
+    // leaves the node exactly as reachable as it was.
+    setCidrs(
+      node.allowed_cidrs.length > 0 ? node.allowed_cidrs.join(", ") : (suggestCidr(node) ?? ""),
+    );
+    setPorts(node.allowed_ports.join(", "));
   };
 
   const remove = (node: RelayNode) =>
@@ -204,6 +226,46 @@ export default function Nodes({ me }: { me: User }) {
           />
         </label>
 
+        {editingId !== null && (
+          <fieldset className="sharing">
+            <legend>Networks agents may reach through it</legend>
+            <p className="hint">
+              Without this, only the stored systems pointed at this node are reachable
+              through it. Naming a range here lets an agent connect to any address in it —
+              <code> ssh user@198.51.100.42</code> — for people who can already route
+              through the node. No credential comes with it: reachability and a login are
+              separate things, and AIOps only grants the first.
+            </p>
+            <label>
+              <span>Allowed networks</span>
+              <input
+                value={cidrs}
+                onChange={(e) => setCidrs(e.target.value)}
+                placeholder="198.51.100.0/24"
+              />
+            </label>
+            <p className="hint">
+              Comma separated, in CIDR form. Private ranges only, /16 or narrower — a relay
+              node is a route into one network, and anything wider would make AIOps a way
+              out to the internet from somebody else's address. Leave empty for no subnet
+              access. Whatever the node reports about itself is ignored here.
+            </p>
+            <label>
+              <span>Allowed ports</span>
+              <input
+                value={ports}
+                onChange={(e) => setPorts(e.target.value)}
+                placeholder="22"
+              />
+            </label>
+            <p className="hint">
+              Comma separated. Empty means 22 alone. Anything outside these ranges and
+              ports is refused when the connection is opened, not merely left out of the
+              agent's config.
+            </p>
+          </fieldset>
+        )}
+
         <fieldset className="sharing">
           <legend>Who else can route through it</legend>
           <p className="hint">
@@ -262,9 +324,21 @@ export default function Nodes({ me }: { me: User }) {
             </div>
 
             <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+              {/* Two different lists that look alike and are not. The plain
+                  pills are what the node says it can see; the highlighted ones
+                  are what it has been allowed to be used for. */}
               {node.networks.slice(0, 6).map((net) => (
-                <span className="pill" key={net}>
+                <span className="pill" key={net} title="Reported by the node — not access">
                   {net}
+                </span>
+              ))}
+              {node.allowed_cidrs.map((cidr) => (
+                <span
+                  className="pill ok"
+                  key={`allowed-${cidr}`}
+                  title={`Agents may reach any address in ${cidr} on port ${node.allowed_ports.join(", ")}`}
+                >
+                  ↔ {cidr}
                 </span>
               ))}
               {node.target_count > 0 && (
@@ -310,6 +384,38 @@ export default function Nodes({ me }: { me: User }) {
       )}
     </div>
   );
+}
+
+/** A comma or whitespace separated box, as the list it means. */
+function splitList(text: string): string[] {
+  return text
+    .split(/[\s,]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The /24 around whatever address the node reported, as a starting suggestion.
+ *
+ * A suggestion and nothing more: it lands in a form field that has to be
+ * saved, so seeing it grants nothing. Derived from `reported_hostname` first
+ * and then from the networks the node claims, because either can be the only
+ * one that is an address — a node behind DHCP reports a name for itself and
+ * its subnet in the list, and a node with no DNS reports the reverse.
+ *
+ * The server re-validates whatever comes back, so a wrong guess here is
+ * refused there rather than quietly accepted.
+ */
+function suggestCidr(node: RelayNode): string | null {
+  const candidates = [node.reported_hostname ?? "", ...node.networks];
+  for (const candidate of candidates) {
+    const address = candidate.trim().split("/")[0];
+    const octets = address.split(".");
+    if (octets.length !== 4) continue;
+    if (!octets.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255)) continue;
+    return `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
+  }
+  return null;
 }
 
 /** Status and reachability are different questions, and both matter. */
