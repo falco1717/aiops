@@ -2,6 +2,7 @@ import type {
   Account,
   AgentEvent,
   Approval,
+  ApprovalAnswer,
   Attachment,
   Capability,
   Exposure,
@@ -275,10 +276,20 @@ export const api = {
     ).toString();
     return request<Approval[]>(`/api/approvals${query ? `?${query}` : ""}`);
   },
-  decideApproval: (id: number, allowed: boolean, note?: string | null) =>
+  /**
+   * `answers` belongs only to an AskUserQuestion approval, and allowing one
+   * without them is refused server-side — the tool would report back that the
+   * questions went unanswered.
+   */
+  decideApproval: (
+    id: number,
+    allowed: boolean,
+    note?: string | null,
+    answers?: ApprovalAnswer[] | null,
+  ) =>
     request<Approval>(`/api/approvals/${id}/decide`, {
       method: "POST",
-      body: body({ allowed, note: note ?? null }),
+      body: body({ allowed, note: note ?? null, answers: answers ?? null }),
     }),
   eventRaw: (sessionId: string, eventId: number) =>
     request<{ raw: unknown }>(`/api/sessions/${sessionId}/events/${eventId}/raw`),

@@ -61,6 +61,21 @@ export type Preset = {
   is_default: boolean;
 };
 
+/** One offered answer. The description is usually where the difference is. */
+export type ApprovalOption = {
+  label: string;
+  description: string | null;
+};
+
+/** One question Claude's AskUserQuestion tool is waiting on. */
+export type ApprovalQuestion = {
+  /** Two or three words naming the topic, e.g. "Device HDR". */
+  header: string | null;
+  question: string;
+  multi_select: boolean;
+  options: ApprovalOption[];
+};
+
 /** A tool call the agent is parked on, waiting for a human answer. */
 export type Approval = {
   id: number;
@@ -76,6 +91,20 @@ export type Approval = {
   decided_at: string | null;
   note: string | null;
   created_at: string;
+  /**
+   * Non-empty only when the agent is asking rather than requesting permission.
+   * Parsed by the server, so the browser never reads a provider's raw tool
+   * input — and an input the server could not read arrives empty here and is
+   * shown as the ordinary tool card.
+   */
+  questions: ApprovalQuestion[];
+};
+
+/** One person's reply to one question, as sent with the decision. */
+export type ApprovalAnswer = {
+  question: string;
+  options: string[];
+  text?: string | null;
 };
 
 /** ask = pause and let a human decide; auto = approve edits; bypass = no checks. */
@@ -353,6 +382,8 @@ export type WsMessage =
       tool_name: string | null;
       summary: string | null;
       request: Record<string, unknown> | null;
+      /** Same parse as the REST shape, so a card built from either agrees. */
+      questions?: ApprovalQuestion[];
     }
   | {
       type: "approval.resolved";

@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     # How long an agent waits, parked, for a human answer before giving up. A
     # scheduled run at 3am has nobody to ask, so this must not be infinite.
     approval_timeout_seconds: int = 600
+    # The same wait, for Claude's AskUserQuestion. Longer on purpose: an
+    # allow/deny is a glance at one command and a tap, but a question is several
+    # option descriptions to read, a choice per question and possibly a sentence
+    # to type — often on a phone, after a notification. Ten minutes makes that a
+    # race; half an hour survives "put the phone down and thought about it"
+    # while still being a number a 3am scheduled run eventually gives up at.
+    approval_question_timeout_seconds: int = 1800
     # Sandbox tier an interactive ("ask") Codex turn runs under. The human is
     # the gate there, so the tier is only defence in depth — but under Docker's
     # default seccomp and AppArmor profiles bubblewrap cannot build the

@@ -14,8 +14,17 @@ from .db import SessionLocal
 from .events import hub
 from .models import Approval, User
 from .names import display_name
+from .questions import is_question_tool, parse_questions
 
 log = logging.getLogger("aiops.approvals")
+
+
+def _minutes(seconds: float) -> str:
+    """A wait a person would recognise. "1800s" reads as a machine talking."""
+    if seconds < 90:
+        return f"{int(seconds)} seconds"
+    count = round(seconds / 60)
+    return f"{count} minute{'s' if count != 1 else ''}"
 
 
 @dataclass
@@ -75,6 +84,14 @@ class ApprovalBroker:
         self._waiters[approval_id] = future
         self._by_run.setdefault(run_id, set()).add(approval_id)
 
+        # Parsed here rather than left to the browser, and by the same predicate
+        # the REST shape uses, so a card built from this event and one built from
+        # a page reload cannot disagree.
+        questions = (
+            [q.as_dict() for q in parse_questions(request)]
+            if is_question_tool(provider, tool_name)
+            else []
+        )
         hub.publish(
             session_id,
             {
@@ -87,6 +104,7 @@ class ApprovalBroker:
                 "tool_name": tool_name,
                 "summary": summary,
                 "request": request,
+                "questions": questions,
             },
         )
 
@@ -94,10 +112,18 @@ class ApprovalBroker:
         try:
             decision = await asyncio.wait_for(asyncio.shield(future), timeout=wait)
         except asyncio.TimeoutError:
-            decision = Decision(
-                allowed=False,
-                note=f"No answer within {int(wait)}s, so it was denied.",
+            # Both outcomes are a denial on the wire — that is the only way the
+            # CLI lets us fail closed — but a question was never a permission,
+            # and telling the model its questions were "denied" makes it argue
+            # with a decision nobody took. It is told nobody answered instead.
+            note = (
+                f"Nobody answered these questions within {_minutes(wait)}, "
+                "so they were left unanswered. Carry on without them, or stop and say "
+                "what you still need to know."
+                if kind == "question"
+                else f"No answer within {int(wait)}s, so it was denied."
             )
+            decision = Decision(allowed=False, note=note)
             await self._settle(approval_id, "expired", decision, user_id=None)
         finally:
             self._waiters.pop(approval_id, None)
@@ -106,13 +132,19 @@ class ApprovalBroker:
         return decision
 
     async def decide(
-        self, approval_id: int, *, allowed: bool, note: str | None, user_id: int | None
+        self,
+        approval_id: int,
+        *,
+        allowed: bool,
+        note: str | None,
+        user_id: int | None,
+        updated_input: dict[str, Any] | None = None,
     ) -> bool:
         """Answer a pending request. False if it was already settled or is unknown."""
         future = self._waiters.get(approval_id)
         if future is None or future.done():
             return False
-        decision = Decision(allowed=allowed, note=note)
+        decision = Decision(allowed=allowed, note=note, updated_input=updated_input)
         await self._settle(
             approval_id, "allowed" if allowed else "denied", decision, user_id=user_id
         )

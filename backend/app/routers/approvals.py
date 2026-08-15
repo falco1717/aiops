@@ -13,6 +13,14 @@ from ..config import settings
 from ..db import get_db
 from ..models import Approval, Session, User
 from ..names import display_name
+from ..questions import (
+    Answer,
+    AnswerError,
+    build_updated_input,
+    is_question_tool,
+    parse_questions,
+    summarise,
+)
 from ..schemas import ApprovalDecision, ApprovalOut
 from ..security import current_user
 
@@ -80,8 +88,42 @@ async def decide(
             + (f" — {row.note}" if row.note else "")
             + ". The agent is no longer waiting on this.",
         )
+    questions = parse_questions(row.request) if is_question_tool(row.provider, row.tool_name) else []
+    updated_input: dict | None = None
+    if questions and payload.allowed:
+        # Allowing a question without answers is the bug this exists to fix: the
+        # tool would hand the model "The user did not answer the questions" and
+        # the turn would stall having asked for nothing. Refused, rather than
+        # sent as a shrug.
+        try:
+            answers = validate_answers(
+                questions,
+                [
+                    Answer(
+                        question=a.question,
+                        options=tuple(a.options),
+                        text=a.text,
+                    )
+                    for a in (payload.answers or [])
+                ],
+            )
+        except AnswerError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        updated_input = build_updated_input(row.request, answers)
+    elif payload.answers and not questions:
+        # Answers on a plain tool approval mean the client thinks it is looking
+        # at something it is not, and the agent would silently get an input it
+        # never asked for.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "This approval is not a question, so it takes no answers."
+        )
+
     ok = await broker.decide(
-        approval_id, allowed=payload.allowed, note=payload.note, user_id=user.id
+        approval_id,
+        allowed=payload.allowed,
+        note=payload.note,
+        user_id=user.id,
+        updated_input=updated_input,
     )
     if not ok:
         raise HTTPException(
@@ -106,16 +148,34 @@ async def bridge_request(request: Request):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unknown or expired run token")
     run_id, session_id = resolved
 
+    provider = str(payload.get("provider") or "claude")
+    tool_name = payload.get("tool_name")
+    kind = str(payload.get("kind") or "tool")
+    summary = payload.get("summary")
+    tool_input = payload.get("input") if isinstance(payload.get("input"), dict) else None
+    timeout = settings.approval_timeout_seconds
+
+    # A question is not a permission, and the bridge cannot tell the difference
+    # — it forwards whatever tool the CLI names. Recognising it here is what
+    # turns "AskUserQuestion" (the useless summary the bridge sends) into the
+    # question itself, and gives a person long enough to actually answer.
+    if is_question_tool(provider, tool_name):
+        questions = parse_questions(tool_input)
+        if questions:
+            kind = "question"
+            summary = summarise(questions) or summary
+            timeout = settings.approval_question_timeout_seconds
+
     try:
         decision = await broker.request(
             run_id=run_id,
             session_id=session_id,
-            provider=str(payload.get("provider") or "claude"),
-            kind=str(payload.get("kind") or "tool"),
-            tool_name=payload.get("tool_name"),
-            summary=payload.get("summary"),
-            request=payload.get("input") if isinstance(payload.get("input"), dict) else None,
-            timeout=settings.approval_timeout_seconds,
+            provider=provider,
+            kind=kind,
+            tool_name=tool_name,
+            summary=summary,
+            request=tool_input,
+            timeout=timeout,
         )
     except asyncio.CancelledError:
         # The run went away underneath us; let the agent fail closed.

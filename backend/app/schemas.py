@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .questions import is_question_tool, parse_questions
 
 
 class ORM(BaseModel):
@@ -492,6 +494,21 @@ class UsageOut(BaseModel):
 
 
 # --- approvals ---------------------------------------------------------
+class ApprovalOption(BaseModel):
+    """One offered answer to a question the agent is asking."""
+
+    label: str
+    #: Usually the only place the real difference between options is written.
+    description: str | None = None
+
+
+class ApprovalQuestion(BaseModel):
+    header: str | None = None
+    question: str
+    multi_select: bool = False
+    options: list[ApprovalOption] = []
+
+
 class ApprovalOut(ORM):
     id: int
     run_id: int
@@ -506,11 +523,37 @@ class ApprovalOut(ORM):
     decided_at: datetime | None
     note: str | None
     created_at: datetime
+    #: Present only for Claude's AskUserQuestion. Parsed here so the browser
+    #: never has to know the provider's own JSON shape — and so a payload we
+    #: cannot read degrades to the ordinary tool card on the server's terms.
+    questions: list[ApprovalQuestion] = []
+
+    @model_validator(mode="after")
+    def _read_questions(self):
+        if not self.questions and is_question_tool(self.provider, self.tool_name):
+            self.questions = [
+                ApprovalQuestion.model_validate(q.as_dict()) for q in parse_questions(self.request)
+            ]
+        return self
+
+
+class ApprovalAnswer(BaseModel):
+    """A person's reply to one question, as the browser sends it."""
+
+    #: The question's own text, which is the key the tool answers under.
+    question: str
+    #: Labels chosen from the offered options.
+    options: list[str] = []
+    #: The "Other" box. Sent to the model verbatim.
+    text: str | None = None
 
 
 class ApprovalDecision(BaseModel):
     allowed: bool
     note: str | None = None
+    #: Only for an AskUserQuestion approval. Allowing one without these is
+    #: refused: the tool would tell the model "the user did not answer".
+    answers: list[ApprovalAnswer] | None = None
 
 
 # --- targets (systems an agent can reach) ------------------------------

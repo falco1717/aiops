@@ -8,11 +8,21 @@ import type { Suggestion, TokenMatch } from "../mentions";
 import { activeToken, applySuggestion, emptyHint, suggestionsFor } from "../mentions";
 import { composerKeyAction } from "../composerKeys";
 import { canWithdraw, composerState, queueView } from "../queue";
+import type { Draft } from "../questions";
+import {
+  emptyDraft,
+  isAnswered,
+  setOther,
+  toAnswers,
+  toggleOption,
+  validate,
+} from "../questions";
 import type {
   Account,
   AgentEvent,
   Approval,
   ApprovalMode,
+  ApprovalQuestion,
   Attachment,
   Capability,
   Exposure,
@@ -393,6 +403,7 @@ export default function Chat({
                     tool_name: msg.tool_name,
                     summary: msg.summary,
                     request: msg.request,
+                    questions: msg.questions ?? [],
                     status: "pending",
                     decided_by_id: null,
                     decided_at: null,
@@ -403,15 +414,36 @@ export default function Chat({
           );
         } else if (msg.type === "approval.resolved") {
           // Someone answered — possibly in another tab, possibly it timed out.
-          setApprovals((prev) => prev.filter((a) => a.id !== msg.approval_id));
+          // Whether it was a question is only known from the card that is being
+          // removed, so it is read on the way past.
+          let wasQuestion = false;
+          setApprovals((prev) => {
+            wasQuestion = prev.some(
+              (a) => a.id === msg.approval_id && a.questions.length > 0,
+            );
+            return prev.filter((a) => a.id !== msg.approval_id);
+          });
           // Whose answer it was. In a shared session the card can vanish under
           // somebody who was reading it, and "it disappeared" is not an answer
           // to "who let the agent run that". Skipped for your own decisions,
           // which you just made, and for expiries, which nobody made.
-          if (msg.decided_by && msg.decided_by_id !== me.id) {
+          // A question that nobody answers is also worth saying out loud. It
+          // ends as a denial on the wire, so without this it is indistinguishable
+          // from somebody having deliberately said no — and the agent carries on
+          // with a choice the person never made. (The turn's own transcript
+          // keeps the durable record; this is for whoever is watching.)
+          const unanswered = wasQuestion && !msg.decided_by && msg.status === "expired";
+          if ((msg.decided_by && msg.decided_by_id !== me.id) || unanswered) {
+            const what = unanswered
+              ? "Nobody answered the agent's questions in time, so it carried on without them."
+              : wasQuestion
+                ? msg.status === "allowed"
+                  ? `${msg.decided_by} answered the agent's questions.`
+                  : `${msg.decided_by} declined to answer the agent's questions.`
+                : `${msg.decided_by} ${msg.status} this tool call.`;
             setDecisions((prev) => [
               ...prev.filter((d) => d.id !== msg.approval_id),
-              { id: msg.approval_id, text: `${msg.decided_by} ${msg.status} this tool call.` },
+              { id: msg.approval_id, text: what },
             ]);
             window.setTimeout(
               () => setDecisions((prev) => prev.filter((d) => d.id !== msg.approval_id)),
@@ -2026,6 +2058,13 @@ function ApprovalCard({
   const [error, setError] = useState<string | null>(null);
   const [showRaw, setShowRaw] = useState(false);
 
+  // An agent that is *asking* rather than requesting permission gets a form, not
+  // two buttons. Accepting the generic card here told the model "the user did
+  // not answer the questions", which is the whole reason this branch exists.
+  if (approval.questions.length > 0) {
+    return <QuestionCard approval={approval} onDone={onDone} />;
+  }
+
   const answer = async (allowed: boolean) => {
     setBusy(true);
     setError(null);
@@ -2075,6 +2114,168 @@ function ApprovalCard({
         <span className="approval-hint">The agent is waiting.</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * The agent's own questions, as a form.
+ *
+ * Claude's AskUserQuestion tool comes down the permission pipe like anything
+ * else, so it used to arrive as Accept/Deny over an invisible question. Every
+ * option's *description* is rendered, not just its label: in a real example
+ * ("Device HDR", four playback options) the labels were near-interchangeable
+ * and the descriptions carried the entire decision.
+ *
+ * Declining is still a plain deny, and still works — the agent is told nobody
+ * answered rather than being left parked.
+ */
+function QuestionCard({
+  approval,
+  onDone,
+}: {
+  approval: Approval;
+  onDone: (id: number) => void;
+}) {
+  const questions = approval.questions;
+  const [draft, setDraft] = useState<Draft>(() => emptyDraft(questions));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Only after a failed submit, so a form nobody has touched yet is not already
+  // scolding them about the questions they have not reached.
+  const [tried, setTried] = useState(false);
+
+  const problem = validate(questions, draft);
+
+  const send = async () => {
+    setTried(true);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await api.decideApproval(approval.id, true, null, toAnswers(questions, draft));
+      onDone(approval.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy(false);
+    }
+  };
+
+  const decline = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.decideApproval(
+        approval.id,
+        false,
+        "The operator did not answer these questions. Carry on without them, or stop and "
+          + "say what you still need to know.",
+      );
+      onDone(approval.id);
+    } catch (err) {
+      // A 409 means somebody else answered, or the run ended; either way this
+      // card is stale, so it says why and then goes.
+      setError(err instanceof Error ? err.message : String(err));
+      window.setTimeout(() => onDone(approval.id), 2500);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="approval approval-question">
+      <div className="approval-head">
+        <span className="pill warn">needs an answer</span>
+        <strong>{questions.length === 1 ? "The agent is asking" : `${questions.length} questions`}</strong>
+        <span className="approval-provider">{approval.provider}</span>
+      </div>
+
+      {questions.map((question) => (
+        <QuestionBlock
+          key={question.question}
+          question={question}
+          draft={draft}
+          disabled={busy}
+          missing={tried && !isAnswered(draft, question)}
+          onToggle={(label) => setDraft((d) => toggleOption(d, question, label))}
+          onOther={(text) => setDraft((d) => setOther(d, question, text))}
+        />
+      ))}
+
+      {error && <div className="error-banner">{error}</div>}
+      <div className="row approval-actions">
+        <button className="primary" type="button" disabled={busy} onClick={send}>
+          Send answers
+        </button>
+        <button type="button" disabled={busy} onClick={decline}>
+          Don’t answer
+        </button>
+        <span className="approval-hint">The agent is waiting.</span>
+      </div>
+    </div>
+  );
+}
+
+/** One question: its heading, its options with their descriptions, and Other. */
+function QuestionBlock({
+  question,
+  draft,
+  disabled,
+  missing,
+  onToggle,
+  onOther,
+}: {
+  question: ApprovalQuestion;
+  draft: Draft;
+  disabled: boolean;
+  missing: boolean;
+  onToggle: (label: string) => void;
+  onOther: (text: string) => void;
+}) {
+  const entry = draft[question.question] ?? { chosen: [], other: "" };
+  // Native radios need a name to group by, and the question's own text is the
+  // only identifier it has. Escaped so a question containing quotes cannot
+  // collide with another.
+  const group = `q-${encodeURIComponent(question.question)}`;
+
+  return (
+    <fieldset className={`question${missing ? " missing" : ""}`}>
+      <legend>
+        {question.header && <span className="question-header">{question.header}</span>}
+        <span className="question-text">{question.question}</span>
+        {question.multi_select && <span className="question-hint">choose any</span>}
+      </legend>
+
+      {question.options.map((option) => (
+        <label className="question-option" key={option.label}>
+          <input
+            type={question.multi_select ? "checkbox" : "radio"}
+            name={group}
+            disabled={disabled}
+            checked={entry.chosen.includes(option.label)}
+            onChange={() => onToggle(option.label)}
+          />
+          <span>
+            <span className="option-label">{option.label}</span>
+            {option.description && (
+              <span className="option-description">{option.description}</span>
+            )}
+          </span>
+        </label>
+      ))}
+
+      <label className="question-other">
+        <span className="option-label">Something else</span>
+        <input
+          type="text"
+          value={entry.other}
+          disabled={disabled}
+          placeholder="Answer in your own words"
+          onChange={(e) => onOther(e.target.value)}
+        />
+      </label>
+    </fieldset>
   );
 }
 

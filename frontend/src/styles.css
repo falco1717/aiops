@@ -698,6 +698,69 @@ button.big { font-size: 15px; padding: 11px 18px; }
   border: 1px solid var(--border); border-radius: 999px;
 }
 
+/* --- the agent asking, rather than asking permission ------------------
+   Claude's AskUserQuestion arrives down the permission pipe, so it shares the
+   card's frame — but it is a form, and the option *descriptions* are where the
+   decision actually is, so they are rendered rather than hidden behind the raw
+   JSON toggle.
+
+   Every surface below names a real token. `--bg-raised` (#1c232c) is the raised
+   one; there is no `--panel`, and writing it produced an invalid declaration
+   that fell back to transparent the last time it was tried (see the note on
+   .approval-select). Measured against #1c232c: --text #dfe5ec 12.48:1,
+   --text-dim #8b97a6 5.34:1, --accent #5aa9ff 6.45:1, --warn #fbbf24 9.49:1 —
+   all past AA (4.5:1) for body text at these sizes, none of it relying on
+   colour alone. */
+.approval-question .question {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  min-width: 0;
+}
+.approval-question .question.missing { border-color: var(--warn); }
+.approval-question legend {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0;
+  margin-bottom: 8px;
+}
+.question-header {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--warn);
+}
+.question-text { color: var(--text); font-weight: 600; }
+.question-hint { color: var(--text-dim); font-size: 12px; }
+.question-option, .question-other {
+  display: flex; gap: 9px; align-items: flex-start;
+  padding: 7px 8px; border-radius: 6px; cursor: pointer;
+}
+/* 6%, not the 10% used elsewhere: the hover tint lightens the surface the
+   descriptions sit on, and 10% takes --text-dim to 4.51:1 — technically AA and
+   no margin at all. At 6% (#202b39) it is 4.83:1. */
+.question-option:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.question-option input, .question-other input[type="text"] { margin: 0; }
+.question-option input { margin-top: 3px; flex: none; accent-color: var(--accent); }
+.question-option > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.option-label { color: var(--text); }
+/* The paragraph that actually separates one option from another. Dimmer than
+   the label but still 5.42:1 on the surface behind it, so it is readable rather
+   than decorative. */
+.option-description { color: var(--text-dim); font-size: 12.5px; line-height: 1.45; }
+.question-other { flex-direction: column; gap: 5px; cursor: default; }
+.question-other input[type="text"] { width: 100%; }
+
+@media (max-width: 860px) {
+  /* The card can now be long. It scrolls inside itself so Send answers stays
+     reachable without hunting for it. */
+  .approval-question { max-height: 70vh; overflow-y: auto; }
+  .question-option, .question-other { padding: 10px 8px; }
+  .question-option input { width: 20px; height: 20px; }
+}
+
 @media (max-width: 860px) {
   .approval { margin: 0 12px 8px; padding: 10px 12px; }
   /* A long command is worth reading but not worth the whole screen: it scrolls

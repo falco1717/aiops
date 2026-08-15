@@ -132,6 +132,17 @@ class ClaudeProvider(Provider):
             env["AIOPS_APPROVAL_TOKEN"] = approval_token
             env["AIOPS_INTERNAL_URL"] = settings.internal_api_url
             env["AIOPS_PROVIDER"] = self.name
+            # The bridge must outlast the server's own wait, or *it* is what
+            # gives up and the request is denied by a socket rather than
+            # decided by a person. Questions get the longest wait, so the
+            # bridge is sized against that one and not the default.
+            env["AIOPS_APPROVAL_HTTP_TIMEOUT"] = str(
+                max(
+                    settings.approval_timeout_seconds,
+                    settings.approval_question_timeout_seconds,
+                )
+                + 60
+            )
 
         if allowed_tools:
             argv += ["--allowedTools", allowed_tools]
