@@ -429,6 +429,161 @@ async def broker_tests():
 
 asyncio.run(broker_tests())
 
+
+# --- the route a person's answers actually travel down ---------------------
+async def route_tests():
+    """The decide endpoint itself, called with a real pending approval.
+
+    Driven through the router function rather than over HTTP: the interesting
+    part is what it does with the answers, and its auth and visibility rules are
+    already covered where they belong (test_api, test_teams).
+    """
+    from fastapi import HTTPException
+
+    from app.approvals import broker as live
+    from app.db import SessionLocal as SL
+    from app.models import Approval, User
+    from app.routers.approvals import decide
+    from app.schemas import ApprovalAnswer, ApprovalDecision
+
+    async with SL() as db:
+        user = User(username="asker", password_hash="x", is_admin=True)
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        # Owned, because an approval on a session the caller cannot see is a
+        # 404 by design and this test is about the answers, not visibility.
+        sess = Session(provider="claude", title="route", owner_id=user.id)
+        db.add(sess)
+        await db.commit()
+        await db.refresh(sess)
+        run = Run(session_id=sess.id, prompt="p", status="running")
+        db.add(run)
+        await db.commit()
+        await db.refresh(run)
+        session_id, run_id, user_id = sess.id, run.id, user.id
+
+    async def park(request, kind="question", tool_name="AskUserQuestion"):
+        """A real agent-shaped wait, and the row id it is waiting on."""
+        task = asyncio.create_task(
+            live.request(
+                run_id=run_id, session_id=session_id, provider="claude", kind=kind,
+                tool_name=tool_name, summary="q", request=request, timeout=10,
+            )
+        )
+        await asyncio.sleep(0.15)
+        from sqlalchemy import desc, select
+
+        async with SL() as db:
+            row = (
+                await db.scalars(
+                    select(Approval).where(Approval.status == "pending").order_by(desc(Approval.id))
+                )
+            ).first()
+        return task, row.id
+
+    async def call(approval_id, payload):
+        async with SL() as db:
+            row = await db.get(User, user_id)
+            return await decide(approval_id, payload, user=row, db=db)
+
+    async def refused(approval_id, payload, fragment):
+        try:
+            await call(approval_id, payload)
+        except HTTPException as exc:
+            return (exc.status_code == 400 and fragment.lower() in str(exc.detail).lower()), (
+                f"{exc.status_code} {exc.detail}"
+            )
+        return False, "was accepted"
+
+    # An allow carrying no answers is refused — that is the exact request the
+    # old generic Accept button used to send, and the tool's reply to it was
+    # "The user did not answer the questions."
+    task, approval_id = await park(REAL)
+    ok, why = await refused(approval_id, ApprovalDecision(allowed=True), "still unanswered")
+    check("allowing a question with no answers at all is refused", ok, why)
+
+    ok, why = await refused(
+        approval_id,
+        ApprovalDecision(
+            allowed=True,
+            answers=[ApprovalAnswer(question=hdr, options=["Only for 4K"])],
+        ),
+        "still unanswered",
+    )
+    check("allowing with only some of the questions answered is refused", ok, why)
+
+    ok, why = await refused(
+        approval_id,
+        ApprovalDecision(
+            allowed=True,
+            answers=[
+                ApprovalAnswer(question=hdr, options=["Dolby Vision only"]),
+                ApprovalAnswer(question=profiles, options=["Remux"]),
+            ],
+        ),
+        "was not offered",
+    )
+    check("allowing with an option that was never offered is refused", ok, why)
+
+    check("and the agent is still parked through all of that", not task.done())
+
+    await call(
+        approval_id,
+        ApprovalDecision(
+            allowed=True,
+            answers=[
+                ApprovalAnswer(question=hdr, text="Only on the projector"),
+                ApprovalAnswer(question=profiles, options=["Remux", "Bluray-1080p"]),
+            ],
+        ),
+    )
+    decision = await asyncio.wait_for(task, timeout=5)
+    check(
+        "a complete answer set releases the agent carrying exactly those answers",
+        decision.allowed
+        and decision.updated_input
+        == {
+            **REAL,
+            "answers": {
+                hdr: "Only on the projector",
+                profiles: ["Remux", "Bluray-1080p"],
+            },
+        },
+        json.dumps(decision.updated_input)[:200],
+    )
+
+    # Declining is a plain deny and still works.
+    task, approval_id = await park(REAL)
+    await call(approval_id, ApprovalDecision(allowed=False, note="Not answering."))
+    declined = await asyncio.wait_for(task, timeout=5)
+    check(
+        "declining a question is still an ordinary deny, with no answers invented",
+        declined.allowed is False
+        and declined.note == "Not answering."
+        and declined.updated_input is None,
+        repr(declined.note),
+    )
+
+    # Regression: an ordinary tool approval behaves exactly as it did.
+    task, approval_id = await park({"command": "ls"}, kind="tool", tool_name="Bash")
+    ok, why = await refused(
+        approval_id,
+        ApprovalDecision(allowed=True, answers=[ApprovalAnswer(question="?", options=["x"])]),
+        "not a question",
+    )
+    check("answers sent to a plain tool approval are refused, not smuggled through", ok, why)
+    await call(approval_id, ApprovalDecision(allowed=True))
+    plain = await asyncio.wait_for(task, timeout=5)
+    check(
+        "a plain tool approval still allows with nothing attached",
+        plain.allowed and plain.updated_input is None,
+        repr(plain.updated_input),
+    )
+
+
+asyncio.run(route_tests())
+
 check(
     "questions get a longer wait than an allow/deny tap",
     settings.approval_question_timeout_seconds > settings.approval_timeout_seconds,
