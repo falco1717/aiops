@@ -1419,9 +1419,16 @@ def diagnose(url: str, egress: Egress, credential: str | None) -> int:
         headers = {"User-Agent": f"aiops-relay/{VERSION}"}
         if credential:
             headers["Authorization"] = f"Bearer {credential}"
+        # The stream endpoint rather than the control one, and this matters:
+        # AIOps keeps a single control channel per node and closes the old one
+        # when a new arrives, so diagnosing a node whose service is running
+        # would knock that service off its connection. /stream authenticates
+        # identically, answers with the same close codes, and displaces
+        # nothing - it simply has no pending connection to hand over.
+        probe = f"/api/relay/stream?stream=diagnose-{secrets.token_hex(8)}"
         try:
             ws = WebSocket.connect(
-                f"{scheme}://{parts.netloc}/api/relay/connect", headers, egress=egress, timeout=20
+                f"{scheme}://{parts.netloc}{probe}", headers, egress=egress, timeout=20
             )
         except EgressError as exc:
             if isinstance(exc, CredentialRejected) and not credential:
@@ -1434,26 +1441,45 @@ def diagnose(url: str, egress: Egress, credential: str | None) -> int:
         else:
             # The upgrade succeeding is not the end of it. AIOps accepts the
             # socket and *then* says whether it knows this node, so the answer
-            # to "is this node approved" is one frame further on and is the
-            # other thing somebody running this wants to know.
+            # to "is this node approved" is one frame further on - and it is
+            # the other thing somebody running this wants to know.
             ws.sock.settimeout(15)
-            greeting = None
+            answer = None
             try:
                 message = ws.recv()
                 if message is not None:
-                    greeting = json.loads(message[1].decode())
+                    answer = json.loads(message[1].decode())
             except (OSError, WebSocketError, ValueError):
-                greeting = None
-            kind = (greeting or {}).get("type")
-            if kind == "hello":
-                _say("6. AIOps handshake", "OK",
-                     f"AIOps knows this node as {(greeting or {}).get('node')!r}")
-            elif kind == "denied":
+                answer = None
+            code = (answer or {}).get("code")
+            if code == CLOSE_NOT_APPROVED:
                 _say("6. AIOps handshake", "REACHED",
-                     f"AIOps answered: {(greeting or {}).get('reason')}")
-                aiops_said = greeting
+                     "AIOps knows this node and it is not approved yet")
+                aiops_said = answer
+            elif code == CLOSE_UNAUTHENTICATED and not credential:
+                # Expected, and it is the answer: everything up to AIOps works,
+                # and this node simply has not enrolled yet.
+                _say("6. AIOps handshake", "REACHED",
+                     "AIOps answered, and asked for a credential this node does not have yet")
+            elif code == CLOSE_UNAUTHENTICATED:
+                _say("6. AIOps handshake", "REFUSED",
+                     "AIOps does not recognise this node's credential")
+                failure = CredentialRejected(
+                    "AUTH: AIOps answered the handshake by rejecting this node's "
+                    "credential. That is an authentication failure and not a network "
+                    "fault: the node has been revoked or deleted, or was re-enrolled "
+                    "somewhere else. Register it in AIOps again and re-run the installer "
+                    "with a fresh enrolment token."
+                )
+            elif code == CLOSE_REVOKED:
+                _say("6. AIOps handshake", "REFUSED", "AIOps has revoked this node")
+                aiops_said = answer
             else:
-                _say("6. AIOps handshake", "OK", "AIOps accepted this node's connection")
+                # Authenticated, approved, and there was nothing pending for it
+                # to pick up - which is exactly what a healthy node looks like
+                # on this endpoint.
+                _say("6. AIOps handshake", "OK",
+                     "AIOps accepted this node's credential")
             ws.close()
 
     print()
@@ -1473,8 +1499,8 @@ def diagnose(url: str, egress: Egress, credential: str | None) -> int:
             _paragraph(
                 "The network is fine: this machine reaches AIOps and AIOps answers. What "
                 f"it said is: {aiops_said.get('reason')}. That is a decision made in "
-                "AIOps, not a fault on this machine - if it is waiting to be approved, "
-                "an administrator approves it under Nodes."
+                "AIOps, not a fault on this machine - a node waiting to be approved is "
+                "approved by an administrator under Nodes."
             )
             print()
             return 0
