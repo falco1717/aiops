@@ -597,10 +597,15 @@ class NodePatch(BaseModel):
     grants: list[NodeGrant] | None = None
     owner_id: int | None = None
     #: Subnets a run may reach through this node, and on which ports. Only ever
-    #: set from here — never from what the node reports about itself. Validated
-    #: in the router, which turns a bad range into a 400 that says why.
+    #: set from here — never from what the node reports about itself.
+    #:
+    #: Both deliberately loose. Validation belongs to relay.py, which refuses a
+    #: public range or a port of 70000 with a sentence saying why; declaring
+    #: `list[int]` here would instead have pydantic reject `"ssh"` with a 422
+    #: and a message about the shape of the request body, which is not what the
+    #: person typing in the box needs to read.
     allowed_cidrs: list[str] | None = None
-    allowed_ports: list[int] | None = None
+    allowed_ports: list[int | str] | None = None
 
 
 class NodeOut(BaseModel):

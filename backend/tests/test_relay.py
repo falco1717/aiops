@@ -626,8 +626,33 @@ for stale in ("credential",):
         os.remove(os.path.join(STATE_DIR, stale))
 
 
+def echo_session(conn):
+    """One connection: say hello, then mirror what is said."""
+    conn.sendall(b"FAR-HOST-BANNER\n")
+    try:
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                break
+            conn.sendall(data.upper())
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+
 def echo_server(port, stop):
-    """Stands in for the far host: says hello, then mirrors what it is told."""
+    """Stands in for the far host, one thread per connection.
+
+    Threaded rather than serving one caller at a time, which is what it used to
+    do. A relayed connection is closed through four hops — helper, forwarder,
+    node websocket, node's own socket — and the far end learning about it is
+    the last thing to happen. Serving serially meant the *next* connection sat
+    unaccepted in the backlog behind a caller that had already gone, and since
+    the kernel completes a handshake into the backlog, everything upstream
+    reported an open connection that would never say anything. The suite hung
+    rather than failed, which is the worst way for a test harness to be wrong.
+    """
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", port))
@@ -638,17 +663,7 @@ def echo_server(port, stop):
             conn, _ = listener.accept()
         except socket.timeout:
             continue
-        conn.sendall(b"FAR-HOST-BANNER\n")
-        try:
-            while True:
-                data = conn.recv(4096)
-                if not data:
-                    break
-                conn.sendall(data.upper())
-        except OSError:
-            pass
-        finally:
-            conn.close()
+        threading.Thread(target=echo_session, args=(conn,), daemon=True).start()
     listener.close()
 
 

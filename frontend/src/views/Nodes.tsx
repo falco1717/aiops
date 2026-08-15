@@ -30,6 +30,8 @@ export default function Nodes({ me }: { me: User }) {
   const [grants, setGrants] = useState<NodeGrant[]>([]);
   const [cidrs, setCidrs] = useState("");
   const [ports, setPorts] = useState("");
+  //: True while the network box holds a guess nobody has agreed to yet.
+  const [suggested, setSuggested] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [issued, setIssued] = useState<NodeEnrolment | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +75,7 @@ export default function Nodes({ me }: { me: User }) {
     setGrants([]);
     setCidrs("");
     setPorts("");
+    setSuggested(false);
     setEditingId(null);
   };
 
@@ -101,7 +104,10 @@ export default function Nodes({ me }: { me: User }) {
           // cleared — that is how reach is taken away again, and leaving the
           // field out would make clearing it a no-op.
           allowed_cidrs: splitList(cidrs),
-          allowed_ports: splitList(ports).map(Number),
+          // Sent as typed, not parsed to numbers here: `Number("ssh")` is NaN,
+          // which JSON writes as null, and the operator would get a complaint
+          // about a null instead of being told "ssh" is not a port.
+          allowed_ports: splitList(ports),
         });
       } else {
         setIssued(await api.createNode({ name, description: description || null, grants }));
@@ -120,9 +126,9 @@ export default function Nodes({ me }: { me: User }) {
     // almost every single-LAN node wants. It is only a filled-in box: nothing
     // is granted until this form is saved, and clearing it before saving
     // leaves the node exactly as reachable as it was.
-    setCidrs(
-      node.allowed_cidrs.length > 0 ? node.allowed_cidrs.join(", ") : (suggestCidr(node) ?? ""),
-    );
+    const guess = node.allowed_cidrs.length > 0 ? null : suggestCidr(node);
+    setCidrs(guess ?? node.allowed_cidrs.join(", "));
+    setSuggested(guess !== null);
     setPorts(node.allowed_ports.join(", "));
   };
 
@@ -240,10 +246,23 @@ export default function Nodes({ me }: { me: User }) {
               <span>Allowed networks</span>
               <input
                 value={cidrs}
-                onChange={(e) => setCidrs(e.target.value)}
+                onChange={(e) => {
+                  setCidrs(e.target.value);
+                  setSuggested(false);
+                }}
                 placeholder="198.51.100.0/24"
               />
             </label>
+            {suggested && (
+              // Said out loud, because the box being filled in is the one way
+              // this page could grant something nobody meant to grant: open it
+              // to rename the node, press save, and the guess would be real.
+              <div className="error-banner">
+                <strong>{cidrs}</strong> is a suggestion, worked out from the address this
+                node reported. Nothing is granted until you save — clear the box if you
+                only came here to change something else.
+              </div>
+            )}
             <p className="hint">
               Comma separated, in CIDR form. Private ranges only, /16 or narrower — a relay
               node is a route into one network, and anything wider would make AIOps a way
