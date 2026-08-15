@@ -169,6 +169,12 @@ class ClaudeProvider(Provider):
 
         if etype == "system":
             subtype = data.get("subtype")
+            if subtype in _UNATTRIBUTABLE_TASK_NOTES:
+                # A status patch on a subagent that carries no tool_use_id, so it
+                # cannot be nested, and no text a human would read ("task_updated").
+                # Keeping it would wedge an orphan line into the middle of the
+                # subagent's steps and split the group in two.
+                return None
             text = f"session started ({data.get('model', 'unknown model')})"
             rate_limited = False
             if subtype == "api_retry":
@@ -180,13 +186,22 @@ class ClaudeProvider(Provider):
             elif subtype != "init":
                 text = subtype or "system"
             commands = data.get("slash_commands") if subtype == "init" else None
+            # The CLI narrates a subagent's life with task_started/task_progress/
+            # task_updated/task_notification lines that arrive *interleaved* with
+            # that subagent's own messages. They carry the spawning call's id, so
+            # attribute them to it: left unattributed they read as main-loop
+            # events and split one subagent into several fragments in the UI,
+            # which groups consecutive events by parent.
+            task_parent = data.get("tool_use_id") if _is_task_note(subtype) else None
             return NormalizedEvent(
                 kind="system",
-                text=text,
+                text=_task_note_text(data, text) if task_parent else text,
                 raw=data,
                 provider_session_id=data.get("session_id"),
                 rate_limited=rate_limited,
                 available_commands=commands if isinstance(commands, list) else None,
+                parent_tool_use_id=task_parent,
+                agent_name=data.get("subagent_type") if task_parent else None,
             )
 
         if etype == "stream_event":
@@ -205,7 +220,15 @@ class ClaudeProvider(Provider):
             # Non-null on messages produced by a subagent; the value is the id of
             # the tool call that spawned it, which is how the UI nests them.
             parent = data.get("parent_tool_use_id")
-            agent = data.get("agent_name") or data.get("subagent_name")
+            # `subagent_type` is what this CLI build actually puts on a child
+            # message; the other two are older spellings. Reading it here means a
+            # subagent's steps are named at parse time rather than only via the
+            # runner's spawn-id map.
+            agent = (
+                data.get("agent_name")
+                or data.get("subagent_name")
+                or (data.get("subagent_type") if parent else None)
+            )
             blocks = ((data.get("message") or {}).get("content")) or []
             if isinstance(blocks, str):
                 return NormalizedEvent(
@@ -294,6 +317,32 @@ _LIMIT_PATTERNS = re.compile(
 
 def _looks_rate_limited(text: str) -> bool:
     return bool(text) and bool(_LIMIT_PATTERNS.search(text))
+
+
+#: `system` subtypes narrating a subagent's progress. They arrive interleaved
+#: with that subagent's own messages and carry `tool_use_id` — the id of the
+#: spawning Agent call — so they belong inside the subagent's block.
+_TASK_NOTES = frozenset({"task_started", "task_progress", "task_notification"})
+#: Same family, but with no `tool_use_id` to attribute them by. Dropped rather
+#: than left to orphan themselves in the middle of a subagent's steps.
+_UNATTRIBUTABLE_TASK_NOTES = frozenset({"task_updated"})
+
+
+def _is_task_note(subtype: Any) -> bool:
+    return subtype in _TASK_NOTES
+
+
+def _task_note_text(data: dict[str, Any], fallback: str) -> str:
+    """Something readable for a subagent progress line.
+
+    The bare subtype ("task_progress") says nothing; the payload's own
+    description or summary is what the CLI shows a human.
+    """
+    for key in ("description", "summary", "status"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return fallback
 
 
 def _spawned_agent_name(block: dict[str, Any]) -> str | None:
