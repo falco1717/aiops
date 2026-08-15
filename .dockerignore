@@ -2,6 +2,12 @@
 .gitignore
 .env
 *.md
+# ...except this one: it ships inside the downloadable relay installer, so the
+# bundle explains what the thing being installed is. `*.md` does not cross a
+# directory separator, so this is belt to that's braces — and the belt is the
+# kind that gets tightened to `**/*.md` one day by someone who has not read
+# this line.
+!deploy/relay/README.md
 workspaces/
 frontend/node_modules
 frontend/dist

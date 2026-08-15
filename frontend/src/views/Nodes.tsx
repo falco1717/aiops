@@ -358,6 +358,21 @@ function InstallPicker({ issued }: { issued: NodeEnrolment }) {
           </button>
         ))}
       </div>
+      {/* Step one, above the command, because it is what has to happen first
+          and because the command used to say "run it from deploy/relay" to
+          people who had no way to get deploy/relay. A plain link, not a fetch:
+          the endpoint is cookie-authenticated and same-origin, so the browser
+          does the download itself and the file lands wherever the operator
+          keeps downloads. The enrolment token is not in it — it is in the
+          command below, which is the only place a single-use secret belongs. */}
+      <div className="row install-get">
+        <a className="install-download" href={installerUrl(chosen.platform)} download>
+          Download installer
+        </a>
+        <span className="hint">
+          {`aiops-relay-node-${chosen.platform}.zip — unzip it on the machine you are installing.`}
+        </span>
+      </div>
       <textarea className="mono" rows={2} readOnly value={chosen.command} />
       {chosen.note && <p className="hint">{chosen.note}</p>}
       <div className="row">
@@ -367,6 +382,15 @@ function InstallPicker({ issued }: { issued: NodeEnrolment }) {
       </div>
     </div>
   );
+}
+
+/**
+ * Derived from the platform rather than sent by the server: it is the same
+ * three names the tabs already are, and adding a URL to every InstallCommand
+ * would put a per-node field on something that does not vary per node.
+ */
+function installerUrl(platform: string): string {
+  return `/api/nodes/installer/${encodeURIComponent(platform)}`;
 }
 
 /** Open on the platform the operator is most likely standing on. */

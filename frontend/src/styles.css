@@ -714,3 +714,16 @@ button.big { font-size: 15px; padding: 11px 18px; }
 }
 .install-tab:hover { color: var(--text); }
 .install-tab.active { color: var(--accent); border-color: var(--accent); }
+
+/* Getting the files is step one, so it reads as an action rather than as a
+   link in prose. An <a download> rather than a button: the endpoint is
+   cookie-authenticated and same-origin, and letting the browser do the
+   download keeps it out of JavaScript's hands entirely. */
+.install-get { gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.install-download {
+  flex: none;
+  background: var(--accent-dim); border: 1px solid var(--accent); border-radius: 6px;
+  color: var(--text); text-decoration: none; padding: 6px 12px; cursor: pointer;
+}
+.install-download:hover { color: var(--accent); }
+.install-get .hint { margin: 0; flex: 1 1 220px; }

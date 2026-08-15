@@ -91,6 +91,24 @@ WORKDIR /app
 COPY backend/app ./app
 COPY --from=web /build/dist ./app/static
 
+# The relay-node installer, served by GET /api/nodes/installer/{platform}. The
+# Nodes page tells you to run `.\install.ps1` — and until this was here there
+# was no way to obtain that file on the machine being installed, which on a
+# fresh Windows box means nothing at all. Listed file by file rather than
+# copying the directory: `deploy/relay/__pycache__` appears the moment anyone
+# runs the agent out of the source tree, and a directory copy would ship it.
+# The two .ps1 files are UTF-8 with a BOM and must stay byte-identical — COPY
+# does not transform content, and neither does the zip built from them.
+COPY deploy/relay/aiops_relay_node.py \
+     deploy/relay/install.sh \
+     deploy/relay/install.ps1 \
+     deploy/relay/uninstall.ps1 \
+     deploy/relay/aiops-relay-node.service \
+     deploy/relay/Dockerfile \
+     deploy/relay/docker-compose.yml \
+     deploy/relay/README.md \
+     ./relay/
+
 # Two scripts in the package are run from the agent's side of the boundary: the
 # MCP approval bridge, spawned by the Claude CLI, and the relay ProxyCommand,
 # spawned by ssh. /app is not readable by the agent user, so they are installed

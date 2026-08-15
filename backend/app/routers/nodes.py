@@ -15,10 +15,11 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import relay
+from .. import installer, relay
 from ..access import LEVELS, node_level_for
 from ..config import settings
 from ..db import SessionLocal, get_db
@@ -146,6 +147,11 @@ def _install_commands(request: Request, node: RelayNode, token: str) -> list[Ins
     installers do not share a flag between them — `--url` against `-Url`
     against an environment variable — and a UI that guesses at that teaches
     people a command that does not work.
+
+    Each note now names the unzipped folder rather than `deploy/relay`, because
+    the installer is downloaded beside this command instead of being assumed to
+    already be on the machine. It said "run it from deploy/relay" on a fresh
+    Windows box that had never seen the repository.
     """
     base = str(request.base_url).rstrip("/")
     return [
@@ -153,15 +159,19 @@ def _install_commands(request: Request, node: RelayNode, token: str) -> list[Ins
             platform="linux",
             label="Linux (systemd)",
             command=f"sudo ./install.sh --url {base} --token {token} --name {node.slug}",
-            note="Run it from deploy/relay. Installs a systemd unit and starts it.",
+            note=(
+                "Download the installer, unzip it, and run this from inside that "
+                "folder. Installs a systemd unit and starts it."
+            ),
         ),
         InstallCommand(
             platform="windows",
             label="Windows (service)",
             command=f".\\install.ps1 -Url {base} -Token {token}",
             note=(
-                "Run from deploy/relay in a PowerShell started as Administrator — "
-                "creating a service needs it. Python 3 must be installed first: "
+                "Download the installer, unzip it, and run this from inside that "
+                "folder in a PowerShell started as Administrator — creating a "
+                "service needs it. Python 3 must be installed first: "
                 "winget install --id Python.Python.3.12 --scope machine"
             ),
         ),
@@ -172,7 +182,10 @@ def _install_commands(request: Request, node: RelayNode, token: str) -> list[Ins
                 f"AIOPS_RELAY_URL={base} AIOPS_RELAY_TOKEN={token} "
                 "docker compose up -d --build"
             ),
-            note="Run it from deploy/relay, where the compose file lives.",
+            note=(
+                "Download the installer, unzip it, and run this from inside that "
+                "folder, where the compose file lives."
+            ),
         ),
     ]
 
@@ -211,6 +224,46 @@ async def list_pending(_: User = Depends(current_admin), db: AsyncSession = Depe
     )
     counts = await _target_counts(db)
     return [_out(node, "", counts) for node in rows]
+
+
+@router.get("/installer/{platform}")
+async def download_installer(platform: str, _: User = Depends(current_user)):
+    """The installer files for one platform, as a zip.
+
+    Behind `current_user` rather than open: there is nothing secret in here —
+    it is the same source anyone with the repository already has — but an
+    unauthenticated endpoint on an AIOps is a thing to justify, and this one
+    cannot be. It is not admin-only either, because whoever registers a node is
+    the person who then has to install it.
+
+    The enrolment token is never written into the bundle; see installer.py for
+    why. It goes in the command, which is why the command is shown beside the
+    download rather than instead of it.
+    """
+    try:
+        payload = installer.build_bundle(platform)
+    except KeyError:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"No installer for {platform!r}. Choose one of: "
+            + ", ".join(sorted(installer.BUNDLES)),
+        )
+    except FileNotFoundError as exc:  # a deployment built without deploy/relay
+        log.error("relay installer bundle unavailable: %s", exc)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "The relay installer files are missing from this AIOps deployment.",
+        )
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{installer.bundle_name(platform)}"',
+            # Identical for every caller and every node, so it may be cached —
+            # which is only true because the token is not in it.
+            "Cache-Control": "private, max-age=300",
+        },
+    )
 
 
 @router.post("", response_model=NodeEnrolmentOut, status_code=status.HTTP_201_CREATED)

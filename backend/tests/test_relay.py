@@ -13,17 +13,21 @@ websocket, and a TCP listener the agent has to open on its side. That half
 exists because everything in the first half would still pass against a relay
 that generated correct-looking config and quietly moved no bytes at all.
 """
+import hashlib
+import io
 import os
 import socket
 import subprocess
 import sys
 import threading
 import time
+import zipfile
 
 sys.path.insert(0, os.getcwd())
 
 REPO = os.path.dirname(os.getcwd())
-AGENT = os.path.join(REPO, "deploy", "relay", "aiops_relay_node.py")
+RELAY_SRC = os.path.join(REPO, "deploy", "relay")
+AGENT = os.path.join(RELAY_SRC, "aiops_relay_node.py")
 
 for _stale in ("./test-relay.db",):
     if os.path.exists(_stale):
@@ -82,6 +86,96 @@ with TestClient(app) as c:
     check("nodes are listed", r.status_code == 200, f"{r.status_code} {r.text[:200]}")
     check("but the token is not readable afterwards", token not in body, "TOKEN LEAKED")
     check("only that a token is outstanding", r.json()[0]["enrolment_pending"] is True)
+
+    # --- the downloadable installer --------------------------------------
+    # The command above says "run this from inside that folder". Until there
+    # was a download, there was no folder: deploy/relay was not in the runtime
+    # image at all, so on a fresh Windows box — the only place the instruction
+    # mattered — it could not be followed.
+    expected_members = {
+        "linux": ["aiops_relay_node.py", "install.sh", "aiops-relay-node.service", "README.md"],
+        "windows": ["aiops_relay_node.py", "install.ps1", "uninstall.ps1", "README.md"],
+        "docker": ["aiops_relay_node.py", "Dockerfile", "docker-compose.yml", "README.md"],
+    }
+    bundles = {}
+    for platform, members in expected_members.items():
+        r = c.get(f"/api/nodes/installer/{platform}")
+        check(f"the {platform} installer downloads", r.status_code == 200,
+              f"{r.status_code} {r.text[:200]}")
+        if r.status_code != 200:
+            continue
+        check(f"the {platform} download is served as a zip",
+              r.headers.get("content-type") == "application/zip",
+              str(r.headers.get("content-type")))
+        check(f"and named so it is obvious what it is on disk ({platform})",
+              f'filename="aiops-relay-node-{platform}.zip"'
+              in r.headers.get("content-disposition", ""),
+              r.headers.get("content-disposition", ""))
+        archive = zipfile.ZipFile(io.BytesIO(r.content))
+        bundles[platform] = archive
+        check(f"the {platform} bundle holds exactly what that platform needs",
+              archive.namelist() == members, str(archive.namelist()))
+        # The whole point of not templating the token into a file: a zip in a
+        # Downloads folder outlives the token's own lifetime and is copied
+        # wherever the folder is copied.
+        leaked = [n for n in archive.namelist() if token.encode() in archive.read(n)]
+        check(f"and the enrolment token is nowhere inside it ({platform})",
+              not leaked, f"TOKEN LEAKED in {leaked}")
+
+    check("nothing anywhere in the three bundles carries the token",
+          all(token.encode() not in a.read(n) for a in bundles.values() for n in a.namelist()))
+
+    # Byte-identical, member by member, against the source the tests already
+    # run the agent from. A zip built through text mode would round-trip most
+    # of this fine and quietly rewrite the two files that cannot survive it.
+    mismatched = []
+    for platform, archive in bundles.items():
+        for name in archive.namelist():
+            with open(os.path.join(RELAY_SRC, name), "rb") as fh:
+                if hashlib.sha256(fh.read()).digest() != hashlib.sha256(archive.read(name)).digest():
+                    mismatched.append(f"{platform}/{name}")
+    check("every member is byte-identical to the file in deploy/relay",
+          not mismatched, f"altered in transit: {mismatched}")
+
+    # The property the Windows installer actually depends on. PowerShell 5.1
+    # reads a BOM-less .ps1 as ANSI, and uninstall.ps1 then fails to parse at
+    # all — a silent way to ship a node that cannot be removed.
+    if "windows" in bundles:
+        win = bundles["windows"]
+        for name in ("install.ps1", "uninstall.ps1"):
+            blob = win.read(name)
+            check(f"{name} still starts with the UTF-8 BOM after zipping",
+                  blob[:3] == b"\xef\xbb\xbf", blob[:8].hex())
+            check(f"{name} is still ASCII-only after the BOM",
+                  all(b < 128 for b in blob[3:]),
+                  next((f"byte {i} = {b:#x}" for i, b in enumerate(blob[3:]) if b >= 128), ""))
+        check("install.ps1 survives the round trip byte for byte",
+              hashlib.sha256(win.read("install.ps1")).hexdigest()
+              == hashlib.sha256(open(os.path.join(RELAY_SRC, "install.ps1"), "rb").read()).hexdigest())
+        check("uninstall.ps1 survives the round trip byte for byte",
+              hashlib.sha256(win.read("uninstall.ps1")).hexdigest()
+              == hashlib.sha256(open(os.path.join(RELAY_SRC, "uninstall.ps1"), "rb").read()).hexdigest())
+
+    # `sudo ./install.sh` is only the documented command if unzip yields
+    # something executable.
+    if "linux" in bundles:
+        modes = {i.filename: (i.external_attr >> 16) & 0o777 for i in bundles["linux"].infolist()}
+        check("install.sh unzips executable, or the documented command fails",
+              modes.get("install.sh", 0) & 0o111, oct(modes.get("install.sh", 0)))
+        check("and the README does not", not modes.get("README.md", 0) & 0o111,
+              oct(modes.get("README.md", 0)))
+
+    r = c.get("/api/nodes/installer/solaris")
+    check("an installer for a platform there is no installer for is a 404",
+          r.status_code == 404, str(r.status_code))
+    check("and the refusal says which platforms there are",
+          "windows" in r.text and "linux" in r.text, r.text[:200])
+
+    c.post("/api/auth/logout")
+    r = c.get("/api/nodes/installer/linux")
+    check("the installer is not anonymous — it is not secret, but it is not open",
+          r.status_code == 401, str(r.status_code))
+    c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
 
     # --- enrolment ------------------------------------------------------
     r = c.post("/api/relay/enroll", json={"token": f"{node_id}.wrong-secret-entirely"})
