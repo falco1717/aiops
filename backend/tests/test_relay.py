@@ -14,13 +14,18 @@ exists because everything in the first half would still pass against a relay
 that generated correct-looking config and quietly moved no bytes at all.
 """
 import asyncio
+import base64
 import fnmatch
 import hashlib
 import io
+import logging
+import math
 import os
 import socket
+import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -607,6 +612,590 @@ asyncio.run(subnet_scope_checks())
 
 
 # =====================================================================
+# How the node gets out of its own network
+# =====================================================================
+# The agent is imported here rather than only run as a subprocess, because the
+# thing under test is a decision - which proxy, which authorities, which
+# failure this was - and a decision is worth asserting directly. Everything
+# that can be exercised over a real socket is: a real proxy that answers
+# CONNECT, a real TLS server with a certificate nothing trusts by default.
+print()
+print("--- egress: proxies, certificates, and saying which failure this is ---")
+
+sys.path.insert(0, RELAY_SRC)
+import aiops_relay_node as node  # noqa: E402
+
+ENV_ALL = {
+    "HTTPS_PROXY": "http://from-https-upper:3128",
+    "https_proxy": "http://from-https-lower:3128",
+    "ALL_PROXY": "http://from-all-upper:3128",
+    "all_proxy": "http://from-all-lower:3128",
+}
+
+
+def egress(environ=None, system=(None, []), **kw):
+    """An Egress with nothing inherited from the machine running the tests."""
+    return node.Egress(environ=dict(environ or {}), system_proxy=system, **kw)
+
+
+def without(mapping, *names):
+    return {k: v for k, v in mapping.items() if k not in names}
+
+
+# --- precedence -------------------------------------------------------
+HOST = "aiops.example.com"
+
+decision = egress(ENV_ALL, ("winhttp.corp:8080", []),
+                  proxy="http://explicit:8080").proxy_for(HOST)
+check("--proxy wins over every environment variable and the machine's own settings",
+      decision.target.address == "explicit:8080" and decision.source == "--proxy",
+      str(decision))
+
+decision = egress(ENV_ALL, ("winhttp.corp:8080", [])).proxy_for(HOST)
+check("with no --proxy, HTTPS_PROXY is next",
+      decision.target.address == "from-https-upper:3128" and decision.source == "HTTPS_PROXY",
+      str(decision))
+
+decision = egress(without(ENV_ALL, "HTTPS_PROXY"), ("winhttp.corp:8080", [])).proxy_for(HOST)
+check("then its lowercase spelling",
+      decision.target.address == "from-https-lower:3128", str(decision))
+
+decision = egress(without(ENV_ALL, "HTTPS_PROXY", "https_proxy"),
+                  ("winhttp.corp:8080", [])).proxy_for(HOST)
+check("then ALL_PROXY", decision.target.address == "from-all-upper:3128", str(decision))
+
+decision = egress({}, ("winhttp.corp:8080", [])).proxy_for(HOST)
+check("and only with nothing in the environment, the machine's own WinHTTP setting",
+      decision.target.address == "winhttp.corp:8080"
+      and "WinHTTP" in decision.source, str(decision))
+
+decision = egress({}, (None, [])).proxy_for(HOST)
+check("a machine with none of them configured uses no proxy",
+      decision.target is None, str(decision))
+
+# --- NO_PROXY ---------------------------------------------------------
+decision = egress({"HTTPS_PROXY": "http://p:3128", "NO_PROXY": "example.com"}).proxy_for(HOST)
+check("NO_PROXY suppresses the proxy for a host under a domain it names (suffix match)",
+      decision.target is None, str(decision))
+check("and the reason names the entry that did it, not just 'no proxy'",
+      "'example.com'" in decision.source, decision.source)
+
+decision = egress({"HTTPS_PROXY": "http://p:3128", "NO_PROXY": HOST}).proxy_for(HOST)
+check("NO_PROXY suppresses it on an exact match too", decision.target is None, str(decision))
+
+decision = egress({"HTTPS_PROXY": "http://p:3128", "NO_PROXY": ".example.com"}).proxy_for(HOST)
+check("the leading-dot spelling means the same thing", decision.target is None, str(decision))
+
+decision = egress({"HTTPS_PROXY": "http://p:3128",
+                   "NO_PROXY": "example.com"}).proxy_for("notexample.com")
+check("but a domain is not matched as a bare string - notexample.com is not under example.com",
+      decision.target is not None, str(decision))
+
+decision = egress({"HTTPS_PROXY": "http://p:3128", "no_proxy": "*"}).proxy_for(HOST)
+check("NO_PROXY of '*' suppresses it for everything", decision.target is None, str(decision))
+
+decision = egress({"NO_PROXY": "example.com"}, ("winhttp.corp:8080", [])).proxy_for(HOST)
+check("NO_PROXY overrules the machine's own settings as well as the environment",
+      decision.target is None, str(decision))
+
+decision = egress({"NO_PROXY": "example.com"}, (None, []),
+                  proxy="http://explicit:8080").proxy_for(HOST)
+check("but NO_PROXY does not overrule an explicit --proxy, which was stated rather than inferred",
+      decision.target is not None and decision.source == "--proxy", str(decision))
+
+# --- what Windows itself says -----------------------------------------
+server, bypass = node.parse_netsh_proxy(
+    "Current WinHTTP proxy settings:\n\n"
+    "    Proxy Server(s) :  http=proxy.corp:8080;https=secure.corp:8443\n"
+    "    Bypass List     :  *.corp.local;<local>\n"
+)
+check("the https entry is the one taken out of a netsh proxy line",
+      server == "secure.corp:8443", str(server))
+check("and its bypass list is read alongside it",
+      bypass == ["*.corp.local", "<local>"], str(bypass))
+check("a machine with no proxy at all reads as no proxy",
+      node.parse_netsh_proxy("Current WinHTTP proxy settings:\n\n"
+                             "    Direct access (no proxy server).\n") == (None, []))
+check("a bare host:port with no scheme qualifier is read too",
+      node.parse_netsh_proxy("    Proxy Server(s) :  proxy.corp:8080\n")[0] == "proxy.corp:8080")
+
+decision = egress({}, ("winhttp.corp:8080", ["*.corp.local"])).proxy_for("aiops.corp.local")
+check("a host on the machine's WinHTTP bypass list is dialled directly",
+      decision.target is None, str(decision))
+decision = egress({}, ("winhttp.corp:8080", ["<local>"])).proxy_for("aiops")
+check("and <local> means a name with no dot in it, which is a spelling NO_PROXY has not got",
+      decision.target is None, str(decision))
+
+
+# --- a real proxy, answering real CONNECT requests --------------------
+class FakeProxy:
+    """A listener that speaks just enough HTTP to be a CONNECT proxy."""
+
+    def __init__(self, status=b"HTTP/1.1 200 Connection established"):
+        self.status = status
+        self.requests = []
+        self.listener = socket.socket()
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(4)
+        self.listener.settimeout(0.5)
+        self.port = self.listener.getsockname()[1]
+        self.stop = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while not self.stop.is_set():
+            try:
+                conn, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            threading.Thread(target=self._session, args=(conn,), daemon=True).start()
+        self.listener.close()
+
+    def _session(self, conn):
+        head = b""
+        try:
+            while b"\r\n\r\n" not in head and len(head) < 65536:
+                chunk = conn.recv(1)
+                if not chunk:
+                    break
+                head += chunk
+            self.requests.append(head.decode("latin-1"))
+            conn.sendall(self.status + b"\r\n\r\n")
+            # Held open so the client sees a tunnel rather than a reset.
+            while not self.stop.is_set():
+                if not conn.recv(4096):
+                    break
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def close(self):
+        self.stop.set()
+
+
+accepting = FakeProxy()
+try:
+    sock, decision = egress(proxy=f"http://127.0.0.1:{accepting.port}").dial(
+        HOST, 443, timeout=10)
+    sock.close()
+    request = accepting.requests[0] if accepting.requests else ""
+    lines = [line for line in request.split("\r\n") if line]
+    check("the CONNECT request names the host and port being tunnelled to",
+          lines and lines[0] == f"CONNECT {HOST}:443 HTTP/1.1", str(lines[:1]))
+    check("and carries a Host header for the destination, not the proxy",
+          f"Host: {HOST}:443" in lines, str(lines))
+    # The one thing that must never be in it. Everything up to the 200 crosses
+    # the proxy hop in the clear and lands in the proxy's access log.
+    check("the node's own credential is not in the CONNECT request",
+          not any(line.lower().startswith("authorization:") for line in lines), str(lines))
+    check("and an unauthenticated proxy is sent no Proxy-Authorization either",
+          not any(line.lower().startswith("proxy-authorization:") for line in lines), str(lines))
+
+    # --- Basic auth, and keeping the password out of everything else ---
+    accepting.requests.clear()
+    sock, _ = egress(proxy=f"http://bob:s3cr3t-p4ss@127.0.0.1:{accepting.port}").dial(
+        HOST, 443, timeout=10)
+    sock.close()
+    request = accepting.requests[0] if accepting.requests else ""
+    expected = "Proxy-Authorization: Basic " + base64.b64encode(b"bob:s3cr3t-p4ss").decode()
+    check("a proxy URL with credentials sends them as HTTP Basic in the CONNECT request",
+          expected in request, request.split("\r\n")[0])
+
+    target = node.parse_proxy(f"http://bob:s3cr3t-p4ss@127.0.0.1:{accepting.port}")
+    check("the safe spelling of a proxy URL has the password taken out",
+          "s3cr3t-p4ss" not in target.safe_url and "bob" in target.safe_url, target.safe_url)
+    check("and so does its repr, so an accidental %r in a log line is still safe",
+          "s3cr3t-p4ss" not in repr(target), repr(target))
+finally:
+    accepting.close()
+
+# --- a proxy that will not tunnel -------------------------------------
+refusing = FakeProxy(status=b"HTTP/1.1 407 Proxy Authentication Required")
+try:
+    captured = io.StringIO()
+    handler = logging.StreamHandler(captured)
+    node.log.addHandler(handler)
+    try:
+        node.WebSocket.connect(
+            f"wss://{HOST}/api/relay/connect",
+            {"Authorization": "Bearer 1.super-secret-node-credential"},
+            egress=egress(proxy=f"http://bob:s3cr3t-p4ss@127.0.0.1:{refusing.port}"),
+            timeout=10,
+        )
+        proxy_failure = None
+    except node.EgressError as exc:
+        proxy_failure = exc
+    finally:
+        node.log.removeHandler(handler)
+
+    check("a proxy that answers CONNECT with anything but 200 is its own named failure",
+          isinstance(proxy_failure, node.ProxyRefusedConnect), type(proxy_failure).__name__)
+    check("the refusal quotes the proxy's own status line, which is the only clue it gave",
+          proxy_failure is not None
+          and "407 Proxy Authentication Required" in proxy_failure.status_line,
+          str(getattr(proxy_failure, "status_line", "")))
+    check("and the message says what 407 means and how to answer it",
+          proxy_failure is not None and "--proxy http://user:password@host:port" in str(proxy_failure),
+          str(proxy_failure)[:200])
+    check("neither the proxy password nor the node credential is anywhere in what was logged",
+          "s3cr3t-p4ss" not in captured.getvalue() + str(proxy_failure)
+          and "super-secret-node-credential" not in captured.getvalue() + str(proxy_failure),
+          "SECRET LEAKED")
+finally:
+    refusing.close()
+
+
+# --- a corporate certificate authority --------------------------------
+# The certificate is built here rather than fetched or committed: a committed
+# one expires, and reaching the network for one makes this test a network test.
+# The key is a fixed throwaway pair so no time is spent generating primes.
+def _der(tag, body):
+    if len(body) < 0x80:
+        return bytes([tag, len(body)]) + body
+    length = len(body).to_bytes((len(body).bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(length)]) + length + body
+
+
+def _der_int(value):
+    body = value.to_bytes((value.bit_length() + 7) // 8 or 1, "big")
+    # DER wants the shortest encoding, with one leading zero only when the top
+    # bit would otherwise read as a sign bit.
+    return _der(0x02, b"\x00" + body if body[0] & 0x80 else body)
+
+
+def _der_seq(*parts):
+    return _der(0x30, b"".join(parts))
+
+
+def _der_oid(dotted):
+    numbers = [int(n) for n in dotted.split(".")]
+    body = bytes([40 * numbers[0] + numbers[1]])
+    for number in numbers[2:]:
+        chunk = [number & 0x7F]
+        number >>= 7
+        while number:
+            chunk.append((number & 0x7F) | 0x80)
+            number >>= 7
+        body += bytes(reversed(chunk))
+    return _der(0x06, body)
+
+
+def _der_name(common_name):
+    return _der_seq(_der(0x31, _der_seq(_der_oid("2.5.4.3"), _der(0x0C, common_name.encode()))))
+
+
+def self_signed(common_name, p, q, days=2):
+    """A self-signed CA certificate for `common_name`, and its private key.
+
+    Signed with SHA-256 and RSA PKCS#1 v1.5, by hand. Debian's OpenSSL refuses
+    anything under 2048 bits at its default security level, which is why the
+    fixed key below is a 2048-bit one.
+    """
+    n = p * q
+    e = 65537
+    lam = (p - 1) * (q - 1) // math.gcd(p - 1, q - 1)
+    d = pow(e, -1, lam)
+
+    public = _der_seq(
+        _der_seq(_der_oid("1.2.840.113549.1.1.1"), _der(0x05, b"")),
+        _der(0x03, b"\x00" + _der_seq(_der_int(n), _der_int(e))),
+    )
+    algorithm = _der_seq(_der_oid("1.2.840.113549.1.1.11"), _der(0x05, b""))
+    now = time.gmtime()
+    then = time.gmtime(time.time() + days * 86400)
+    validity = _der_seq(
+        _der(0x17, time.strftime("%y%m%d%H%M%SZ", now).encode()),
+        _der(0x17, time.strftime("%y%m%d%H%M%SZ", then).encode()),
+    )
+    extensions = _der(0xA3, _der_seq(
+        # basicConstraints CA:TRUE, critical - so it is usable as a trust anchor
+        _der_seq(_der_oid("2.5.29.19"), _der(0x01, b"\xff"),
+                 _der(0x04, _der_seq(_der(0x01, b"\xff")))),
+        # subjectAltName, which is the only name modern TLS clients look at
+        _der_seq(_der_oid("2.5.29.17"),
+                 _der(0x04, _der_seq(_der(0x82, common_name.encode())))),
+    ))
+    tbs = _der_seq(
+        _der(0xA0, _der_int(2)),
+        _der_int(0x0D1CE5),
+        algorithm,
+        _der_name(common_name),
+        validity,
+        _der_name(common_name),
+        public,
+        extensions,
+    )
+    digest = _der_seq(_der_seq(_der_oid("2.16.840.1.101.3.4.2.1"), _der(0x05, b"")),
+                      _der(0x04, hashlib.sha256(tbs).digest()))
+    block = b"\x00\x01" + b"\xff" * (256 - len(digest) - 3) + b"\x00" + digest
+    signature = pow(int.from_bytes(block, "big"), d, n).to_bytes(256, "big")
+    certificate = _der_seq(tbs, algorithm, _der(0x03, b"\x00" + signature))
+
+    key = _der_seq(_der_int(0), _der_int(n), _der_int(e), _der_int(d), _der_int(p),
+                   _der_int(q), _der_int(d % (p - 1)), _der_int(d % (q - 1)),
+                   _der_int(pow(q, -1, p)))
+
+    def pem(label, blob):
+        body = base64.b64encode(blob).decode()
+        rows = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+        return f"-----BEGIN {label}-----\n{rows}\n-----END {label}-----\n"
+
+    return pem("CERTIFICATE", certificate), pem("RSA PRIVATE KEY", key)
+
+
+# A throwaway pair, generated once and pinned here so the suite spends no time
+# looking for primes. It signs one certificate, for one test, on loopback.
+TEST_P = 161175268180548338468286987732121202695029086591410236496811140200545303029290478588142846460251925915358608970114585408108234018703677732525547099383162214702601983930002986858349239181703444352054430385749463243120819169266735303267605337210872171574914369399642221614941762483150099973287351220519038294217
+TEST_Q = 121535150040561944295174318042789196943508492774465554703480320957299174536185804543296383702661740101221579523959584673964299564768658897994202327919956412402541113277638053506125660709456977537250207046028543314270297794319255194634143379218675583823011463592539839479551112324873858103498605269635634972629
+
+cert_pem, key_pem = self_signed("localhost", TEST_P, TEST_Q)
+bundle_dir = tempfile.mkdtemp(prefix="aiops-relay-ca-")
+CERT_FILE = os.path.join(bundle_dir, "server.pem")
+KEY_FILE = os.path.join(bundle_dir, "server.key")
+CA_FILE = os.path.join(bundle_dir, "corporate-ca.pem")
+for path, text in ((CERT_FILE, cert_pem), (KEY_FILE, key_pem), (CA_FILE, cert_pem)):
+    with open(path, "w") as fh:
+        fh.write(text)
+
+server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+server_context.load_cert_chain(CERT_FILE, KEY_FILE)
+tls_listener = socket.socket()
+tls_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+tls_listener.bind(("127.0.0.1", 0))
+tls_listener.listen(8)
+tls_listener.settimeout(0.5)
+TLS_PORT = tls_listener.getsockname()[1]
+tls_stop = threading.Event()
+
+
+def serve_tls():
+    while not tls_stop.is_set():
+        try:
+            conn, _ = tls_listener.accept()
+        except socket.timeout:
+            continue
+
+        def handshake(raw):
+            try:
+                wrapped = server_context.wrap_socket(raw, server_side=True)
+                wrapped.recv(4096)
+                wrapped.close()
+            except (OSError, ssl.SSLError):
+                try:
+                    raw.close()
+                except OSError:
+                    pass
+
+        threading.Thread(target=handshake, args=(conn,), daemon=True).start()
+    tls_listener.close()
+
+
+threading.Thread(target=serve_tls, daemon=True).start()
+
+raw = node.tcp_connect("localhost", TLS_PORT, 10)
+try:
+    egress().wrap(raw, "localhost")
+    default_verdict = None
+except node.EgressError as exc:
+    default_verdict = exc
+check("a certificate signed by an authority nobody knows is refused by default",
+      isinstance(default_verdict, node.CertificateNotTrusted), type(default_verdict).__name__)
+check("and the refusal says the word certificate and names --ca-bundle as the answer",
+      default_verdict is not None and "certificate" in str(default_verdict)
+      and "--ca-bundle" in str(default_verdict), str(default_verdict)[:200])
+check("while telling the reader not to reach for --insecure instead",
+      default_verdict is not None and "--insecure" in str(default_verdict),
+      str(default_verdict)[:300])
+
+raw = node.tcp_connect("localhost", TLS_PORT, 10)
+try:
+    trusted = egress(ca_bundle=CA_FILE).wrap(raw, "localhost")
+    bundle_worked = trusted.getpeercert() is not None
+    trusted.close()
+except node.EgressError as exc:
+    bundle_worked = False
+    print(f"    (--ca-bundle handshake failed: {exc})")
+check("the very same certificate is trusted once --ca-bundle names its authority",
+      bundle_worked, "the bundle was loaded and the handshake still failed")
+
+# Additive, not a replacement: a node given a corporate authority must not
+# quietly stop trusting everything else it used to.
+public_authorities = len(ssl.create_default_context().get_ca_certs())
+with_bundle = len(egress(ca_bundle=CA_FILE).tls_context().get_ca_certs())
+check("and the machine's own authorities are still trusted alongside it",
+      with_bundle == public_authorities + 1, f"{public_authorities} -> {with_bundle}")
+
+tls_stop.set()
+
+
+# --- one message per way of failing -----------------------------------
+# The complaint this answers: every one of these used to arrive as the same
+# opaque OSError in the same log line, and they have different fixes.
+messages = {}
+
+try:
+    node.tcp_connect("aiops.nothing-resolves-here.invalid", 443, 5)
+except node.EgressError as exc:
+    messages["DNS"] = exc
+check("a name that does not resolve is its own failure",
+      isinstance(messages.get("DNS"), node.NameNotResolved),
+      type(messages.get("DNS")).__name__)
+
+with socket.socket() as probe:
+    probe.bind(("127.0.0.1", 0))
+    shut_port = probe.getsockname()[1]
+try:
+    node.tcp_connect("127.0.0.1", shut_port, 5)
+except node.EgressError as exc:
+    messages["REFUSED"] = exc
+check("a port with nothing behind it is a different failure from a name that does not resolve",
+      isinstance(messages.get("REFUSED"), node.TCPRefused),
+      type(messages.get("REFUSED")).__name__)
+
+# Timeouts and dead routes are classified rather than provoked: producing a
+# real one means finding an address that blackholes, which is a property of
+# whatever network the suite happens to run on.
+real_connect = socket.create_connection
+for label, raised, expected in (
+    ("TIMEOUT", socket.timeout("timed out"), node.TCPTimedOut),
+    ("UNREACHABLE", OSError(101, "Network is unreachable"), node.NetworkUnreachable),
+):
+    def refuse(*_args, **_kwargs):
+        raise raised
+
+    socket.create_connection = refuse
+    try:
+        node.tcp_connect("aiops.example.com", 443, 5)
+    except node.EgressError as exc:
+        messages[label] = exc
+    finally:
+        socket.create_connection = real_connect
+    check(f"a {label.lower()} dial is classified as itself",
+          isinstance(messages.get(label), expected), type(messages.get(label)).__name__)
+
+messages["PROXY"] = proxy_failure
+messages["TLS"] = default_verdict
+
+
+# AIOps answering the upgrade: 401 is a credential, anything else is not.
+def http_answerer(status):
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(2)
+    port = listener.getsockname()[1]
+
+    def serve():
+        try:
+            conn, _ = listener.accept()
+            head = b""
+            while b"\r\n\r\n" not in head and len(head) < 65536:
+                chunk = conn.recv(1)
+                if not chunk:
+                    break
+                head += chunk
+            conn.sendall(status + b"\r\nContent-Length: 0\r\n\r\n")
+            conn.close()
+        except OSError:
+            pass
+        finally:
+            listener.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return port
+
+
+for label, status, expected in (
+    ("AUTH", b"HTTP/1.1 401 Unauthorized", node.CredentialRejected),
+    ("HTTP", b"HTTP/1.1 502 Bad Gateway", node.UpgradeRefused),
+):
+    port = http_answerer(status)
+    try:
+        node.WebSocket.connect(f"ws://127.0.0.1:{port}/api/relay/connect",
+                               {"Authorization": "Bearer 1.x"}, egress=egress(), timeout=10)
+    except node.EgressError as exc:
+        messages[label] = exc
+    check(f"the server answering {status.decode().split()[1]} is classified as {expected.__name__}",
+          isinstance(messages.get(label), expected), type(messages.get(label)).__name__)
+
+check("a revoked or deleted credential is called that, and not a network fault",
+      "AUTH" in messages and "not a network fault" in str(messages["AUTH"]),
+      str(messages.get("AUTH"))[:200])
+
+spoken = {label: str(exc) for label, exc in messages.items() if exc is not None}
+check("all eight ways of failing produced a message",
+      len(spoken) == 8, str(sorted(spoken)))
+check("and no two of them say the same thing, which is the entire point",
+      len(set(spoken.values())) == len(spoken), str(sorted(spoken)))
+check("each names its own kind up front, so a log can be read without guessing",
+      {text.split(":")[0] for text in spoken.values()}
+      == {"DNS", "TCP", "PROXY", "TLS", "AUTH", "HTTP"},
+      str({label: text.split(":")[0] for label, text in spoken.items()}))
+
+
+# --- what the installers persist --------------------------------------
+# The setting has to survive a restart. A proxy that only applied to the run
+# that installed the node is a proxy that works once.
+ps1 = open(os.path.join(RELAY_SRC, "install.ps1"), encoding="utf-8-sig").read()
+sh = open(os.path.join(RELAY_SRC, "install.sh")).read()
+compose_text = open(os.path.join(RELAY_SRC, "docker-compose.yml")).read()
+
+check("install.ps1 takes a proxy and a CA bundle",
+      "[string]$Proxy" in ps1 and "[string]$CaBundle" in ps1)
+check("and writes both into the config the service reads on every start",
+      "$Proxy\n    $installedCaBundle" in ps1.replace("\r\n", "\n"), "agent.cfg")
+check("and the service host passes them to the agent",
+      '--proxy \\"' in ps1 and '--ca-bundle \\"' in ps1)
+check("and enrolment is given the same proxy, or it fails on the machines it is for",
+      '$enrolArgs += @("--proxy", $Proxy)' in ps1)
+check("install.sh takes the same two, spelled the way a shell spells them",
+      "--proxy) PROXY=" in sh and "--ca-bundle) CA_BUNDLE=" in sh)
+check("and persists them into the unit's environment file",
+      "AIOPS_RELAY_PROXY=$PROXY" in sh and "AIOPS_RELAY_CA_BUNDLE=$INSTALLED_CA" in sh)
+check("which stops being world-readable, because a proxy URL carries a password",
+      "chmod 0640 \"$CONF_DIR/node.env\"" in sh and "chmod 0644 \"$CONF_DIR/node.env\"" not in sh)
+check("the docker path offers them as environment variables too",
+      "AIOPS_RELAY_PROXY:" in compose_text and "AIOPS_RELAY_CA_BUNDLE:" in compose_text)
+
+
+# --- the interpreter the service is given -----------------------------
+# Found live, and this is the whole of it: the installer wrote the Python that
+# answered on the administrator's PATH into the service's configuration. It was
+# a per-user install, the service account could not run it, and the node
+# reported Running while the agent died instantly with no output at all.
+check("install.ps1 refuses an interpreter inside a user profile",
+      "function Test-InsideUserProfile" in ps1 and "Test-InsideUserProfile -Path" in ps1)
+check("and checks the permissions the service account would actually have",
+      "function Test-ServiceCanExecute" in ps1)
+check("and proves a candidate by running it rather than by trusting its path",
+      "AIOPS-RELAY-INTERPRETER-OK" in ps1)
+check("and names the machine-wide fix when it refuses",
+      ps1.count("winget install --id Python.Python.3.12 --scope machine") >= 2,
+      "the refusal and the post-start failure must both say how to fix it")
+check("and the service host says it too, since it is what a running node reports",
+      ps1.count("winget install --id ") >= 4, "the C# host builds the same advice")
+check("the interpreter it chose is printed, because that is the setting that was wrong",
+      'Write-Host ("  Python:' in ps1)
+check("the service host names the interpreter in the log the operator reads",
+      "starting the agent with interpreter: " in ps1)
+check("an agent that exits having said nothing is reported as that, not as a bare code",
+      "having written nothing at " in ps1)
+# The reason the failure was invisible for as long as it was: the message
+# naming it could not be written while the log file was still held open.
+check("and that diagnosis is emitted only after the log file has been let go of",
+      ps1.index("if (deferred != null)") > ps1.index("if (writer != null) { try { writer.Dispose(); } catch { } }"),
+      "the deferred message must come after the finally that disposes the writer")
+check("re-running the installer rewrites the interpreter, so it repairs a broken node",
+      "$configPath = Join-Path $InstallDir \"agent.cfg\"" in ps1 and "Rewritten in full on every run" in ps1)
+check("and it starts the service and checks the agent actually speaks, as the service account",
+      "Checking that the service account can actually run the agent" in ps1)
+check("the agent says which interpreter it is running on, every time it starts",
+      "running on %s (Python %s)" in open(AGENT, encoding="utf-8").read())
+
+
+# =====================================================================
 # Part two: bytes, end to end, through the real agent
 # =====================================================================
 print()
@@ -719,6 +1308,29 @@ try:
     check("once approved, the agent connects and stays connected", row is not None, str(row)[:200])
     check("and AIOps records what it is", row and row["version"] == "1.0.0")
 
+    # --- what the owner runs on the laptop when it says "not connected" ---
+    # Against the same live server, over the same code path the service uses,
+    # because a diagnosis that agrees with a working node is the only way to
+    # know it will disagree with a broken one.
+    verdict = subprocess.run(
+        [sys.executable, AGENT, "--url", f"http://127.0.0.1:{API_PORT}",
+         "--state-dir", STATE_DIR, "--diagnose"],
+        capture_output=True, text=True, timeout=60,
+    )
+    said = verdict.stdout
+    check("--diagnose walks the whole dial and reaches a conclusion",
+          verdict.returncode == 0 and "Conclusion" in said, said[-400:])
+    for step in ("1. Name resolution", "2. Proxy", "3. TCP connection",
+                 "4. Proxy tunnel", "5. TLS", "6. AIOps handshake"):
+        check(f"and reports {step[3:]}", step in said, said[:600])
+    check("it says which proxy it would use and where it learned that from",
+          "no proxy" in said or "in use" in said, said[:600])
+    check("and it names the interpreter it is running on, which is a thing that can be wrong",
+          sys.executable in said, said[:600])
+    check("a working node is told so in words rather than in a status code",
+          "can reach AIOps from this machine right now" in said, said[-500:])
+    check("nothing in a diagnosis is a stack trace", "Traceback" not in said, said[-400:])
+
     # --- the actual bytes ------------------------------------------------
     allowed = relay.tokens.issue({(live_slug, "127.0.0.1", ECHO_PORT)})
     helper_env = {
@@ -830,6 +1442,7 @@ finally:
 import shutil  # noqa: E402
 
 shutil.rmtree(STATE_DIR, ignore_errors=True)
+shutil.rmtree(bundle_dir, ignore_errors=True)
 
 print()
 if failures:

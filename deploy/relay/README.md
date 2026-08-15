@@ -39,6 +39,9 @@ rule to open and it works behind NAT.
 sudo ./install.sh --url https://aiops.example.com --token <enrolment token>
 ```
 
+Add `--proxy` and `--ca-bundle` if this network needs them; see *Getting out of
+a corporate network* below.
+
 Creates a system account `aiops-relay` with no shell, installs the agent at
 `/opt/aiops-relay`, its credential at `/var/lib/aiops-relay/credential` (mode
 0600), and the unit `aiops-relay-node.service`. The unit is
@@ -66,13 +69,50 @@ reject the script as unsigned — that is the `is not digitally signed` error.
 the machine. If it still refuses, the policy is coming from Group Policy: check
 `Get-ExecutionPolicy -List` for a `MachinePolicy` or `UserPolicy` entry.
 
-Needs Python 3 (`winget install --id Python.Python.3.12 --scope machine`). The
-agent is the same one file as on Linux and in Docker: a second implementation
-in PowerShell would be a second thing to get right, and only one of them could
-be covered by the test suite. Windows will not run a script as a service, so
-the installer compiles a small service host with the C# compiler that ships
-with the .NET Framework — nothing is downloaded — and that host runs the agent
-and restarts it if it stops.
+Needs Python 3, installed **for the whole machine**:
+
+```powershell
+winget install --id Python.Python.3.12 --scope machine
+```
+
+`--scope machine` is not a preference. A per-user Python — anything under
+`C:\Users\<name>\`, which covers the Microsoft Store app execution aliases, the
+Python install manager's runtimes in `%LocalAppData%\Python\pythoncore-*`, and
+a plain per-user installer — cannot be used by a service. Measured on a real
+node: with the interpreter at
+`%LocalAppData%\Python\pythoncore-3.14-64\python.exe` the service reported
+*Running* and the agent process died instantly with exit code `-1` and not one
+line of output; repointed at `C:\Program Files\Python312\python.exe`, with
+nothing else changed, it connected within a second. The installer now refuses a
+per-user interpreter rather than writing it into the service's configuration,
+and says so with the command above.
+
+The agent is the same one file as on Linux and in Docker: a second
+implementation in PowerShell would be a second thing to get right, and only one
+of them could be covered by the test suite. Windows will not run a script as a
+service, so the installer compiles a small service host with the C# compiler
+that ships with the .NET Framework — nothing is downloaded — and that host runs
+the agent and restarts it if it stops.
+
+**Re-running the installer repairs a node.** It re-resolves the interpreter and
+rewrites the service's configuration, and it leaves the state directory alone,
+so the node keeps the credential it already has and needs no new enrolment
+token:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Url https://aiops.example.com
+```
+
+After starting the service the installer waits for the agent to say something,
+and fails loudly if it does not. That is the only check made under the account
+the service actually runs as; everything before it is checked as the
+administrator running the script, and the whole failure above lives in the gap
+between those two views of the machine.
+
+If a log holds only `service host:` lines and no timestamped agent output, the
+agent process never started. The reason is in the Application event log under
+the service's own name — not in that file — and the `errors:` command below is
+how to read it.
 
 The service runs as the virtual account `NT SERVICE\AIOpsRelayNode`, which has
 no password and no rights beyond its own state directory. Both PowerShell
@@ -154,9 +194,96 @@ cannot reach yet.
 --url URL           where AIOps is
 --token TOKEN       one-time enrolment token (only needed once)
 --state-dir DIR     where the credential lives (default /var/lib/aiops-relay)
+--proxy URL         HTTP CONNECT proxy to reach AIOps through
+--ca-bundle PATH    PEM file of extra certificate authorities to trust
 --insecure          skip TLS verification; for a self-signed AIOps only
 --enrol-only        exchange the token for a credential and exit
+--diagnose          say why this machine cannot reach AIOps, and stop
 ```
 
 Each also reads from the environment: `AIOPS_RELAY_URL`, `AIOPS_RELAY_TOKEN`,
-`AIOPS_RELAY_STATE_DIR`, `AIOPS_RELAY_INSECURE`.
+`AIOPS_RELAY_STATE_DIR`, `AIOPS_RELAY_PROXY`, `AIOPS_RELAY_CA_BUNDLE`,
+`AIOPS_RELAY_INSECURE`.
+
+## Getting out of a corporate network
+
+A node dials out. On a network that will not let it, the reason is one of a
+small number of things, and the agent now names which:
+
+**A proxy.** If this network requires an HTTP proxy to reach anything outside
+it, give the node one. The proxy is used for the running connection *and* for
+enrolment, which also dials out.
+
+```sh
+sudo ./install.sh --url https://aiops.example.com --token <token> \
+                  --proxy http://proxy.corp.example:8080
+```
+
+Credentials go in the URL (`http://user:password@proxy:8080`) and are sent as
+HTTP Basic in the `CONNECT` request. They are never written to a log, and the
+node's own AIOps credential never crosses the proxy hop — it travels inside the
+TLS session that is established after the tunnel opens.
+
+The proxy is chosen in this order, first match wins:
+
+1. `--proxy` (or `AIOPS_RELAY_PROXY`), which is what the installers persist
+2. `NO_PROXY` / `no_proxy` — if it covers the AIOps host, no proxy is used
+3. `HTTPS_PROXY`, then `https_proxy`
+4. `ALL_PROXY`, then `all_proxy`
+5. on Windows, the machine's WinHTTP settings and their bypass list
+
+`NO_PROXY` deliberately does not override an explicit `--proxy`: somebody who
+names a proxy on the command line has said what they want. It overrules
+everything that is inferred rather than stated.
+
+Windows reads **WinHTTP** (`netsh winhttp show proxy`), not the per-user
+Internet Options settings. The relay runs as a service under an account with no
+interactive logon and no user hive of its own, so a proxy configured in
+somebody's browser is in a registry hive that process cannot see. WinHTTP is
+the machine-wide one a service inherits; an administrator populates it with
+`netsh winhttp import proxy source=ie`.
+
+**TLS inspection.** A gateway that re-signs certificates makes verification
+fail. The fix is to trust that gateway's authority, not to stop verifying:
+
+```sh
+sudo ./install.sh --url https://aiops.example.com --token <token> \
+                  --ca-bundle /etc/pki/corp-root.pem
+```
+
+`--ca-bundle` is additive — the system's own authorities stay trusted — so
+verification keeps happening. Reach for it before `--insecure`, which turns
+verification off entirely for the handshake the enrolment credential travels
+in. On both installers the file is copied in beside the node's configuration,
+because the path you pass is usually somewhere the service account cannot read.
+
+**Which of them it is.** `--diagnose` runs the whole dial one stage at a time
+and prints a conclusion in words:
+
+```
+1. Name resolution    OK            aiops.example.com -> 203.0.113.10
+2. Proxy              in use        http://proxy.corp.example:8080 (from HTTPS_PROXY)
+3. TCP connection     OK            the proxy at proxy.corp.example:8080 in 0.03s
+4. Proxy tunnel       FAILED        HTTP/1.1 407 Proxy Authentication Required
+5. TLS                not attempted
+6. AIOps handshake    not attempted
+
+Conclusion
+  The proxy is reachable and will not tunnel to AIOps.
+
+  PROXY: http://proxy.corp.example:8080 refused to open a tunnel to
+  aiops.example.com:443. It answered: 'HTTP/1.1 407 Proxy Authentication
+  Required'. That is 'proxy authentication required': put the credentials in
+  the proxy URL, as --proxy http://user:password@host:port.
+```
+
+It also prints the interpreter it is running under and the account it is
+running as, because a node can fail with a perfect network and an interpreter
+its service account cannot execute — and nothing about the network says so.
+
+Each of these is its own log line at runtime too, so a node that cannot connect
+says which one it is: a name that did not resolve, a refused port, a connection
+that timed out, a proxy that would not tunnel (with the proxy's own status
+line), a certificate that was not trusted (naming `--ca-bundle`), or AIOps
+answering 401/403 — which is a revoked or deleted credential and not a network
+fault at all.

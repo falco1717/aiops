@@ -26,10 +26,21 @@ services:
       # Only read on first start. Once the credential volume below holds a
       # credential, the token is ignored — it was single-use anyway.
       AIOPS_RELAY_TOKEN: ${AIOPS_RELAY_TOKEN:-}
+      # An HTTP CONNECT proxy to reach AIOps through, if this network requires
+      # one to get out. Takes precedence over HTTPS_PROXY and ALL_PROXY, and
+      # applies to enrolment as well as to the running connection.
+      AIOPS_RELAY_PROXY: ${AIOPS_RELAY_PROXY:-}
+      # Extra certificate authorities to trust, for a network that inspects
+      # TLS. Mount the file in with the volume below and name it here. This is
+      # the setting to reach for before AIOPS_RELAY_INSECURE.
+      AIOPS_RELAY_CA_BUNDLE: ${AIOPS_RELAY_CA_BUNDLE:-}
       # Set to 1 only for an AIOps with a self-signed certificate.
       AIOPS_RELAY_INSECURE: ${AIOPS_RELAY_INSECURE:-0}
     volumes:
       - relay-state:/var/lib/aiops-relay
+      # Uncomment, with AIOPS_RELAY_CA_BUNDLE=/etc/aiops-relay/ca-bundle.pem,
+      # to hand the node a corporate certificate authority to trust.
+      # - ./ca-bundle.pem:/etc/aiops-relay/ca-bundle.pem:ro
     # Everything the node is asked to connect to is on stdout, so
     # `docker logs -f aiops-relay-node` is the whole audit trail.
     logging:

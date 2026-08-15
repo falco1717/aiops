@@ -19,8 +19,26 @@
     The service runs under its own virtual account, NT SERVICE\AIOpsRelayNode,
     which has no password and no rights beyond the state directory.
 
+    The interpreter is chosen for the service, not for whoever runs this. It
+    must be one the service account can execute, which a Python installed for a
+    single user is not: it lives inside that user's profile, which Windows
+    grants to SYSTEM, administrators and its owner and to nobody else. This
+    installer refuses such an interpreter rather than writing it into the
+    service's configuration and letting the node fail silently afterwards.
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Url https://aiops.example.com -Token <enrolment token>
+
+.EXAMPLE
+    Through a corporate HTTP proxy, trusting the gateway that re-signs TLS:
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Url https://aiops.example.com -Token <enrolment token> -Proxy http://proxy.corp.example:8080 -CaBundle C:\corp-ca.pem
+
+.EXAMPLE
+    Repair a node that is installed and not connecting. No token is needed: the
+    credential it already has is kept, and the interpreter is re-resolved.
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Url https://aiops.example.com
 
 .NOTES
     Remove it with:
@@ -55,6 +73,16 @@ param(
     [string]$ServiceName = "AIOpsRelayNode",
     [string]$InstallDir = "$env:ProgramFiles\AIOps Relay Node",
     [string]$StateDir = "$env:ProgramData\AIOps Relay Node",
+    # An HTTP CONNECT proxy to reach AIOps through, e.g.
+    # http://proxy.corp.example:8080 - with credentials in the URL if it wants
+    # them. Persisted, so the service uses it on every restart and not only on
+    # the run that installed it.
+    [string]$Proxy = "",
+    # A PEM file of extra certificate authorities to trust. This is the answer
+    # to a corporate gateway that re-signs TLS, and it is the answer to prefer
+    # over -Insecure, which switches verification off for the handshake the
+    # enrolment credential travels in.
+    [string]$CaBundle = "",
     [switch]$Insecure
 )
 
@@ -73,27 +101,224 @@ function Assert-Admin {
     exit 1
 }
 
-function Find-Python {
-    # `py` first: it is the launcher Windows installs and it knows about every
-    # Python on the machine, including ones not on PATH.
-    foreach ($candidate in @("py", "python3", "python")) {
-        $found = Get-Command $candidate -ErrorAction SilentlyContinue
-        if (-not $found) { continue }
-        # Not $args: that is an automatic variable, and assigning to it works by
-        # accident rather than by design.
-        $probeArgs = if ($candidate -eq "py") { @("-3", "-c", "import sys;print(sys.executable)") }
-                     else { @("-c", "import sys;print(sys.executable)") }
-        $path = & $found.Source @probeArgs 2>$null
-        if ($LASTEXITCODE -eq 0 -and $path) { return $path.Trim() }
-    }
-    throw @"
-Python 3 was not found. The relay agent is one stdlib-only Python file, shared
-with the Linux and Docker installers. Install it with:
+$script:NoMachinePython = @"
+No machine-wide Python 3 was found.
+
+The relay runs as a Windows *service*, under an account that is not you. A
+Python installed for one user cannot be used by a machine-wide service: the
+interpreter sits inside that user's profile, which Windows grants to SYSTEM,
+to administrators and to its owner and to nobody else. The service is none of
+those, so it is refused the moment it tries to start the agent - and what you
+see is a service reporting Running while the node never connects.
+
+That is not a theory. It is the failure this check exists to stop, and it is
+why the installer will not simply use whatever Python answers on your PATH.
+
+Install Python for the whole machine:
 
     winget install --id Python.Python.3.12 --scope machine
 
-then run this script again.
+then run this script again. An existing broken install is repaired by re-running
+it: the interpreter is re-resolved and rewritten, and the node keeps the
+credential it already has.
 "@
+
+function Test-ServiceCanExecute {
+    <#
+        Whether the account this service will run as could execute $Path.
+
+        Read off the DACL rather than guessed from the path. A virtual service
+        account's token carries Everyone, Authenticated Users, BUILTIN\Users and
+        NT AUTHORITY\SERVICE and nothing else that matters here, so the question
+        is whether one of those is granted traverse/execute on the file and on
+        every directory above it. Measured on a real machine, a per-user Python
+        grants exactly three principals - SYSTEM, Administrators and the owning
+        user - and the service account is none of them.
+
+        Honest about what it is: this reads permissions, it does not run the
+        interpreter as the service account. There is no supported way to do that
+        before the service exists. The real execution test happens after the
+        service is started, at the bottom of this script, under the account that
+        will actually be doing it.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $wanted = @("S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-5-6")
+    $execute = [Security.AccessControl.FileSystemRights]::ExecuteFile  # == Traverse on a directory
+    $current = $Path
+    while ($current) {
+        try { $acl = Get-Acl -LiteralPath $current -ErrorAction Stop } catch { return $false }
+        $allowed = $false
+        foreach ($ace in $acl.Access) {
+            $sid = $null
+            try {
+                $sid = $ace.IdentityReference.Translate(
+                    [Security.Principal.SecurityIdentifier]).Value
+            } catch { continue }
+            if ($wanted -notcontains $sid) { continue }
+            if (([int]$ace.FileSystemRights -band [int]$execute) -eq 0) { continue }
+            # A Deny anywhere on the path settles it, whatever else is granted.
+            if ($ace.AccessControlType -eq "Deny") { return $false }
+            $allowed = $true
+        }
+        if (-not $allowed) { return $false }
+        $parent = Split-Path -Parent $current
+        if (-not $parent -or $parent -eq $current) { break }
+        $current = $parent
+    }
+    return $true
+}
+
+function Test-InsideUserProfile {
+    <#
+        Whether $Path lives inside somebody's profile. A second, independent
+        signal from the permission check above, and it catches the case that
+        check cannot: a machine where the profile happens to be readable, where
+        an interpreter under it is still the wrong thing for a service - it
+        disappears when that user is removed, and it is per-user by definition.
+
+        This is the general condition, not a list of layouts. Store app
+        execution aliases (%LocalAppData%\Microsoft\WindowsApps), the Python
+        install manager's runtimes (%LocalAppData%\Python\pythoncore-*) and a
+        plain per-user installer (%LocalAppData%\Programs\Python) are all just
+        instances of "under C:\Users".
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $full = ""
+    try { $full = [IO.Path]::GetFullPath($Path) } catch { $full = $Path }
+    $roots = @()
+    foreach ($root in @($env:USERPROFILE, $env:LOCALAPPDATA, $env:APPDATA,
+                        (Join-Path $env:SystemDrive "Users"))) {
+        if ($root) { $roots += $root.TrimEnd('\') + '\' }
+    }
+    foreach ($root in $roots) {
+        if ($full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Get-PythonCandidates {
+    <#
+        Every interpreter this machine can offer, as absolute paths.
+
+        Deliberately wider than "what answers on PATH". PATH is the installing
+        administrator's PATH, and the whole failure this guards against is the
+        difference between their view of the machine and the service account's.
+    #>
+    $found = New-Object System.Collections.Generic.List[string]
+
+    # The launcher knows about installs that are on no PATH at all.
+    $listing = $null
+    try { $listing = & py.exe --list-paths 2>$null } catch { }
+    if ($listing) {
+        foreach ($line in $listing) {
+            if ($line -match '(?<path>[A-Za-z]:\\[^\s].*python\.exe)') {
+                $found.Add($Matches['path'].Trim())
+            }
+        }
+    }
+
+    # The usual machine-wide locations, which is where the answer should be.
+    $globs = @()
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:SystemDrive)) {
+        if ($base) {
+            $globs += (Join-Path $base "Python*\python.exe")
+            $globs += (Join-Path $base "Python\Python*\python.exe")
+        }
+    }
+    foreach ($glob in $globs) {
+        foreach ($item in (Get-ChildItem -Path $glob -ErrorAction SilentlyContinue)) {
+            $found.Add($item.FullName)
+        }
+    }
+
+    # And finally whatever is on PATH, so a machine with an unusual but correct
+    # layout is not turned away.
+    foreach ($name in @("py", "python3", "python")) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if (-not $command) { continue }
+        $probe = if ($name -eq "py") { @("-3", "-c", "import sys;print(sys.executable)") }
+                 else { @("-c", "import sys;print(sys.executable)") }
+        $reported = & $command.Source @probe 2>$null
+        if ($LASTEXITCODE -eq 0 -and $reported) { $found.Add(([string]$reported).Trim()) }
+    }
+
+    $unique = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $found) {
+        if (-not $path) { continue }
+        $full = $path
+        try { $full = [IO.Path]::GetFullPath($path) } catch { }
+        $already = $false
+        foreach ($seen in $unique) { if ($seen -ieq $full) { $already = $true } }
+        if (-not $already -and (Test-Path -LiteralPath $full)) { $unique.Add($full) }
+    }
+    return $unique
+}
+
+function Find-Python {
+    <#
+        The interpreter the service will be given, chosen for the service rather
+        than for whoever is running this.
+
+        Every candidate is actually executed before it is believed - a path that
+        exists proves nothing, and a zero-byte Store alias is a path that exists.
+        Machine-wide candidates are preferred, and among equals the highest
+        version wins, so the choice is the same on two identical machines rather
+        than whatever the filesystem happened to enumerate first.
+    #>
+    $usable = @()
+    foreach ($candidate in (Get-PythonCandidates)) {
+        $sentinel = "AIOPS-RELAY-INTERPRETER-OK"
+        $reported = $null
+        try {
+            $reported = & $candidate -c "import sys;print('$sentinel');print(sys.executable);print('%d.%d' % sys.version_info[:2])" 2>$null
+        } catch { continue }
+        if ($LASTEXITCODE -ne 0 -or -not $reported) { continue }
+        $lines = @($reported)
+        if ($lines.Count -lt 3 -or $lines[0].Trim() -ne $sentinel) { continue }
+        $version = [version]"0.0"
+        try { $version = [version]$lines[2].Trim() } catch { }
+        if ($version -lt [version]"3.8") { continue }
+        $usable += [pscustomobject]@{
+            Path       = $candidate
+            Version    = $version
+            InProfile  = (Test-InsideUserProfile -Path $candidate)
+            Executable = (Test-ServiceCanExecute -Path $candidate)
+        }
+    }
+
+    if ($usable.Count -eq 0) { throw $script:NoMachinePython }
+
+    $serviceable = @($usable | Where-Object { -not $_.InProfile -and $_.Executable })
+    if ($serviceable.Count -eq 0) {
+        Write-Host ""
+        Write-Host "Python 3 is installed here, and not in a way a service can use it:" -ForegroundColor Yellow
+        foreach ($one in $usable) {
+            $why = if ($one.InProfile) { "inside a user profile" }
+                   elseif (-not $one.Executable) { "not executable by the service account" }
+                   else { "unusable" }
+            Write-Host ("    {0}  ({1})" -f $one.Path, $why)
+        }
+        throw $script:NoMachinePython
+    }
+
+    $chosen = ($serviceable | Sort-Object -Property @{Expression = "Version"; Descending = $true},
+                                                   @{Expression = "Path"; Descending = $false})[0]
+    $script:PythonChoice = $chosen
+    $script:PythonOptions = $serviceable.Count
+    return $chosen.Path
+}
+
+function Hide-ProxySecret {
+    <#
+        A proxy URL with its password taken out, for anything that is printed.
+        A proxy credential is somebody else's, it is routinely a shared one, and
+        an installer transcript gets pasted into tickets.
+    #>
+    param([string]$Value)
+    if (-not $Value) { return $Value }
+    return [Text.RegularExpressions.Regex]::Replace(
+        $Value, '://([^:@/]+):[^@/]*@', '://$1:***@')
 }
 
 function Find-Csc {
@@ -159,6 +384,9 @@ $csc = Find-Csc
 $source = Split-Path -Parent $MyInvocation.MyCommand.Path
 $agentSource = Join-Path $source "aiops_relay_node.py"
 if (-not (Test-Path $agentSource)) { throw "aiops_relay_node.py is not next to this script." }
+if ($CaBundle -and -not (Test-Path -LiteralPath $CaBundle -PathType Leaf)) {
+    throw "-CaBundle $CaBundle is not a file."
+}
 
 $logPath = Join-Path $StateDir "aiops-relay.log"
 
@@ -169,6 +397,14 @@ Write-Host "  Runs as:   NT SERVICE\$ServiceName"
 Write-Host "  Agent:     $InstallDir\aiops_relay_node.py"
 Write-Host "  State:     $StateDir"
 Write-Host "  Log:       $logPath"
+# Said out loud, and said here, because which interpreter the service is given
+# is the single setting most likely to be the reason a node never connects.
+Write-Host ("  Python:    {0} (Python {1})" -f $python, $script:PythonChoice.Version)
+if ($script:PythonOptions -gt 1) {
+    Write-Host ("             newest of {0} machine-wide interpreters the service can run." -f $script:PythonOptions)
+}
+if ($Proxy) { Write-Host "  Proxy:     $(Hide-ProxySecret $Proxy)" }
+if ($CaBundle) { Write-Host "  Extra CAs: $CaBundle" }
 Write-Host ""
 
 # An existing service goes first, before anything in $InstallDir is touched.
@@ -224,6 +460,7 @@ public class RelayService : ServiceBase
     private readonly List<Process> children = new List<Process>();
     private Thread supervisor;
     private volatile bool stopping;
+    private volatile bool sawAgentOutput;
     private readonly string dir;
     private string logPath;
 
@@ -314,6 +551,12 @@ public class RelayService : ServiceBase
             return;
         }
 
+        // The interpreter, named once at startup, in the file people actually
+        // read. A node whose service account cannot run the Python it was given
+        // dies before Python prints anything, so without this line the log
+        // never mentions the one setting that is wrong.
+        Note("starting the agent with interpreter: " + cfg[0], EventLogEntryType.Information);
+
         int backoff = 5000;
         while (!stopping)
         {
@@ -350,6 +593,10 @@ public class RelayService : ServiceBase
     {
         StreamWriter writer = null;
         Process started = null;
+        int code = -1;
+        // Held back on purpose; see the comment where it is finally said.
+        string deferred = null;
+        sawAgentOutput = false;
         try
         {
             try
@@ -375,7 +622,16 @@ public class RelayService : ServiceBase
 
             ProcessStartInfo psi = new ProcessStartInfo(cfg[0]);
             psi.Arguments = "\"" + cfg[1] + "\" --url \"" + cfg[2] + "\" --state-dir \"" + cfg[3] + "\""
-                          + (cfg.Length > 4 && cfg[4].Trim() == "1" ? " --insecure" : "");
+                          + (cfg.Length > 4 && cfg[4].Trim() == "1" ? " --insecure" : "")
+                          // Lines 5 and 6 are the proxy and the extra CA bundle,
+                          // written by the installer so the service uses them on
+                          // every restart rather than only on the run that set
+                          // them. Absent in a config written by an older
+                          // installer, which is why each is length-guarded.
+                          + (cfg.Length > 5 && cfg[5].Trim().Length > 0
+                             ? " --proxy \"" + cfg[5].Trim() + "\"" : "")
+                          + (cfg.Length > 6 && cfg[6].Trim().Length > 0
+                             ? " --ca-bundle \"" + cfg[6].Trim() + "\"" : "");
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
             psi.RedirectStandardOutput = writer != null;
@@ -400,12 +656,33 @@ public class RelayService : ServiceBase
                 errors.Join(5000);
             }
             started.WaitForExit();
-            return started.ExitCode;
+            code = started.ExitCode;
+
+            // Both streams were being copied and neither said a word. That is
+            // not a Python that failed; it is a Python that never ran - a
+            // launcher stub, a runtime whose DLLs are missing, an executable
+            // this account may start but not read. Saying "exited with code N"
+            // and stopping there is what made this take a week to find.
+            if (writer != null && !sawAgentOutput)
+            {
+                deferred = "the agent exited with code " + code + " having written nothing at "
+                         + "all to stdout or stderr, so it never got as far as running Python. "
+                         + "The interpreter this service was configured with is: " + cfg[0]
+                         + " - check that the account this service runs as can execute it. A "
+                         + "Python installed for one user cannot be run by a machine-wide "
+                         + "service. Fix it with: winget install --id Python.Python.3.12 "
+                         + "--scope machine, then re-run install.ps1.";
+            }
         }
         catch (Exception error)
         {
-            Note("could not run the agent: " + error.Message, EventLogEntryType.Error);
-            return -1;
+            code = -1;
+            deferred = "could not start the agent at all: " + error.Message
+                     + " The interpreter this service was configured with is: " + cfg[0]
+                     + " - exit code -1 with no agent output means exactly this, that the "
+                     + "process was never created. A Python installed for one user cannot be "
+                     + "run by a machine-wide service. Fix it with: winget install --id "
+                     + "Python.Python.3.12 --scope machine, then re-run install.ps1.";
         }
         finally
         {
@@ -420,14 +697,28 @@ public class RelayService : ServiceBase
             }
             if (writer != null) { try { writer.Dispose(); } catch { } }
         }
+
+        // Said only now, after the finally above has let go of the log file,
+        // and that ordering is the whole point. Note() appends to the same path
+        // the StreamWriter holds open with FileShare.Read, so a diagnostic
+        // written while it is still open loses a sharing violation to an empty
+        // catch and survives only in the event log. Measured: a node logged
+        // "the agent exited with code -1" every few minutes for days while the
+        // line saying why went somewhere nobody was looking.
+        if (deferred != null) { Note(deferred, EventLogEntryType.Error); }
+        return code;
     }
 
-    private static void Copy(StreamReader from, StreamWriter to)
+    private void Copy(StreamReader from, StreamWriter to)
     {
         try
         {
             string line;
-            while ((line = from.ReadLine()) != null) { lock (to) { to.WriteLine(line); } }
+            while ((line = from.ReadLine()) != null)
+            {
+                sawAgentOutput = true;
+                lock (to) { to.WriteLine(line); }
+            }
         }
         catch { }
     }
@@ -452,13 +743,35 @@ public class RelayService : ServiceBase
 & $csc /nologo /target:exe /platform:anycpu /out:"$hostExe" /reference:System.dll /reference:System.ServiceProcess.dll "$hostSource"
 if ($LASTEXITCODE -ne 0) { throw "The service host did not compile." }
 
+# The CA bundle is copied in beside the agent rather than referenced where it
+# was found. The path somebody passes is usually their Downloads folder, which
+# the service account cannot read and which they will empty.
+$installedCaBundle = ""
+if ($CaBundle) {
+    $installedCaBundle = Join-Path $InstallDir "ca-bundle.pem"
+    Copy-Item -LiteralPath $CaBundle -Destination $installedCaBundle -Force
+}
+
+# Rewritten in full on every run, which is what makes re-running this installer
+# the repair for a node whose interpreter was wrong: the path is re-resolved
+# above, re-checked against what the service account can execute, and replaced
+# here. The credential in the state directory is untouched, so a repaired node
+# keeps its identity and needs no new enrolment token.
+$configPath = Join-Path $InstallDir "agent.cfg"
 @(
     $python
     (Join-Path $InstallDir "aiops_relay_node.py")
     $Url
     $StateDir
     $(if ($Insecure) { "1" } else { "0" })
-) | Set-Content -Path (Join-Path $InstallDir "agent.cfg") -Encoding UTF8
+    $Proxy
+    $installedCaBundle
+) | Set-Content -Path $configPath -Encoding UTF8
+
+# A proxy URL can carry a password, and $InstallDir grants BUILTIN\Users read.
+# The service account is granted its read below, once it resolves.
+& icacls "$configPath" /inheritance:r /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Could not restrict the permissions on $configPath." }
 
 # The service host's only channel when the log is unwritable. Registering the
 # source needs an administrator, which is why it happens here and not there.
@@ -477,6 +790,11 @@ if ($Token -and -not (Test-Path $credential)) {
     $enrolArgs = @((Join-Path $InstallDir "aiops_relay_node.py"), "--url", $Url,
                    "--token", $Token, "--state-dir", $StateDir, "--enrol-only")
     if ($Insecure) { $enrolArgs += "--insecure" }
+    # The same egress the service will use. Enrolment dials out too, and one
+    # that ignored the proxy failed at install time on exactly the machines the
+    # proxy was there for - so the operator never reached the part that worked.
+    if ($Proxy) { $enrolArgs += @("--proxy", $Proxy) }
+    if ($installedCaBundle) { $enrolArgs += @("--ca-bundle", $installedCaBundle) }
     & $python @enrolArgs
     if ($LASTEXITCODE -ne 0) { throw "Enrolment failed. The token may already have been used." }
 } elseif (-not (Test-Path $credential)) {
@@ -532,7 +850,72 @@ if (Test-Path $credential) {
 & icacls "$InstallDir" /grant "NT SERVICE\${ServiceName}:(OI)(CI)RX" /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Could not grant the service account read access to $InstallDir." }
 
+# agent.cfg had its inheritance broken above, so the grant to $InstallDir did
+# not reach it. Read, not modify: the service reads its configuration and has
+# no business rewriting it.
+& icacls "$configPath" /grant "NT SERVICE\${ServiceName}:(R)" /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Could not grant the service account access to $configPath." }
+
+# The log is truncated first so what is read below is this run's output and not
+# a convincing-looking line from the last one.
+if (Test-Path -LiteralPath $logPath) {
+    Set-Content -LiteralPath $logPath -Value "" -Encoding UTF8 -ErrorAction SilentlyContinue
+}
+
 Start-Service -Name $ServiceName
+
+# --- the only test that runs as the account that matters ---------------
+# Everything checked before this point was checked as an administrator, and the
+# failure this guards against is precisely the gap between an administrator's
+# view of the machine and the service account's: an interpreter that runs
+# perfectly when you type it and cannot be started by the service. There is no
+# way to settle that except to start the service and see whether the agent
+# actually speaks. Agent output carries a timestamp and a level; the service
+# host prefixes its own lines with "service host:".
+Write-Host "Checking that the service account can actually run the agent..."
+$deadline = (Get-Date).AddSeconds(60)
+$agentSpoke = $false
+$hostSaid = @()
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 2
+    if (-not (Test-Path -LiteralPath $logPath)) { continue }
+    $lines = @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue)
+    if ($lines | Where-Object { $_ -match '^\d{4}-\d\d-\d\d .*(INFO|WARNING|ERROR)' }) {
+        $agentSpoke = $true
+        break
+    }
+    $hostSaid = @($lines | Where-Object { $_ -match 'service host:' })
+    # Two service-host lines with nothing from the agent means it has already
+    # failed and been retried. Waiting out the rest of the minute proves nothing.
+    if ($hostSaid.Count -ge 2) { break }
+}
+
+if (-not $agentSpoke) {
+    Write-Host ""
+    Write-Host "The service is installed and the agent is NOT running." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "The service started, and the agent process it launches produced no output."
+    Write-Host "The interpreter it was given is:"
+    Write-Host "    $python"
+    Write-Host ""
+    if ($hostSaid) {
+        Write-Host "What the service host said:"
+        foreach ($line in ($hostSaid | Select-Object -Last 4)) { Write-Host "    $line" }
+        Write-Host ""
+    }
+    Write-Host "The reason is in the Application event log, which is the one place a"
+    Write-Host "failure to start the process can be recorded:"
+    Write-Host ""
+    Write-Host "    Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='$ServiceName'} | Select-Object -First 5 | Format-List"
+    Write-Host ""
+    Write-Host "If it says access denied or file not found, the service account cannot use"
+    Write-Host "that interpreter. Install Python for the whole machine and run this again:"
+    Write-Host ""
+    Write-Host "    winget install --id Python.Python.3.12 --scope machine"
+    Write-Host ""
+    Write-Host "The node's credential is kept, so re-running needs no new enrolment token."
+    exit 1
+}
 
 Write-Host ""
 Write-Host "Installed. The node is enrolled but carries no traffic until an AIOps"
@@ -541,4 +924,10 @@ Write-Host ""
 Write-Host "  status:  Get-Service $ServiceName"
 Write-Host "  logs:    Get-Content '$logPath' -Wait"
 Write-Host "  errors:  Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='$ServiceName'}"
+$checkArgs = "--url $Url --state-dir '$StateDir' --diagnose"
+if ($installedCaBundle) { $checkArgs = "$checkArgs --ca-bundle '$installedCaBundle'" }
+Write-Host "  check:   & '$python' '$InstallDir\aiops_relay_node.py' $checkArgs"
+if ($Proxy) {
+    Write-Host "           set `$env:AIOPS_RELAY_PROXY to the proxy URL before running that check."
+}
 Write-Host "  remove:  powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1"
