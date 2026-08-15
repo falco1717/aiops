@@ -308,6 +308,19 @@ export type WsMessage =
   | { type: "connected"; topic: string }
   | { type: "ping" }
   | {
+      /**
+       * A message was accepted. Announced before anything runs it, so the other
+       * people in a shared session see it appear the moment it is sent rather
+       * than only when an agent picks it up — which, behind a long turn, can be
+       * minutes away.
+       */
+      type: "run.queued";
+      session_id: string;
+      run_id: number;
+      prompt: string;
+      requested_by_id: number | null;
+    }
+  | {
       type: "run.started";
       session_id: string;
       run_id: number;

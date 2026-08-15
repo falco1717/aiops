@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .events import hub
 from .models import AgentPreset, Attachment, ProviderAccount, Run, Session, User, Workspace
 from .providers import PROVIDERS
 from .runner import runner
@@ -214,7 +215,13 @@ async def queue_run(
     attachment_ids: list[str] | None = None,
     requested_by_id: int | None = None,
 ) -> Run:
-    """Persist a turn and hand it to the runner. Commits."""
+    """Persist a turn and put it in the session's queue. Commits.
+
+    Never starts anything itself. The row lands at 'queued' and `dispatch`
+    decides whether it goes now or waits behind the turn already in flight —
+    which is what lets people keep typing mid-turn without two agents ever
+    running against one provider session id.
+    """
     prompt = prompt.strip()
     if not prompt:
         raise ValidationError("Prompt must not be empty")
@@ -251,7 +258,23 @@ async def queue_run(
     await db.commit()
     await db.refresh(run)
 
-    runner.submit(run.id)
+    # Announced before it is dispatched, so the other people in a shared session
+    # see the message appear the moment it is accepted rather than only once an
+    # agent picks it up — which, behind a long turn, could be minutes.
+    hub.publish(
+        session.id,
+        {
+            "type": "run.queued",
+            "session_id": session.id,
+            "run_id": run.id,
+            "prompt": run.prompt,
+            "requested_by_id": run.requested_by_id,
+        },
+    )
+    # Awaited rather than fired off, so the decision "does this start now or
+    # wait" is settled before the request returns. The row is reported as queued
+    # either way; what actually happened to it arrives on the websocket.
+    await runner.dispatch(session.id)
     return run
 
 

@@ -31,7 +31,7 @@ from ..schemas import (
     TranscriptOut,
 )
 from ..names import summarise
-from ..runner import runner
+from ..runner import runner, settle_session
 from ..security import current_user
 from ..services import (
     APPROVAL_MODES,
@@ -347,7 +347,11 @@ async def delete_session(
     session_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
     sess = await _owned(db, session_id, user)
-    # Stop the agent first. Deleting the row out from under a running process
+    # Empty the queue before touching the turn in flight. Cancelling first would
+    # fire the drain, which would start the next queued message against a
+    # session that is one statement away from not existing.
+    await runner.clear_queue(session_id)
+    # Then stop the agent. Deleting the row out from under a running process
     # leaves it writing events against a session that no longer exists, which
     # fails on the foreign key and orphans the subprocess.
     active = list(
@@ -404,17 +408,19 @@ async def send_prompt(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Take a message for this session. Accepted mid-turn, and queued if so.
+
+    It used to be a 409 while anything was in flight, which meant the composer
+    was dead for the whole turn — often minutes. It is a queue now, and it is
+    only a queue: neither CLI is driven interactively here, so nothing can be
+    handed to a turn that has already started. A message sent mid-turn becomes
+    the *next* turn. It does not interrupt, redirect or reach the running one,
+    and the UI says exactly that rather than implying the agent is listening.
+
+    The acknowledgement is asked of whoever is sending, before the row exists,
+    on this path as on every other — queueing a message is still sending it.
+    """
     sess = await _get(db, session_id, user)
-    busy = await db.scalar(
-        select(Run.id)
-        .where(Run.session_id == session_id, Run.status.in_(("queued", "running")))
-        .limit(1)
-    )
-    if busy:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "This session is still working on the previous turn. Cancel it or wait.",
-        )
     await _require_exposure_ack(db, sess, user)
     try:
         return await queue_run(
@@ -422,10 +428,51 @@ async def send_prompt(
             sess,
             payload.prompt,
             attachment_ids=payload.attachment_ids,
+            # The sender, never the session's owner. In a shared session these
+            # differ, and the runner materialises stored credentials for
+            # whoever this names — see Run.requested_by_id. A queued turn is no
+            # different: it runs later, but it still runs as its author.
             requested_by_id=user.id,
         )
     except ValidationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@router.post("/{session_id}/stop", status_code=status.HTTP_202_ACCEPTED)
+async def stop_session(
+    session_id: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stop the turn in flight and empty the queue behind it.
+
+    One button rather than one per run, because "stop" has to mean stop. With a
+    queue, cancelling only the running turn would let the drain start the next
+    queued message a moment later — the agent would carry on working and the
+    control would look broken.
+
+    Available to anyone who can see the session, exactly like the per-run cancel
+    it replaces: everybody who can put work into a shared conversation can take
+    it back out again.
+    """
+    await _get(db, session_id, user)
+    # Queue first, then the running turn. The other order finishes the current
+    # turn, fires the drain, and starts the message we were about to withdraw.
+    withdrawn = await runner.clear_queue(session_id)
+    active = await _active_run_id(db, session_id)
+    stopped = await runner.cancel(active) if active is not None else False
+    if active is not None and not stopped:
+        # Nothing live to signal — a leftover from a restart, or it finished in
+        # the gap. Re-read before overwriting, so a stop arriving just too late
+        # cannot turn a successful turn into a cancelled one.
+        run = await db.get(Run, active)
+        if run is not None and run.status in ("queued", "running"):
+            run.status = "cancelled"
+            run.error = "Cancelled; no live process was found for this run"
+            run.finished_at = datetime.now(timezone.utc)
+        await settle_session(db, session_id)
+        await db.commit()
+    return {"stopped_run_id": active, "withdrawn_run_ids": withdrawn}
 
 
 @router.get("/{session_id}/runs", response_model=list[RunOut])

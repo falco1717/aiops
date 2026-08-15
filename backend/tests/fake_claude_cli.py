@@ -43,6 +43,24 @@ def emit(obj):
     sys.stdout.flush()
 
 
+# A turn that takes a while and *then* fails, on request. The prompt is argv[2]
+# for this CLI, so asking for it is a matter of what the operator typed. Used by
+# test_queue.py to prove a failed turn still drains the queue behind it — with
+# an instant failure the next message would be started by its own request rather
+# than by the drain, and the check would pass without testing anything.
+if any("FAKE_FAIL_AFTER_A_WHILE" in a for a in args):
+    emit({"type": "system", "subtype": "init", "session_id": session_id, "model": model})
+    time.sleep(1.0)
+    emit({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "result": "The stand-in CLI was asked to fail this turn.",
+        "session_id": session_id,
+    })
+    sys.exit(1)
+
+
 emit({
     "type": "system",
     "subtype": "init",

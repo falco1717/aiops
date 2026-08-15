@@ -47,6 +47,46 @@ BWRAP_HINT = (
 )
 
 
+#: What a turn that never ran records about itself. Not "cancelled by operator":
+#: nothing was interrupted, the message was simply taken back out of the line.
+_WITHDRAWN = "Taken out of the queue before it started"
+
+
+async def _mark_withdrawn(db, run: Run) -> None:
+    run.status = "cancelled"
+    run.error = _WITHDRAWN
+    run.finished_at = datetime.now(timezone.utc)
+    # The post-switch briefing this turn was going to carry is owed again. It is
+    # claimed when a message is queued, once, so withdrawing that message
+    # without handing it back would leave the incoming agent to pick up a
+    # conversation it cannot read with no summary of it at all.
+    if run.carries_handoff:
+        run.carries_handoff = False
+        sess = await db.get(Session, run.session_id)
+        if sess is not None:
+            sess.handoff_pending = True
+
+
+async def settle_session(db, session_id: str, last_status: str | None = None) -> None:
+    """Put the session's own status back in step with its runs. Does not commit.
+
+    Shared by everything that can end a turn, because "is this session busy" is
+    now a question about a queue rather than about a single run: a finished turn
+    with three messages waiting behind it leaves the session running, and a
+    withdrawn one may or may not.
+    """
+    sess = await db.get(Session, session_id)
+    if sess is None:
+        return
+    still_busy = await db.scalar(
+        select(Run.id)
+        .where(Run.session_id == session_id, Run.status.in_(("queued", "running")))
+        .limit(1)
+    )
+    sess.status = "running" if still_busy else ("error" if last_status == "failed" else "idle")
+    sess.updated_at = datetime.now(timezone.utc)
+
+
 class Runner:
     """Owns the lifecycle of every agent turn.
 
@@ -70,12 +110,174 @@ class Runner:
         # -SIGTERM on POSIX, 1 on Windows, and 143 only when the agent traps the
         # signal itself, so the exit code cannot tell us what the operator meant.
         self._cancelled: set[int] = set()
+        # The turn each session currently has in flight. One per session is the
+        # invariant this whole queue exists to keep: both CLIs resume by their
+        # own session id, and two turns against the same id would interleave
+        # into one transcript and race each other's `--resume` state.
+        self._active: dict[str, int] = {}
+        # Every decision to *start* a turn is made while holding this. One lock
+        # for all sessions rather than one each: the critical section is a
+        # single indexed SELECT and a create_task, so the contention is nil and
+        # there is no per-session entry to leak or to garbage-collect.
+        self._dispatch_lock = asyncio.Lock()
+        # Drains are fired from a done-callback, which cannot await. Keeping a
+        # reference stops the task being garbage-collected mid-flight.
+        self._drains: set[asyncio.Task] = set()
+        self._closing = False
 
     # -- public API ----------------------------------------------------
-    def submit(self, run_id: int) -> None:
+    def start(self) -> None:
+        """Accept work again.
+
+        `shutdown` latches the runner closed so a teardown cancellation cannot
+        start the next queued turn on the way out. The object outlives one
+        application lifespan — it is a module singleton, and the test suites
+        raise and drop several apps in a process — so the latch has to be
+        released somewhere, and here is where a new lifespan begins.
+        """
+        self._closing = False
+        # Nothing from the last lifespan is still running — shutdown cancelled
+        # it and the restart reaper has marked its row terminal — so a leftover
+        # entry here would only block that session's queue for good.
+        self._active.clear()
+
+    def active_run(self, session_id: str) -> int | None:
+        """The turn this session is executing right now, if any."""
+        return self._active.get(session_id)
+
+    async def dispatch(self, session_id: str) -> int | None:
+        """Start this session's oldest waiting turn, if it is free to start one.
+
+        The one place a run is ever handed to `submit`. Under the lock it reads
+        the queue back out of the database rather than trusting whatever the
+        caller just inserted, so two people prompting at the same instant
+        produce two rows and exactly one start: the loser's `dispatch` sees the
+        session already occupied and returns, and its turn is picked up by the
+        drain when the first one ends.
+
+        Ordering is `Run.id`, the autoincrement primary key — the only thing
+        here that is monotonic under concurrent inserts. `created_at` is stamped
+        by the application and two rows can share a timestamp.
+
+        Deliberately only ever picks a *queued* row. A row left at 'running'
+        with no live task (a finalize that failed, a crash between the two)
+        would otherwise be re-executed as if it were new; skipping it lets the
+        queue keep moving and leaves the stuck row for the restart reaper.
+        """
+        async with self._dispatch_lock:
+            if self._closing or session_id in self._active:
+                return None
+            async with SessionLocal() as db:
+                run_id = await db.scalar(
+                    select(Run.id)
+                    .where(Run.session_id == session_id, Run.status == "queued")
+                    .order_by(Run.id)
+                    .limit(1)
+                )
+            if run_id is None:
+                return None
+            self._active[session_id] = run_id
+            self.submit(run_id, session_id)
+            return run_id
+
+    async def withdraw(self, run_id: int, session_id: str) -> bool:
+        """Take a turn out of the queue before it starts.
+
+        False when it is too late — the run is the one in flight, or it already
+        finished. Decided under the dispatch lock so it cannot interleave with
+        the drain that would otherwise start the very run being withdrawn.
+        """
+        async with self._dispatch_lock:
+            if self._active.get(session_id) == run_id:
+                return False
+            async with SessionLocal() as db:
+                run = await db.get(Run, run_id)
+                if run is None or run.status != "queued":
+                    return False
+                await _mark_withdrawn(db, run)
+                await settle_session(db, session_id)
+                await db.commit()
+        hub.publish(
+            session_id,
+            {
+                "type": "run.finished",
+                "session_id": session_id,
+                "run_id": run_id,
+                "status": "cancelled",
+                "exit_code": None,
+                "error": _WITHDRAWN,
+                "cost_usd": None,
+            },
+        )
+        return True
+
+    async def clear_queue(self, session_id: str) -> list[int]:
+        """Drop every turn waiting behind the one in flight.
+
+        Called before the running turn is stopped, never after: the other order
+        finishes the current turn, the drain starts the next queued one, and the
+        stop the operator asked for silently becomes "stop this one message".
+        """
+        withdrawn: list[int] = []
+        async with self._dispatch_lock:
+            active = self._active.get(session_id)
+            async with SessionLocal() as db:
+                rows = list(
+                    await db.scalars(
+                        select(Run).where(
+                            Run.session_id == session_id, Run.status == "queued"
+                        )
+                    )
+                )
+                for run in rows:
+                    if run.id == active:
+                        continue
+                    await _mark_withdrawn(db, run)
+                    withdrawn.append(run.id)
+                if withdrawn:
+                    await settle_session(db, session_id)
+                    await db.commit()
+        for run_id in withdrawn:
+            hub.publish(
+                session_id,
+                {
+                    "type": "run.finished",
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "status": "cancelled",
+                    "exit_code": None,
+                    "error": _WITHDRAWN,
+                    "cost_usd": None,
+                },
+            )
+        return withdrawn
+
+    def submit(self, run_id: int, session_id: str) -> None:
         task = asyncio.create_task(self._guard(run_id), name=f"run-{run_id}")
         self._tasks[run_id] = task
-        task.add_done_callback(lambda _t: self._tasks.pop(run_id, None))
+        task.add_done_callback(lambda _t: self._released(run_id, session_id))
+
+    def _released(self, run_id: int, session_id: str) -> None:
+        """This turn is over, whatever became of it — start the next one.
+
+        A done-callback rather than a `finally` inside the run, because the
+        run's own body may be executing under cancellation, where every `await`
+        re-raises immediately. By the time this fires `_guard` has finished its
+        bookkeeping and the row is terminal, so the drain sees a true queue.
+
+        Hung off the task rather than off the success path on purpose: a failed,
+        timed-out or cancelled turn releases the session exactly like a
+        successful one, which is what stops one bad turn stranding the queue
+        behind it.
+        """
+        self._tasks.pop(run_id, None)
+        if self._active.get(session_id) == run_id:
+            del self._active[session_id]
+        if self._closing:
+            return
+        task = asyncio.create_task(self.dispatch(session_id), name=f"drain-{session_id}")
+        self._drains.add(task)
+        task.add_done_callback(self._drains.discard)
 
     async def cancel(self, run_id: int) -> bool:
         self._cancelled.add(run_id)
@@ -100,6 +302,12 @@ class Runner:
 
     async def shutdown(self) -> None:
         """Best-effort teardown; nothing here may prevent the process from exiting."""
+        # Set first: every cancellation below fires a done-callback, and without
+        # this each one would helpfully start the next queued turn against a
+        # process that is on its way out.
+        self._closing = True
+        for task in list(self._drains):
+            task.cancel()
         for run_id in [*self._procs, *self._adapters]:
             try:
                 await self.cancel(run_id)
@@ -711,15 +919,7 @@ class Runner:
                     + (usage.get("cache_read_tokens") or 0)
                     + (usage.get("cache_write_tokens") or 0)
                 )
-            sess = await db.get(Session, run.session_id)
-            if sess is not None:
-                still_busy = await db.scalar(
-                    select(Run.id)
-                    .where(Run.session_id == sess.id, Run.status.in_(("queued", "running")))
-                    .limit(1)
-                )
-                sess.status = "running" if still_busy else ("error" if status == "failed" else "idle")
-                sess.updated_at = datetime.now(timezone.utc)
+            await settle_session(db, run.session_id, last_status=status)
             await db.commit()
             session_id = run.session_id
 

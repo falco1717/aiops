@@ -61,10 +61,19 @@ with TestClient(app) as c:
         run = c.post(f"/api/sessions/{sid}/prompt", json={"prompt": "Summarize the README"}).json()
         check("prompt accepted", "id" in run, str(run)[:200])
 
-        # The stand-in sleeps between deltas, so the session is genuinely busy here.
+        # The stand-in sleeps between deltas, so the session is genuinely busy
+        # here. This used to be a 409; a message sent mid-turn is queued now.
         second = c.post(f"/api/sessions/{sid}/prompt", json={"prompt": "and again"})
-        check("concurrent turn rejected with 409", second.status_code == 409,
-              f"{second.status_code} {second.text[:140]}")
+        check("a message sent mid-turn is accepted rather than refused",
+              second.status_code == 202, f"{second.status_code} {second.text[:140]}")
+        check("and it waits rather than starting a second agent on one session",
+              second.status_code == 202 and second.json()["status"] == "queued",
+              second.text[:200])
+        # Taken straight back out, so the rest of this suite still watches
+        # exactly one turn. The queue itself is exercised in test_queue.py.
+        undo = c.post(f"/api/runs/{second.json()['id']}/withdraw")
+        check("a queued message can be withdrawn before it starts",
+              undo.status_code == 202, f"{undo.status_code} {undo.text[:140]}")
 
         kinds, deltas, finished = [], [], None
         deadline = time.time() + 30
@@ -72,7 +81,9 @@ with TestClient(app) as c:
             msg = socket.receive_json()
             if msg["type"] == "event":
                 (deltas if msg["kind"] == "delta" else kinds).append(msg)
-            elif msg["type"] == "run.finished":
+            # Scoped to the turn under test: the withdrawn message announces
+            # itself as finished too, and it is not this one.
+            elif msg["type"] == "run.finished" and msg["run_id"] == run["id"]:
                 finished = msg
                 break
 
@@ -136,7 +147,13 @@ with TestClient(app) as c:
     check("second turn used --resume", "--resume" in row["command"], " ".join(row["command"])[:220])
     check("resumed the same provider session", prior_session in row["command"],
           " ".join(row["command"])[:220])
-    check("transcript holds both turns", len(c.get(f"/api/sessions/{sid}/transcript").json()["runs"]) == 2)
+    # Three rows, not two: the withdrawn message is one of them. A message that
+    # was accepted and then taken back is part of what happened here, and
+    # dropping it from the transcript would hide it from everyone else in a
+    # shared session.
+    check("transcript holds both turns and the withdrawn message",
+          len(c.get(f"/api/sessions/{sid}/transcript").json()["runs"]) == 3,
+          str(len(c.get(f"/api/sessions/{sid}/transcript").json()["runs"])))
 
     # --- cancellation -------------------------------------------------
     run3 = c.post(f"/api/sessions/{sid}/prompt", json={"prompt": "long one"}).json()

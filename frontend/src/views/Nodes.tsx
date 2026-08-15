@@ -1,6 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import CopyButton from "../components/CopyButton";
 import { fullName } from "../names";
 import type {
   InstallCommand,
@@ -467,17 +468,6 @@ function InstallPicker({ issued }: { issued: NodeEnrolment }) {
 
   const [platform, setPlatform] = useState(() => guessPlatform(commands));
   const chosen = commands.find((c) => c.platform === platform) ?? commands[0];
-  const [copied, setCopied] = useState(false);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(chosen.command);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard blocked; the box is selectable */
-    }
-  };
 
   return (
     <div className="install-picker">
@@ -510,13 +500,21 @@ function InstallPicker({ issued }: { issued: NodeEnrolment }) {
           {`aiops-relay-node-${chosen.platform}.zip — unzip it on the machine you are installing.`}
         </span>
       </div>
-      <textarea className="mono" rows={2} readOnly value={chosen.command} />
-      {chosen.note && <p className="hint">{chosen.note}</p>}
-      <div className="row">
-        <button type="button" onClick={() => void copy()}>
-          {copied ? "Copied" : "Copy command"}
-        </button>
+      {/* The copy control lives on the block now rather than on a row of its
+          own below it. `key` on the wrapper so switching platform resets the
+          confirmation — "Copied" left standing over a different command is a
+          lie about what is on the clipboard. */}
+      <div className="codeblock" key={chosen.platform}>
+        <textarea
+          className="mono"
+          rows={2}
+          readOnly
+          value={chosen.command}
+          aria-label={`Install command for ${chosen.label}`}
+        />
+        <CopyButton value={chosen.command} what="the install command" />
       </div>
+      {chosen.note && <p className="hint">{chosen.note}</p>}
     </div>
   );
 }

@@ -82,8 +82,16 @@ async def reap_orphaned_runs() -> None:
             await db.scalars(select(Run).where(Run.status.in_(("queued", "running"))))
         )
         for run in orphans:
-            run.status = "failed"
-            run.error = "Interrupted by an AIOps restart"
+            run.status = "failed" if run.status == "running" else "cancelled"
+            # A queue does not survive a restart — the runner's in-process
+            # dispatch state goes with it — so say which of the two happened.
+            # Calling a message that was never picked up "failed" puts the
+            # session into an error state over a turn that never ran.
+            run.error = (
+                "Interrupted by an AIOps restart"
+                if run.status == "failed"
+                else "AIOps restarted before this queued turn was picked up"
+            )
             run.finished_at = datetime.now(timezone.utc)
         stale = list(await db.scalars(select(Session).where(Session.status == "running")))
         for sess in stale:
@@ -95,6 +103,7 @@ async def reap_orphaned_runs() -> None:
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    runner.start()
     await init_db()
     await run_migrations()
     await bootstrap_admin()

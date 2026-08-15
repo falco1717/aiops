@@ -195,11 +195,22 @@ export const api = {
   capabilities: (id: string) => request<Capability[]>(`/api/sessions/${id}/capabilities`),
   renameSession: (id: string, title: string) =>
     request<Session>(`/api/sessions/${id}`, { method: "PATCH", body: body({ title }) }),
+  /**
+   * Send a message. Accepted mid-turn, in which case it is queued and becomes
+   * the next turn — it is not handed to the turn already running, which is a
+   * headless CLI process with nothing listening on stdin.
+   */
   prompt: (id: string, prompt: string, attachment_ids: string[] = []) =>
     request<Run>(`/api/sessions/${id}/prompt`, {
       method: "POST",
       body: body({ prompt, attachment_ids }),
     }),
+  /** Stop the turn in flight *and* discard everything queued behind it. */
+  stopSession: (id: string) =>
+    request<{ stopped_run_id: number | null; withdrawn_run_ids: number[] }>(
+      `/api/sessions/${id}/stop`,
+      { method: "POST" },
+    ),
   events: (id: string) => request<AgentEvent[]>(`/api/sessions/${id}/events`),
 
   /** Who would read what your own stored systems produce in this session. */
@@ -275,6 +286,13 @@ export const api = {
   // runs
   runs: (limit = 50) => request<Run[]>(`/api/runs?limit=${limit}`),
   cancelRun: (id: number) => request<unknown>(`/api/runs/${id}/cancel`, { method: "POST" }),
+  /**
+   * Take a queued message back out of the line. Refused with 409 once the agent
+   * has picked it up — unsending something nobody has read is a different act
+   * from killing an agent mid-command, so it is a different call.
+   */
+  withdrawRun: (id: number) =>
+    request<{ status: string }>(`/api/runs/${id}/withdraw`, { method: "POST" }),
 
   // schedules
   schedules: () => request<Schedule[]>("/api/schedules"),

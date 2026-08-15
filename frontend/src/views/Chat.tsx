@@ -7,6 +7,7 @@ import { displayName, fullName, nameById } from "../names";
 import type { Suggestion, TokenMatch } from "../mentions";
 import { activeToken, applySuggestion, emptyHint, suggestionsFor } from "../mentions";
 import { composerKeyAction } from "../composerKeys";
+import { canWithdraw, composerState, queueView } from "../queue";
 import type {
   Account,
   AgentEvent,
@@ -125,6 +126,17 @@ function turnAuthor(run: Run, me: User, directory: UserSummary[]): string {
   const who = directory.find((u) => u.id === run.requested_by_id);
   // A sender who has since been deleted still has an id on the run.
   return who ? displayName(who) : "a since-removed user";
+}
+
+/**
+ * Where a waiting message sits in the line.
+ *
+ * "next turn" rather than "1st", because the useful fact is not its index — it
+ * is that exactly one turn has to finish before this one starts.
+ */
+function position(run: Run, waiting: Run[]): string {
+  const at = waiting.findIndex((r) => r.id === run.id);
+  return at <= 0 ? "next turn" : `${at + 1} turns away`;
 }
 
 /** Kinds that mean the streaming buffer for this run has been superseded. */
@@ -406,7 +418,11 @@ export default function Chat({
               12000,
             );
           }
-        } else if (msg.type === "run.started" || msg.type === "run.finished") {
+        } else if (
+          msg.type === "run.queued" ||
+          msg.type === "run.started" ||
+          msg.type === "run.finished"
+        ) {
           setLive((prev) => {
             const next = { ...prev };
             delete next[msg.run_id];
@@ -438,10 +454,12 @@ export default function Chat({
     pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   };
 
-  const activeRun = useMemo(
-    () => runs.find((r) => r.status === "running" || r.status === "queued"),
-    [runs],
-  );
+  // The turn in flight, and the messages waiting behind it. The rules — which
+  // one counts as active, what may still be taken back, and what the composer
+  // is allowed to claim while the agent works — are in `queue.ts` and tested
+  // there rather than derived inline here.
+  const queue = useMemo(() => queueView(runs), [runs]);
+  const queuedIds = useMemo(() => new Set(queue.waiting.map((r) => r.id)), [queue]);
 
   /** Uploaded but not yet sent — what the composer is holding. */
   const staged = useMemo(() => attachments.filter((a) => a.run_id === null), [attachments]);
@@ -490,7 +508,10 @@ export default function Chat({
   const send = async (event?: { preventDefault: () => void }) => {
     event?.preventDefault();
     const text = prompt.trim() || (staged.length ? ATTACHMENTS_ONLY_PROMPT : "");
-    if (!text || activeRun || uploading) return;
+    // No longer blocked by a turn in flight: the server queues it. Still
+    // blocked by an upload in progress, because the attachment ids this claims
+    // do not exist until it finishes.
+    if (!text || uploading) return;
     setSending(true);
     setError(null);
     try {
@@ -550,12 +571,50 @@ export default function Chat({
     await send();
   };
 
-  const cancel = async () => {
-    if (!activeRun) return;
+  /**
+   * Stop the agent, and mean it.
+   *
+   * One call for the whole session rather than a cancel on the running turn:
+   * with a queue behind it, killing only the turn in flight lets the next
+   * queued message start a second later, and the button would look broken while
+   * the agent carried on working. So Stop empties the queue too — and says so
+   * first, because those are other people's messages in a shared session.
+   */
+  const stop = async () => {
+    if (!queue.busy) return;
+    const waiting = queue.waiting.length;
+    if (
+      waiting > 0 &&
+      !confirm(
+        `Stop this turn and discard the ${waiting} message${waiting === 1 ? "" : "s"} ` +
+          `queued behind it?\n\n` +
+          `The queued message${waiting === 1 ? " has" : "s have"} not been sent to the ` +
+          `agent yet, so nothing of ${waiting === 1 ? "its" : "their"} work is lost — ` +
+          `but ${waiting === 1 ? "it" : "they"} will not run, and in a shared session ` +
+          `${waiting === 1 ? "it" : "some of them"} may not be yours.`,
+      )
+    )
+      return;
     try {
-      await api.cancelRun(activeRun.id);
+      await api.stopSession(sessionId);
+      await reload();
+      onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /** Take one queued message back out of the line, before anything runs it. */
+  const withdraw = async (runId: number) => {
+    try {
+      await api.withdrawRun(runId);
+      await reload();
+      onChanged();
+    } catch (err) {
+      // Most likely a 409: the agent picked it up while the button was being
+      // pressed. Re-read so the transcript stops offering to withdraw it.
+      setError(err instanceof Error ? err.message : String(err));
+      await reload();
     }
   };
 
@@ -633,10 +692,9 @@ export default function Chat({
   // button. Everything below is derived from (prompt, caret): there is no
   // "menu is open" flag to get out of step with the text, which is how these
   // end up hanging over a composer that no longer has a token in it.
-  const token = useMemo(
-    () => (activeRun ? null : activeToken(prompt, caret)),
-    [prompt, caret, activeRun],
-  );
+  // No longer switched off mid-turn: the composer stays live while the agent
+  // works, so the menus that make it usable have to stay live with it.
+  const token = useMemo(() => activeToken(prompt, caret), [prompt, caret]);
   const tokenKey = token ? `${token.trigger}${token.start}:${token.query}` : null;
   const suggestions = useMemo(
     () => (token ? suggestionsFor(token, capabilities, targets) : []),
@@ -648,6 +706,11 @@ export default function Chat({
   // Enter sends at the desktop layout and makes a newline on a phone. The rule
   // itself is in `composerKeys.ts`; this is only the width half of it.
   const isDesktop = useIsDesktop();
+
+  // What the box may say for this state. Kept out of the JSX because the honest
+  // wording — queued, not steering — is the point of the feature, and a string
+  // buried in a ternary is a string nobody tests.
+  const composer = composerState(queue, { enterSends: isDesktop, sending });
 
   // A new token starts at the top. Keyed on the token rather than on the list,
   // so narrowing a search does not silently leave the highlight on row 7 of a
@@ -834,9 +897,23 @@ export default function Chat({
         )}
         {/* Stopping a running agent is the one thing that must never be a tap
             away behind a menu. */}
-        {activeRun && (
-          <button className="danger" onClick={cancel}>
+        {queue.busy && (
+          <button
+            className="danger"
+            onClick={stop}
+            title={
+              queue.waiting.length > 0
+                ? `Stop the turn in progress and discard the ${queue.waiting.length} ` +
+                  "message(s) queued behind it."
+                : "Stop the turn in progress."
+            }
+          >
             Stop
+            {queue.waiting.length > 0 && (
+              <span className="pill" style={{ marginLeft: 6 }}>
+                +{queue.waiting.length}
+              </span>
+            )}
           </button>
         )}
         {!renaming && (
@@ -861,19 +938,25 @@ export default function Chat({
         )}
         {!renaming && (
           <div data-tools-region className={`chat-tools${toolsOpen ? " open" : ""}`}>
-            {/* Which agent runs this conversation. Dead while a turn is in
-                flight: the prompt has already gone to one CLI, and switching
-                underneath it would leave the reply attributed to the other. */}
+            {/* Which agent runs this conversation. Dead while anything is
+                outstanding: the prompt has already gone to one CLI, and
+                switching underneath it would leave the reply attributed to the
+                other. Deliberately *not* relaxed alongside the composer — a
+                switch throws away the provider session id every queued turn is
+                going to resume from, so unlike a message it cannot simply wait
+                its turn. The server refuses it with a 409 either way. */}
             {session && providers.length > 0 && (
               <select
                 className="approval-select"
                 value={session.provider}
-                disabled={!!activeRun}
+                disabled={queue.busy}
                 title={
-                  activeRun
-                    ? `${providerLabel(session.provider)} is in the middle of a turn. ` +
+                  queue.busy
+                    ? `${providerLabel(session.provider)} is in the middle of a turn` +
+                      `${queue.waiting.length > 0 ? `, with ${queue.waiting.length} message(s) queued behind it` : ""}. ` +
                       "Switching agents now would leave that turn attributed to the wrong " +
-                      "one — stop it or let it finish first."
+                      "one and abandon the session every queued message resumes from — " +
+                      "stop it or let it finish first."
                     : "Which agent runs this conversation. Switching hands it over rather " +
                       "than continuing it: the new agent cannot read the other's session, " +
                       "so it starts fresh from a written summary of the transcript."
@@ -974,7 +1057,12 @@ export default function Chat({
         {runs.length === 0 && <div className="empty">Send the first task below.</div>}
         {runs.map((run) => (
           <div key={run.id} style={{ display: "contents" }}>
-            <div className="msg prompt">
+            {/* A message nobody has read yet is drawn as one: dashed and dimmed
+                rather than the solid bubble a sent turn gets. The difference is
+                not decoration — the agent genuinely has not seen it, and a
+                queued message that looks identical to a delivered one is the
+                whole misunderstanding this feature could create. */}
+            <div className={`msg prompt${queuedIds.has(run.id) ? " queued" : ""}`}>
               <div className="who">
                 {/* Who actually sent it, read off the run. A session can be
                     shared, so "you" was wrong for every turn somebody else
@@ -1022,6 +1110,30 @@ export default function Chat({
                   {(attachmentsByRun.get(run.id) ?? []).map((a) => (
                     <AttachmentTile key={a.id} sessionId={sessionId} attachment={a} />
                   ))}
+                </div>
+              )}
+              {/* Says what is true of it rather than "pending": that it has not
+                  been delivered, where it sits in the line, and that it is
+                  still take-back-able. Files queue with it — the run already
+                  owns them, so they go out with the message when its turn
+                  comes. */}
+              {canWithdraw(run, queue) && (
+                <div className="queued-foot">
+                  <span className="pill queued">
+                    queued · {position(run, queue.waiting)}
+                  </span>
+                  <span className="queued-note">
+                    Not delivered. It runs as its own turn once the agent finishes the
+                    work above — it cannot change what that turn is doing.
+                  </span>
+                  <button
+                    type="button"
+                    className="queued-undo"
+                    onClick={() => void withdraw(run.id)}
+                    title="Take this message back out of the queue"
+                  >
+                    Withdraw
+                  </button>
                 </div>
               )}
             </div>
@@ -1179,18 +1291,22 @@ export default function Chat({
             {uploading && <span className="attach-status">Uploading…</span>}
           </div>
         )}
+        {/* The one thing this feature must not let the interface imply. An
+            enabled box beside a working agent reads as "it is listening", and
+            it is not: both CLIs are one headless process per turn with nothing
+            on stdin, so a message sent now becomes the next turn and cannot
+            touch this one. Said in the composer, where the misunderstanding
+            would happen, rather than in a tooltip. */}
+        {composer.notice && (
+          <div className="queue-notice" role="status">
+            {composer.notice}
+          </div>
+        )}
         <textarea
           ref={promptRef}
           rows={3}
           value={prompt}
-          placeholder={
-            activeRun
-              ? "Agent is working — stop it or wait…"
-              : isDesktop
-                ? "Describe the task…  (Enter to send, Shift+Enter for a new line, / for skills, @ for systems, paste or drop files)"
-                : "Describe the task…  (Ctrl+Enter to send, / for skills, @ for systems, paste or drop files)"
-          }
-          disabled={!!activeRun}
+          placeholder={composer.placeholder}
           // It is a combobox while the menu is up: a text box that owns a list
           // somebody can arrow through. `aria-expanded` is the part screen
           // readers use to say so, and it has to be present on the input
@@ -1261,12 +1377,21 @@ export default function Chat({
           }}
         />
         <div className="row" style={{ marginTop: 8 }}>
+          {/* Not disabled by a turn in flight any more — that is the feature.
+              Still disabled while an upload is running, because the ids this
+              would claim do not exist yet. */}
           <button
             className="primary"
             type="submit"
-            disabled={!!activeRun || sending || uploading || (!prompt.trim() && staged.length === 0)}
+            disabled={sending || uploading || (!prompt.trim() && staged.length === 0)}
+            title={
+              queue.busy
+                ? "Queue this as the next turn. The agent is mid-turn and will not " +
+                  "see it until that one ends."
+                : undefined
+            }
           >
-            {sending ? "Sending…" : "Send"}
+            {composer.sendLabel}
           </button>
           <input
             ref={fileInputRef}
@@ -1282,7 +1407,6 @@ export default function Chat({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={!!activeRun}
             title="Attach files or images to the next message"
           >
             📎 Attach
@@ -1296,7 +1420,6 @@ export default function Chat({
           <button
             type="button"
             onClick={() => openTrigger("/")}
-            disabled={!!activeRun}
             title="Insert a skill or slash command — or just type / in the box"
           >
             / Skills
@@ -1307,7 +1430,6 @@ export default function Chat({
           <button
             type="button"
             onClick={() => openTrigger("@")}
-            disabled={!!activeRun}
             title="Insert a stored system by name — or just type @ in the box"
           >
             @ Systems
