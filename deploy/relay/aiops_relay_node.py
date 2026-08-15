@@ -842,12 +842,30 @@ def enrol(base_url: str, token: str, egress: Egress) -> dict:
 
 
 # --- the agent ---------------------------------------------------------
+#: The states a node publishes about itself, and whether an installer should
+#: call the install a success on seeing one. "pending" counts: a node that has
+#: reached AIOps and been told it is not approved yet is working exactly as
+#: documented, and waiting for a human is not a failed install.
+STATUS_WORKING = ("connected", "pending")
+
+
 class RelayAgent:
-    def __init__(self, base_url: str, credential: str, egress: Egress, max_streams: int) -> None:
+    def __init__(self, base_url: str, credential: str, egress: Egress, max_streams: int,
+                 status_path: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.credential = credential
         self.egress = egress
         self.max_streams = max_streams
+        #: One word in one file, rewritten as the node's situation changes. It
+        #: exists because every installer needs the same answer to the same
+        #: question - did this node actually reach AIOps - and each of the three
+        #: was otherwise reduced to scraping a log it may not even be able to
+        #: read. An installer that cannot answer it declares success over a node
+        #: that will never connect, which is how a service spent an hour
+        #: flapping while the UI said "Never connected".
+        self.status_path = status_path
+        #: The slug AIOps knows this node by, once it has said so.
+        self.registered_as = ""
         self.open_streams = 0
         self._count_lock = threading.Lock()
         self.stop = threading.Event()
@@ -860,6 +878,26 @@ class RelayAgent:
 
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.credential}", "User-Agent": f"aiops-relay/{VERSION}"}
+
+    def note_status(self, state: str, detail: str = "") -> None:
+        """Publish what this node's situation is, for anything that asks.
+
+        Written through a temporary file and renamed, so a reader never catches
+        it half-written. Never fatal: a node that cannot write this file still
+        carries traffic, and refusing to run because a status file failed would
+        be trading the job for the report of the job.
+        """
+        if not self.status_path:
+            return
+        line = f"{state} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {detail}".strip()
+        temporary = self.status_path + ".new"
+        try:
+            os.makedirs(os.path.dirname(self.status_path) or ".", exist_ok=True)
+            with open(temporary, "w") as handle:
+                handle.write(line + "\n")
+            os.replace(temporary, self.status_path)
+        except OSError as exc:
+            log.debug("could not write the status file %s: %s", self.status_path, exc)
 
     def run_forever(self) -> int:
         backoff = 1.0
@@ -927,25 +965,35 @@ class RelayAgent:
                 kind = event.get("type")
                 if kind == "ping":
                     ws.send_json({"type": "pong"})
+                    # Refreshed on every heartbeat, so the timestamp in the file
+                    # means "as of now" rather than "at some point since boot".
+                    self.note_status("connected", self.registered_as)
                 elif kind == "open":
                     self.spawn(ws, event)
                 elif kind == "hello":
+                    self.registered_as = str(event.get("node") or "")
                     log.info("registered with AIOps as node %r", event.get("node"))
+                    self.note_status("connected", self.registered_as)
                 elif kind == "denied":
                     log.warning("AIOps refused this node: %s", event.get("reason"))
+                    self.note_status("denied", str(event.get("reason") or ""))
         finally:
             ws.close()
         return "connected"
 
-    @staticmethod
-    def _closed_because(code: int | None) -> str | None:
+    def _closed_because(self, code: int | None) -> str | None:
         """What a close means for whether it is worth dialling again."""
         if code == CLOSE_REVOKED:
+            self.note_status("revoked")
             return "revoked"
         if code == CLOSE_NOT_APPROVED:
             log.info("this node is enrolled but not yet approved in AIOps; waiting")
+            # A working install, not a failed one: the node found AIOps, AIOps
+            # knows who it is, and what is left is a human clicking Approve.
+            self.note_status("pending", "waiting to be approved in AIOps")
             return None
         if code == CLOSE_UNAUTHENTICATED:
+            self.note_status("unauthenticated")
             log.error(
                 "AIOps does not recognise this node's credential. It may have been "
                 "deleted, or re-enrolled elsewhere. Re-run the installer with a new "
@@ -1288,6 +1336,7 @@ def diagnose(url: str, egress: Egress, credential: str | None) -> int:
 
     failure: Exception | None = None
     proxy_decision: ProxyDecision | None = None
+    aiops_said: dict | None = None
 
     # 1. name resolution
     try:
@@ -1383,7 +1432,28 @@ def diagnose(url: str, egress: Egress, credential: str | None) -> int:
                 _say("6. AIOps handshake", "FAILED", "")
                 failure = exc
         else:
-            _say("6. AIOps handshake", "OK", "AIOps accepted this node's connection")
+            # The upgrade succeeding is not the end of it. AIOps accepts the
+            # socket and *then* says whether it knows this node, so the answer
+            # to "is this node approved" is one frame further on and is the
+            # other thing somebody running this wants to know.
+            ws.sock.settimeout(15)
+            greeting = None
+            try:
+                message = ws.recv()
+                if message is not None:
+                    greeting = json.loads(message[1].decode())
+            except (OSError, WebSocketError, ValueError):
+                greeting = None
+            kind = (greeting or {}).get("type")
+            if kind == "hello":
+                _say("6. AIOps handshake", "OK",
+                     f"AIOps knows this node as {(greeting or {}).get('node')!r}")
+            elif kind == "denied":
+                _say("6. AIOps handshake", "REACHED",
+                     f"AIOps answered: {(greeting or {}).get('reason')}")
+                aiops_said = greeting
+            else:
+                _say("6. AIOps handshake", "OK", "AIOps accepted this node's connection")
             ws.close()
 
     print()
@@ -1399,6 +1469,15 @@ def diagnose(url: str, egress: Egress, credential: str | None) -> int:
             _paragraph(notes[0])
             print()
             return 1
+        if aiops_said is not None:
+            _paragraph(
+                "The network is fine: this machine reaches AIOps and AIOps answers. What "
+                f"it said is: {aiops_said.get('reason')}. That is a decision made in "
+                "AIOps, not a fault on this machine - if it is waiting to be approved, "
+                "an administrator approves it under Nodes."
+            )
+            print()
+            return 0
         _paragraph(
             "This node can reach AIOps from this machine right now. If it still shows as "
             "not connected, the agent is not running: check the service, and read its "
@@ -1510,7 +1589,8 @@ def main(argv: list[str]) -> int:
         if args.enrol_only:
             return 0
 
-    agent = RelayAgent(args.url, credential, egress, args.max_streams)
+    agent = RelayAgent(args.url, credential, egress, args.max_streams,
+                       status_path=os.path.join(args.state_dir, "status"))
     log.info("aiops-relay %s starting; AIOps at %s", VERSION, args.url)
     # The interpreter, in the first few lines, every time. When a node fails
     # because a service account cannot run the Python the installer chose, this

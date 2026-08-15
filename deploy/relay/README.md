@@ -135,7 +135,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1   # -KeepLog
 ```sh
 AIOPS_RELAY_URL=https://aiops.example.com \
 AIOPS_RELAY_TOKEN=<enrolment token> \
-  docker compose up -d --build
+  docker compose up -d --build --wait
+```
+
+`--wait` is what gives the Docker path the same contract as the other two: the
+container is healthy only once the node has actually reached AIOps, so a node
+that will never connect exits non-zero here instead of sitting in a restart
+loop while you are told it came up. Ask it why with:
+
+```sh
+docker compose exec relay-node python3 /opt/aiops-relay/aiops_relay_node.py --diagnose
 ```
 
 `network_mode: host` is set deliberately: the point of a node is the network it
@@ -145,6 +154,41 @@ sits on, and a bridge network is a different one.
 docker logs -f aiops-relay-node
 docker compose down -v                # -v matters: it drops the credential
 ```
+
+## An installer that does not lie about the result
+
+All three refuse before they make a mess, and none of them declares success
+over a node that has not connected.
+
+**Before anything is written**, each checks what it can: that the interpreter
+is one the service account can actually use, and that this machine can reach
+AIOps at all — by running the agent's own `--diagnose`. A network the node
+cannot get out of stops the install there, with the reason printed, before a
+service exists and before the one-time enrolment token is spent.
+
+**After the service starts**, each waits up to a minute for the node to say it
+got there. The agent writes one word into its state directory — `connected`,
+`pending`, `revoked`, `unauthenticated` — and the installers read that rather
+than scraping a log they may not be able to read. `pending` counts as success:
+a node that reached AIOps and was told it is not approved yet has done its
+part. Anything else fails loudly, prints what the service had to say, and gives
+the exact `--diagnose` command to ask the node why.
+
+|                                        | Linux | Windows | Docker |
+|----------------------------------------|-------|---------|--------|
+| Interpreter the service account can run | yes, by running it as that account | yes, by path and by DACL — see below | n/a, the image carries its own |
+| Refuses a home-directory interpreter    | yes (`ProtectHome=yes` hides it anyway) | yes (any `C:\Users\...`) | n/a |
+| `--diagnose` preflight before enrolling | yes, as the service account | yes, as the installing administrator | run it in the container |
+| Waits for the node to actually connect  | yes | yes | yes, via the healthcheck and `--wait` |
+| Repairs a broken install on re-run      | yes | yes | recreate the container |
+| Proxy and CA bundle persisted           | `/etc/aiops-relay/node.env` | `agent.cfg` | environment |
+
+The one asymmetry worth knowing: on Linux the interpreter check *runs* the
+interpreter as the account the service will use, which settles the question.
+On Windows it cannot — the virtual service account does not exist until the
+service does — so it reads the file's permissions and refuses anything inside
+a user profile. That is a heuristic, and it is backed by the real test after
+`Start-Service`, which does run as the service account.
 
 ## Security
 

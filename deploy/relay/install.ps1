@@ -440,6 +440,28 @@ Set-StateDirAcl -Path $StateDir
 
 Copy-Item $agentSource (Join-Path $InstallDir "aiops_relay_node.py") -Force
 
+# --- can this machine reach AIOps at all? ------------------------------
+# Before the service host is compiled, before a service is registered, before
+# an enrolment token is spent. The agent's own --diagnose is what runs, so a
+# network this node cannot get out of is a refusal here with a printed reason
+# rather than a service flapping quietly afterwards. It cannot be run as the
+# service account - that account does not exist until the service does - so it
+# proves the network and not the account; the check after Start-Service below
+# is the one that proves the account.
+Write-Host "Checking that this machine can reach AIOps..."
+$preflight = @((Join-Path $InstallDir "aiops_relay_node.py"), "--url", $Url,
+               "--state-dir", $StateDir, "--diagnose")
+if ($Insecure) { $preflight += "--insecure" }
+if ($Proxy) { $preflight += @("--proxy", $Proxy) }
+if ($CaBundle) { $preflight += @("--ca-bundle", $CaBundle) }
+& $python @preflight
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "This machine cannot reach AIOps. No service has been created and no" -ForegroundColor Red
+    Write-Host "enrolment token has been spent; the reason is above."
+    exit 1
+}
+
 # --- the service host --------------------------------------------------
 # Windows will not run a script as a service: the Service Control Manager
 # expects a process that answers its handshake, which python.exe does not. This
@@ -856,8 +878,10 @@ if ($LASTEXITCODE -ne 0) { throw "Could not grant the service account read acces
 & icacls "$configPath" /grant "NT SERVICE\${ServiceName}:(R)" /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Could not grant the service account access to $configPath." }
 
-# The log is truncated first so what is read below is this run's output and not
-# a convincing-looking line from the last one.
+# Both are cleared first, so what is read below is this start's answer and not
+# a convincing-looking one left over from the last.
+$statusPath = Join-Path $StateDir "status"
+Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
 if (Test-Path -LiteralPath $logPath) {
     Set-Content -LiteralPath $logPath -Value "" -Encoding UTF8 -ErrorAction SilentlyContinue
 }
@@ -869,46 +893,59 @@ Start-Service -Name $ServiceName
 # failure this guards against is precisely the gap between an administrator's
 # view of the machine and the service account's: an interpreter that runs
 # perfectly when you type it and cannot be started by the service. There is no
-# way to settle that except to start the service and see whether the agent
-# actually speaks. Agent output carries a timestamp and a level; the service
-# host prefixes its own lines with "service host:".
-Write-Host "Checking that the service account can actually run the agent..."
+# way to settle that except to start the service and ask the node itself
+# whether it got there. It answers in the status file; the log is read only to
+# explain a node that never answers.
+Write-Host -NoNewline "Waiting for the node to reach AIOps"
 $deadline = (Get-Date).AddSeconds(60)
-$agentSpoke = $false
+$reached = ""
 $hostSaid = @()
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 2
-    if (-not (Test-Path -LiteralPath $logPath)) { continue }
-    $lines = @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue)
-    if ($lines | Where-Object { $_ -match '^\d{4}-\d\d-\d\d .*(INFO|WARNING|ERROR)' }) {
-        $agentSpoke = $true
-        break
+    if (Test-Path -LiteralPath $statusPath) {
+        $state = ((Get-Content -LiteralPath $statusPath -ErrorAction SilentlyContinue |
+                   Select-Object -First 1) -split ' ')[0]
+        if ($state) { $reached = $state; break }
     }
-    $hostSaid = @($lines | Where-Object { $_ -match 'service host:' })
+    if ((Get-Service -Name $ServiceName -ErrorAction SilentlyContinue).Status -ne "Running") { break }
+    $hostSaid = @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue |
+                  Where-Object { $_ -match 'service host:' })
     # Two service-host lines with nothing from the agent means it has already
     # failed and been retried. Waiting out the rest of the minute proves nothing.
     if ($hostSaid.Count -ge 2) { break }
+    Write-Host -NoNewline "."
 }
+Write-Host ""
 
-if (-not $agentSpoke) {
+if ($reached -eq "connected") {
+    Write-Host "The node is connected to AIOps." -ForegroundColor Green
+} elseif ($reached -eq "pending") {
+    Write-Host "The node reached AIOps and is waiting to be approved (Nodes -> Approve)."
+} else {
     Write-Host ""
-    Write-Host "The service is installed and the agent is NOT running." -ForegroundColor Red
+    Write-Host "The service is installed and the node has NOT reached AIOps." -ForegroundColor Red
     Write-Host ""
-    Write-Host "The service started, and the agent process it launches produced no output."
-    Write-Host "The interpreter it was given is:"
-    Write-Host "    $python"
+    if ($reached) {
+        Write-Host "AIOps answered, and its answer was: $reached"
+    } else {
+        Write-Host "The agent process produced nothing at all. The interpreter it was given is:"
+        Write-Host "    $python"
+    }
     Write-Host ""
     if ($hostSaid) {
         Write-Host "What the service host said:"
         foreach ($line in ($hostSaid | Select-Object -Last 4)) { Write-Host "    $line" }
         Write-Host ""
     }
-    Write-Host "The reason is in the Application event log, which is the one place a"
-    Write-Host "failure to start the process can be recorded:"
+    Write-Host "Ask the node itself why:"
+    Write-Host ""
+    Write-Host "    & '$python' '$InstallDir\aiops_relay_node.py' --url $Url --state-dir '$StateDir' --diagnose"
+    Write-Host ""
+    Write-Host "A process that could not be started at all is recorded only here:"
     Write-Host ""
     Write-Host "    Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='$ServiceName'} | Select-Object -First 5 | Format-List"
     Write-Host ""
-    Write-Host "If it says access denied or file not found, the service account cannot use"
+    Write-Host "If that says access denied or file not found, the service account cannot use"
     Write-Host "that interpreter. Install Python for the whole machine and run this again:"
     Write-Host ""
     Write-Host "    winget install --id Python.Python.3.12 --scope machine"
@@ -918,8 +955,8 @@ if (-not $agentSpoke) {
 }
 
 Write-Host ""
-Write-Host "Installed. The node is enrolled but carries no traffic until an AIOps"
-Write-Host "administrator approves it (Nodes -> Approve)."
+Write-Host "Installed. The node carries no traffic until an AIOps administrator"
+Write-Host "approves it (Nodes -> Approve)."
 Write-Host ""
 Write-Host "  status:  Get-Service $ServiceName"
 Write-Host "  logs:    Get-Content '$logPath' -Wait"

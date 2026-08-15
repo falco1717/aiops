@@ -41,6 +41,18 @@ services:
       # Uncomment, with AIOPS_RELAY_CA_BUNDLE=/etc/aiops-relay/ca-bundle.pem,
       # to hand the node a corporate certificate authority to trust.
       # - ./ca-bundle.pem:/etc/aiops-relay/ca-bundle.pem:ro
+    # The same contract the other two installers have: the container is healthy
+    # only once the node has actually reached AIOps. The agent writes one word
+    # into its state directory when it gets there, and "pending" counts - a node
+    # that reached AIOps and was told it is not approved yet has done its part.
+    # Bring it up with `docker compose up -d --wait` and a node that will never
+    # connect is a non-zero exit rather than a cheerful one.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys,time,os;p='/var/lib/aiops-relay/status';s=open(p).read().split() if os.path.exists(p) else [];sys.exit(0 if s and s[0] in ('connected','pending') and time.time()-os.path.getmtime(p) < 180 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 60s
     # Everything the node is asked to connect to is on stdout, so
     # `docker logs -f aiops-relay-node` is the whole audit trail.
     logging:

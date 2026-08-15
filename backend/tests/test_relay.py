@@ -1189,10 +1189,45 @@ check("and that diagnosis is emitted only after the log file has been let go of"
       "the deferred message must come after the finally that disposes the writer")
 check("re-running the installer rewrites the interpreter, so it repairs a broken node",
       "$configPath = Join-Path $InstallDir \"agent.cfg\"" in ps1 and "Rewritten in full on every run" in ps1)
-check("and it starts the service and checks the agent actually speaks, as the service account",
-      "Checking that the service account can actually run the agent" in ps1)
 check("the agent says which interpreter it is running on, every time it starts",
       "running on %s (Python %s)" in open(AGENT, encoding="utf-8").read())
+
+# Linux has the check Windows cannot make: it runs the interpreter as the
+# account the service will use, rather than reading its permissions.
+check("install.sh runs the interpreter as the service account before believing in it",
+      'su -s /bin/sh "$RUN_USER" -c "$PYTHON -c ' in sh)
+check("and refuses one in a home directory, which ProtectHome=yes hides from the service",
+      "/home/*|/root/*)" in sh and "ProtectHome=yes" in sh)
+
+# --- an installer that does not declare success over a dead node -------
+# The behaviour behind the whole episode: the install reported success, the
+# service flapped, and the UI said Never connected for an hour.
+check("both scripted installers check they can reach AIOps before spending the token",
+      "--diagnose" in sh and "--diagnose" in ps1
+      and sh.index("--diagnose") < sh.index("Enrolling with AIOps")
+      and ps1.index("Checking that this machine can reach AIOps") < ps1.index("Enrolling with AIOps"),
+      "the preflight must come before enrolment")
+check("and say so when they refuse, so nobody goes looking for a spent token",
+      "enrolment token has been spent" in sh and "enrolment token has been spent" in ps1)
+check("install.sh waits for the node to reach AIOps before saying it is installed",
+      "Waiting for the node to reach AIOps" in sh and "has NOT reached AIOps" in sh)
+check("install.ps1 does the same",
+      "Waiting for the node to reach AIOps" in ps1 and "has NOT reached AIOps" in ps1)
+check("and docker gets the same contract through a healthcheck rather than a banner",
+      "healthcheck:" in compose_text and "connected" in compose_text and "pending" in compose_text)
+check("a node waiting to be approved is a successful install, not a failed one",
+      "waiting to be approved" in sh and "waiting to be approved" in ps1)
+check("and a failure hands over the exact command that asks the node why",
+      "--diagnose" in sh and "--diagnose" in ps1 and "--diagnose" in compose_text
+      or "--diagnose" in open(os.path.join(RELAY_SRC, "README.md"), encoding="utf-8").read())
+
+status_states = ("connected", "pending", "revoked", "unauthenticated")
+agent_source = open(AGENT, encoding="utf-8").read()
+check("the agent publishes each of the states an installer has to tell apart",
+      all(f'note_status("{state}"' in agent_source for state in status_states),
+      str([s for s in status_states if f'note_status("{s}"' not in agent_source]))
+check("and the status file is written whole, never caught half-written",
+      "os.replace(temporary, self.status_path)" in agent_source)
 
 
 # =====================================================================
@@ -1303,9 +1338,33 @@ try:
     check("an unapproved node cannot get a control channel at all",
           online_while_pending is None, str(online_while_pending)[:160])
 
+    # The file all three installers read to decide whether the install worked.
+    def wait_for_status(*wanted, seconds=25):
+        path = os.path.join(STATE_DIR, "status")
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            try:
+                with open(path) as fh:
+                    state = fh.read().split(" ")[0]
+                if state in wanted:
+                    return state
+            except OSError:
+                pass
+            time.sleep(0.25)
+        try:
+            with open(path) as fh:
+                return "got: " + fh.read().strip()
+        except OSError:
+            return "no status file at all"
+
+    check("a node that reached AIOps and is not approved yet says so, which is a working install",
+          wait_for_status("pending") == "pending", wait_for_status("pending", seconds=0))
+
     api.post(f"/api/nodes/{live_id}/approve")
     row = wait_for(lambda n: n["online"])
     check("once approved, the agent connects and stays connected", row is not None, str(row)[:200])
+    check("and the node publishes that it is connected, which is what an installer waits for",
+          wait_for_status("connected") == "connected", wait_for_status("connected", seconds=0))
     check("and AIOps records what it is", row and row["version"] == "1.0.0")
 
     # --- what the owner runs on the laptop when it says "not connected" ---
@@ -1413,6 +1472,8 @@ try:
     api.post(f"/api/nodes/{live_id}/revoke")
     row = wait_for(lambda n: not n["online"], seconds=15)
     check("revoking drops the node's live connection", row is not None, str(row)[:200])
+    check("and the node says it was revoked rather than leaving 'connected' behind to be believed",
+          wait_for_status("revoked") == "revoked", wait_for_status("revoked", seconds=0))
 
     refused = subprocess.run(
         [sys.executable, helper, live_slug, "127.0.0.1", str(ECHO_PORT)],
