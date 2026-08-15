@@ -152,6 +152,22 @@ def _install_commands(request: Request, node: RelayNode, token: str) -> list[Ins
     the installer is downloaded beside this command instead of being assumed to
     already be on the machine. It said "run it from deploy/relay" on a fresh
     Windows box that had never seen the repository.
+
+    The Windows one is spelled `powershell -NoProfile -ExecutionPolicy Bypass
+    -File .\\install.ps1` rather than the bare `.\\install.ps1` it used to be,
+    because the bare form cannot run on a machine in the state this UI leaves
+    it in, and it failed an operator on first contact. Two barriers stack.
+    Windows client SKUs ship an execution policy of Restricted, which blocks
+    every script; and the zip was fetched with a browser, so every file
+    extracted out of it carries Mark-of-the-Web, which makes even a
+    RemoteSigned machine treat the script as internet-sourced and refuse it as
+    unsigned. The second is why the error reads "is not digitally signed"
+    rather than "running scripts is disabled", and why the usual advice —
+    relax the policy to RemoteSigned — does not fix it. `-ExecutionPolicy
+    Bypass` clears both, and it is scoped to that one process: it is preferred
+    here over telling people to run Set-ExecutionPolicy or Unblock-File first
+    precisely because it changes nothing on the machine and needs no second
+    step to undo.
     """
     base = str(request.base_url).rstrip("/")
     return [
@@ -167,12 +183,18 @@ def _install_commands(request: Request, node: RelayNode, token: str) -> list[Ins
         InstallCommand(
             platform="windows",
             label="Windows (service)",
-            command=f".\\install.ps1 -Url {base} -Token {token}",
+            command=(
+                "powershell -NoProfile -ExecutionPolicy Bypass -File "
+                f".\\install.ps1 -Url {base} -Token {token}"
+            ),
             note=(
                 "Download the installer, unzip it, and run this from inside that "
                 "folder in a PowerShell started as Administrator — creating a "
                 "service needs it. Python 3 must be installed first: "
-                "winget install --id Python.Python.3.12 --scope machine"
+                "winget install --id Python.Python.3.12 --scope machine. If it "
+                "still refuses to run, execution policy is being enforced by "
+                "Group Policy — check Get-ExecutionPolicy -List for a "
+                "MachinePolicy or UserPolicy entry."
             ),
         ),
         InstallCommand(

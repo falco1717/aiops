@@ -54,8 +54,17 @@ sudo aiops-relay-uninstall            # removes all of it, including the account
 ### Windows
 
 ```powershell
-.\install.ps1 -Url https://aiops.example.com -Token <enrolment token>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Url https://aiops.example.com -Token <enrolment token>
 ```
+
+Run it from an elevated PowerShell, inside the folder you unzipped. The
+`-ExecutionPolicy Bypass` is not decoration: Windows client SKUs block every
+script by default, and a zip fetched with a browser marks each file it contains
+as internet-sourced (Mark-of-the-Web), which makes even a RemoteSigned machine
+reject the script as unsigned — that is the `is not digitally signed` error.
+`Bypass` clears both and is scoped to the one process, so it changes nothing on
+the machine. If it still refuses, the policy is coming from Group Policy: check
+`Get-ExecutionPolicy -List` for a `MachinePolicy` or `UserPolicy` entry.
 
 Needs Python 3 (`winget install --id Python.Python.3.12 --scope machine`). The
 agent is the same one file as on Linux and in Docker: a second implementation
@@ -78,7 +87,7 @@ account can write. Reading it needs an elevated shell, as does uninstalling.
 Get-Service AIOpsRelayNode
 Get-Content "$env:ProgramData\AIOps Relay Node\aiops-relay.log" -Wait
 Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='AIOpsRelayNode'}
-.\uninstall.ps1                       # add -KeepLog to keep the record
+powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1   # -KeepLog keeps the record
 ```
 
 ### Docker
