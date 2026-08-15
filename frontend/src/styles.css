@@ -343,6 +343,27 @@ label.check span { margin: 0; color: var(--text); font-size: 13px; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* Inline suggestions. The rows are options in a listbox owned by the textarea,
+   not buttons: focus stays in the composer the whole time, so there is nothing
+   to give a focus ring to and the highlight is the only cursor. */
+.picker-keys { font-size: 11px; color: var(--text-dim); }
+.picker-empty { padding: 12px 14px; font-size: 12.5px; color: var(--text-dim); }
+.suggest-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 10px; border-radius: 6px; cursor: pointer;
+}
+.suggest-row:hover { background: var(--bg-raised); }
+/* Distinct from :hover, because the keyboard cursor and the pointer can be on
+   different rows and the keyboard one is the one Enter will take. */
+.suggest-row.active { background: var(--accent-dim); box-shadow: inset 2px 0 0 var(--accent); }
+
+/* ---- who sent a turn ---- */
+.turn-who { font-weight: 600; }
+/* Turns older than the column that records the sender. Drawn as an aside
+   rather than a name, because it is the absence of one. */
+.turn-who.unattributed { font-weight: 400; font-style: italic; color: var(--text-dim); }
+.approval-decision { margin: 0 18px 8px; }
+
 /* ---- attachments ---- */
 .chat-foot.dropping { background: var(--accent-dim); outline: 2px dashed var(--accent); outline-offset: -6px; }
 .attach-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
@@ -561,6 +582,10 @@ button.big { font-size: 15px; padding: 11px 18px; }
   .row { gap: 8px; }
   button { min-height: 40px; }
   .picker { left: 12px; right: 12px; max-height: 55vh; }
+  /* A suggestion is tapped, so it has to be a real target rather than a
+     9px-padded row sized for a mouse. */
+  .suggest-row { min-height: 44px; padding: 10px; }
+  .picker-keys { display: none; }
   .files-panel { margin: 0 12px 10px; max-height: 45vh; }
 
   /* Attachments: the tile is the whole row, so the remove button has to be a

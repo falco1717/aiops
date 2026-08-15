@@ -1,6 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { displayName } from "../names";
 import type { User } from "../types";
 
 export default function Account({ me, onChanged }: { me: User; onChanged: () => void }) {
@@ -8,12 +9,82 @@ export default function Account({ me, onChanged }: { me: User; onChanged: () => 
     <div className="main">
       <h1>Account</h1>
       <p className="subtitle">
-        Signed in as <strong>{me.username}</strong>
-        {me.is_admin ? " (administrator)" : ""}.
+        Signed in as <strong>{displayName(me)}</strong>
+        {me.display_name ? <> (username <span className="mono">{me.username}</span>)</> : null}
+        {me.is_admin ? " — administrator" : ""}.
       </p>
+      <DisplayName me={me} onChanged={onChanged} />
       <ChangePassword onChanged={onChanged} />
       {me.is_admin && <UserAdmin me={me} />}
     </div>
+  );
+}
+
+/**
+ * Your own name, changed by you.
+ *
+ * Self-service on purpose: what somebody is called is theirs to decide, and
+ * needing an administrator for it is how everyone stays labelled with a login
+ * name. It goes to its own endpoint rather than the admin user PATCH, which
+ * also carries `is_admin` — the same field, but not the same permission.
+ *
+ * The username is shown beside it and is not editable here. It is the login,
+ * it is unique, and it is what tells two people who both call themselves Walt
+ * apart wherever the choice matters.
+ */
+function DisplayName({ me, onChanged }: { me: User; onChanged: () => void }) {
+  const [value, setValue] = useState(me.display_name ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  const trimmed = value.trim();
+  const unchanged = trimmed === (me.display_name ?? "");
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setDone(false);
+    try {
+      // Blank clears it, which puts you back to being called by your username.
+      await api.updateProfile({ display_name: trimmed || null });
+      setDone(true);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form className="card" onSubmit={submit} style={{ maxWidth: 460 }}>
+      <h2 style={{ marginTop: 0 }}>Display name</h2>
+      {error && <div className="error-banner">{error}</div>}
+      {done && <div className="ok-banner">Display name updated.</div>}
+      <label>
+        <span>What other people see you called</span>
+        <input
+          value={value}
+          onChange={(e) => {
+            setValue(e.target.value);
+            setDone(false);
+          }}
+          maxLength={128}
+          placeholder={me.username}
+          autoComplete="off"
+        />
+      </label>
+      <div className="field-hint">
+        Leave it empty to be shown as <span className="mono">{me.username}</span>. Display names
+        do not have to be unique — your username is what tells you apart from anyone with the
+        same one, and it stays your sign-in either way.
+      </div>
+      <button className="primary" type="submit" disabled={busy || unchanged}>
+        {busy ? "Saving…" : "Save name"}
+      </button>
+    </form>
   );
 }
 
@@ -107,6 +178,7 @@ function UserAdmin({ me }: { me: User }) {
   const [notice, setNotice] = useState<string | null>(null);
 
   const [username, setUsername] = useState("");
+  const [newDisplayName, setNewDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
   const [mustChange, setMustChange] = useState(true);
@@ -144,11 +216,13 @@ function UserAdmin({ me }: { me: User }) {
     void wrap(async () => {
       await api.createUser({
         username,
+        display_name: newDisplayName.trim() || null,
         password,
         is_admin: isAdmin,
         must_change_password: mustChange,
       });
       setUsername("");
+      setNewDisplayName("");
       setPassword("");
       setIsAdmin(false);
       setMustChange(true);
@@ -177,6 +251,24 @@ function UserAdmin({ me }: { me: User }) {
   const remove = (user: User) => {
     if (!confirm(`Delete user "${user.username}"? This cannot be undone.`)) return;
     void wrap(() => api.deleteUser(user.id), `Deleted ${user.username}.`);
+  };
+
+  /** An administrator setting somebody else's name. Blank clears it. */
+  const rename = (user: User) => {
+    const next = prompt(
+      `Display name for "${user.username}" — what everyone else sees them called.\n\n` +
+        "Leave it empty to use the username. It does not have to be unique.",
+      user.display_name ?? "",
+    );
+    // Cancel returns null, which is not the same as clearing it to empty.
+    if (next === null) return;
+    const value = next.trim() || null;
+    void wrap(
+      () => api.patchUser(user.id, { display_name: value }),
+      value
+        ? `${user.username} is now shown as ${value}.`
+        : `${user.username} is shown by username again.`,
+    );
   };
 
   return (
@@ -209,6 +301,16 @@ function UserAdmin({ me }: { me: User }) {
               autoComplete="off"
               minLength={8}
               required
+            />
+          </label>
+          <label>
+            <span>Display name (optional)</span>
+            <input
+              value={newDisplayName}
+              onChange={(e) => setNewDisplayName(e.target.value)}
+              autoComplete="off"
+              maxLength={128}
+              placeholder={username || "Left empty, they are shown by username"}
             />
           </label>
         </div>
@@ -248,7 +350,16 @@ function UserAdmin({ me }: { me: User }) {
           {users.map((u) => (
             <tr key={u.id}>
               <td data-label="User">
-                {u.username}
+                {/* Shown name first, login underneath. This is the screen where
+                    the two must never be confused: display names are not
+                    unique, and the username is what every other decision keys
+                    off. */}
+                {displayName(u)}
+                {u.display_name && (
+                  <span className="mono" style={{ marginLeft: 8, color: "var(--text-dim)" }}>
+                    {u.username}
+                  </span>
+                )}
                 {u.id === me.id && <span className="pill" style={{ marginLeft: 8 }}>you</span>}
                 {u.must_change_password && (
                   <span className="pill cancelled" style={{ marginLeft: 8 }}>
@@ -265,6 +376,9 @@ function UserAdmin({ me }: { me: User }) {
                 {u.last_login_at ? fmt(u.last_login_at) : "never"}
               </td>
               <td className="row actions">
+                <button onClick={() => rename(u)} disabled={busy}>
+                  Display name
+                </button>
                 <button onClick={() => resetPassword(u)} disabled={busy}>
                   Reset password
                 </button>

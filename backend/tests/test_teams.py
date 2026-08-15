@@ -256,6 +256,25 @@ with TestClient(app) as c:
     r = c.get("/api/approvals", params={"session_id": sid})
     check("a sharee can see the pending approval",
           r.status_code == 200 and len(r.json()) == 1, r.text[:200])
+
+    # --- who sent which turn ----------------------------------------------
+    # The transcript has to say this per turn, not per session. Nina is reading
+    # a conversation Walt started, and once she adds to it the two turns have
+    # different senders — which is the whole reason the chat view cannot draw
+    # every prompt as "you", and cannot fall back to the session owner either.
+    c.post(f"/api/sessions/{sid}/prompt", json={"prompt": "and a thing from nina"})
+    settle(c, sid)
+    runs = c.get(f"/api/sessions/{sid}/transcript").json()["runs"]
+    check("the transcript says who asked for each turn",
+          all("requested_by_id" in run for run in runs), str(runs[:1])[:200])
+    senders = [run["requested_by_id"] for run in runs]
+    check("a sharee's turn is attributed to the sharee, not the owner",
+          nina in senders, str(senders))
+    check("and the owner's own turn still belongs to the owner",
+          walt in senders, str(senders))
+    check("two people in one session are two different senders",
+          len(set(senders)) == 2, str(senders))
+
     r = c.delete(f"/api/sessions/{sid}")
     check("but cannot delete somebody else's session", r.status_code == 403, str(r.status_code))
     r = c.patch(f"/api/sessions/{sid}", json={"shared_user_ids": []})

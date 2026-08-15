@@ -18,6 +18,9 @@ class LoginIn(BaseModel):
 class UserOut(ORM):
     id: int
     username: str
+    #: Null means "call them by their username". Resolved in app/names.py on
+    #: this side and in src/names.ts on the client — never inline.
+    display_name: str | None = None
     is_admin: bool
     must_change_password: bool
     created_at: datetime
@@ -25,10 +28,16 @@ class UserOut(ORM):
 
 
 class UserSummary(BaseModel):
-    """The least that lets one user share something with another."""
+    """The least that lets one user share something with another.
+
+    Both names travel together. The display name is what a screen shows, and
+    the username is what tells two people with the same display name apart —
+    display names are not unique and are not meant to be.
+    """
 
     id: int
     username: str
+    display_name: str | None = None
 
 
 class PasswordChangeIn(BaseModel):
@@ -39,13 +48,34 @@ class PasswordChangeIn(BaseModel):
 class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=8)
+    #: Optional, not unique, and blank is stored as null — see app/names.py.
+    display_name: str | None = Field(default=None, max_length=128)
     is_admin: bool = False
     must_change_password: bool = True
 
 
 class UserPatch(BaseModel):
+    """An administrator's edit of somebody else's account.
+
+    `display_name` is genuinely nullable: sending null clears it and puts the
+    person back to being called by their username. `exclude_unset` is what
+    separates that from "not mentioned".
+    """
+
     is_admin: bool | None = None
     must_change_password: bool | None = None
+    display_name: str | None = Field(default=None, max_length=128)
+
+
+class ProfilePatch(BaseModel):
+    """What a user may change about their own account without being an admin.
+
+    Only the name they are shown under. Not the username — that is the login
+    and the thing that disambiguates two people with the same display name —
+    and not the admin flag, which is the whole point of there being one.
+    """
+
+    display_name: str | None = Field(default=None, max_length=128)
 
 
 class UserPasswordReset(BaseModel):
@@ -205,6 +235,10 @@ class RunOut(ORM):
     model: str | None
     #: True on the turn that carried the post-switch briefing.
     carries_handoff: bool
+    #: Who sent this turn. Null on turns that predate the column — the UI must
+    #: say so rather than guessing, because guessing means labelling somebody
+    #: else's message with the reader's own name in a shared session.
+    requested_by_id: int | None
     status: str
     exit_code: int | None
     error: str | None

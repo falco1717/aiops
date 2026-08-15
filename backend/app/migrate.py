@@ -19,6 +19,9 @@ COLUMNS: dict[str, dict[str, str]] = {
         "is_admin": "BOOLEAN NOT NULL DEFAULT FALSE",
         "must_change_password": "BOOLEAN NOT NULL DEFAULT FALSE",
         "last_login_at": "TIMESTAMP WITH TIME ZONE",
+        # Nullable with no backfill, deliberately: null means "call them by
+        # their username", which is exactly what every existing row wants.
+        "display_name": "VARCHAR(128)",
     },
     "sessions": {
         "account_id": "INTEGER",

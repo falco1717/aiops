@@ -1,6 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { fullName } from "../names";
 import { formatUtc, isFuture } from "../time";
 import type { Account, LoginFlow, ProviderInfo, User } from "../types";
 
@@ -456,7 +457,7 @@ function AccountCard({
                     }}
                   />
                   <span>
-                    {u.username}
+                    {fullName(u)}
                     {u.is_admin && " (admin)"}
                   </span>
                 </label>

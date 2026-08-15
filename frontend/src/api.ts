@@ -75,16 +75,27 @@ export const api = {
 
   // users (admin)
   users: () => request<User[]>("/api/users"),
-  /** Usernames only, available to any signed-in user, for sharing. */
+  /** Names only, available to any signed-in user, for sharing and attribution. */
   userDirectory: () => request<UserSummary[]>("/api/users/directory"),
+  /** Your own display name. Self-service — separate route, separate permission
+   *  from the admin PATCH below, which also carries `is_admin`. */
+  updateProfile: (data: { display_name: string | null }) =>
+    request<User>("/api/users/me", { method: "PATCH", body: body(data) }),
   createUser: (data: {
     username: string;
     password: string;
+    display_name?: string | null;
     is_admin: boolean;
     must_change_password: boolean;
   }) => request<User>("/api/users", { method: "POST", body: body(data) }),
-  patchUser: (id: number, data: { is_admin?: boolean; must_change_password?: boolean }) =>
-    request<User>(`/api/users/${id}`, { method: "PATCH", body: body(data) }),
+  patchUser: (
+    id: number,
+    data: {
+      is_admin?: boolean;
+      must_change_password?: boolean;
+      display_name?: string | null;
+    },
+  ) => request<User>(`/api/users/${id}`, { method: "PATCH", body: body(data) }),
   resetUserPassword: (id: number, new_password: string, must_change_password: boolean) =>
     request<void>(`/api/users/${id}/password`, {
       method: "POST",

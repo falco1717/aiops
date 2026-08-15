@@ -1,6 +1,9 @@
 export type User = {
   id: number;
   username: string;
+  /** What to call them, when the login name is not it. Null = use the username;
+   *  resolve it with `displayName()` from ./names rather than inline. */
+  display_name: string | null;
   is_admin: boolean;
   must_change_password: boolean;
   created_at: string;
@@ -129,6 +132,13 @@ export type Run = {
   model: string | null;
   /** True on the turn that carried the post-switch briefing. */
   carries_handoff: boolean;
+  /**
+   * Who sent this turn. Null on turns older than the column, which was never
+   * backfilled — those are genuinely unattributed and must be drawn that way.
+   * Labelling them "you" is the bug this field exists to fix: sessions are
+   * shared, so the reader is very often not the sender.
+   */
+  requested_by_id: number | null;
   status: string;
   exit_code: number | null;
   error: string | null;
@@ -338,6 +348,11 @@ export type WsMessage =
       approval_id: number;
       status: string;
       note: string | null;
+      /** Who answered it, when a person did. Null for a timeout or a cancelled
+       *  run. Resolved server-side so a shared session's other watchers get a
+       *  name rather than watching the card silently disappear. */
+      decided_by_id?: number | null;
+      decided_by?: string | null;
     }
   | {
       type: "run.finished";
@@ -432,10 +447,13 @@ export type NodeEnrolment = {
   install: InstallCommand[];
 };
 
-/** Just enough about another user to share something with them. */
+/** Just enough about another user to share something with them, and to name
+ *  them. Both names travel together: the display name is what is shown, the
+ *  username is what tells two people with the same display name apart. */
 export type UserSummary = {
   id: number;
   username: string;
+  display_name: string | null;
 };
 
 /** One of your own stored systems, as the exposure warning names it. */

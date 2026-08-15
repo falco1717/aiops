@@ -1,6 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { fullName } from "../names";
 import type {
   InstallCommand,
   NodeEnrolment,
@@ -216,7 +217,9 @@ export default function Nodes({ me }: { me: User }) {
               .filter((u) => u.id !== me.id)
               .map((u) => (
                 <label key={u.id} className="row share-row">
-                  <span style={{ margin: 0, flex: 1 }}>{u.username}</span>
+                  {/* Both names: this hands somebody a way into another
+                      network, and display names are not unique. */}
+                  <span style={{ margin: 0, flex: 1 }}>{fullName(u)}</span>
                   <select
                     value={levelOf(u.id)}
                     onChange={(e) => setGrant(u.id, e.target.value as "" | "use" | "manage")}

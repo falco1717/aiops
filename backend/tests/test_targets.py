@@ -227,8 +227,11 @@ with TestClient(app) as c:
 
     r = c.get("/api/users/directory")
     check("anyone can look up who to share with", r.status_code == 200, str(r.status_code))
-    check("the directory exposes usernames and nothing more",
-          r.status_code == 200 and set(r.json()[0]) == {"id", "username"},
+    # Both names and nothing else. The display name is what a screen shows and
+    # the username is what tells two people with the same one apart, so sharing
+    # needs both — but still no roles, no timestamps, no password state.
+    check("the directory exposes names and nothing more",
+          r.status_code == 200 and set(r.json()[0]) == {"id", "username", "display_name"},
           str(r.json()[:1])[:160])
 
 # --- what actually lands on disk for a run ---------------------------------

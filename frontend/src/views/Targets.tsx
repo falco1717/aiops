@@ -1,6 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { fullName, nameById } from "../names";
 import type { RelayNode, Target, TargetGrant, User, UserSummary } from "../types";
 
 const EMPTY = {
@@ -348,7 +349,9 @@ export default function Targets({ me }: { me: User }) {
               .filter((u) => u.id !== me.id)
               .map((u) => (
                 <label key={u.id} className="row share-row">
-                  <span style={{ margin: 0, flex: 1 }}>{u.username}</span>
+                  {/* Both names: this hands somebody a stored credential, and
+                      display names are deliberately not unique. */}
+                  <span style={{ margin: 0, flex: 1 }}>{fullName(u)}</span>
                   <select
                     value={levelOf(u.id)}
                     onChange={(e) => setGrant(u.id, e.target.value as "" | "use" | "manage")}
@@ -409,7 +412,7 @@ export default function Targets({ me }: { me: User }) {
               <span className="hint" style={{ flex: 1 }}>
                 {t.owner_id === me.id
                   ? sharedWithLabel(t, users)
-                  : `Shared with you by ${users.find((u) => u.id === t.owner_id)?.username ?? "another user"}`}
+                  : `Shared with you by ${nameById(users, t.owner_id, "another user")}`}
               </span>
               {t.my_level !== "use" && (
                 <>
@@ -452,7 +455,7 @@ function sharedWithLabel(t: Target, users: UserSummary[]): string {
   const shared = t.grants.filter((g) => g.user_id !== t.owner_id);
   if (shared.length === 0) return "Only you can see this";
   const names = shared
-    .map((g) => users.find((u) => u.id === g.user_id)?.username ?? `user ${g.user_id}`)
+    .map((g) => nameById(users, g.user_id, `user ${g.user_id}`))
     .sort();
   return `Shared with ${names.slice(0, 4).join(", ")}${names.length > 4 ? ` and ${names.length - 4} more` : ""}`;
 }

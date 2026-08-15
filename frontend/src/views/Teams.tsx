@@ -1,6 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { fullName, nameById } from "../names";
 import type { Team, User, UserSummary } from "../types";
 
 /**
@@ -87,8 +88,7 @@ export default function Teams({ me }: { me: User }) {
       prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId],
     );
 
-  const nameOf = (userId: number) =>
-    users.find((u) => u.id === userId)?.username ?? `user ${userId}`;
+  const nameOf = (userId: number) => nameById(users, userId, `user ${userId}`);
 
   return (
     <div className="main">
@@ -125,7 +125,9 @@ export default function Teams({ me }: { me: User }) {
             ) : (
               users.map((u) => (
                 <label key={u.id} className="row share-row">
-                  <span style={{ margin: 0, flex: 1 }}>{u.username}</span>
+                  {/* Both names: membership grants sight of the team's sessions,
+                      and display names are not unique. */}
+                  <span style={{ margin: 0, flex: 1 }}>{fullName(u)}</span>
                   <input
                     type="checkbox"
                     checked={members.includes(u.id)}

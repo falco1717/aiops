@@ -12,7 +12,8 @@ from sqlalchemy import select
 from .config import settings
 from .db import SessionLocal
 from .events import hub
-from .models import Approval
+from .models import Approval, User
+from .names import display_name
 
 log = logging.getLogger("aiops.approvals")
 
@@ -149,6 +150,12 @@ class ApprovalBroker:
             row.decided_at = datetime.now(timezone.utc)
             await db.commit()
             session_id, run_id = row.session_id, row.run_id
+            # Resolved here, while a database session is open, rather than left
+            # to the client: a session can be shared, so the other people
+            # watching this run see the card vanish and are owed the name of
+            # whoever answered it. Null for a timeout or a cancelled run, which
+            # nobody decided.
+            decider = await db.get(User, user_id) if user_id else None
         hub.publish(
             session_id,
             {
@@ -158,6 +165,8 @@ class ApprovalBroker:
                 "approval_id": approval_id,
                 "status": status,
                 "note": decision.note,
+                "decided_by_id": user_id,
+                "decided_by": display_name(decider) if decider else None,
             },
         )
         log.info("approval %s %s", approval_id, status)

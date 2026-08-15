@@ -12,6 +12,7 @@ from ..approvals import broker, run_tokens
 from ..config import settings
 from ..db import get_db
 from ..models import Approval, Session, User
+from ..names import display_name
 from ..schemas import ApprovalDecision, ApprovalOut
 from ..security import current_user
 
@@ -69,10 +70,13 @@ async def decide(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Approval not found")
     if row.status != "pending":
         # Two people can be watching the same run. Losing the race is normal,
-        # so say what happened rather than failing opaquely.
+        # so say what happened — and who did it, now that "somebody else" is a
+        # real person with a name rather than always being you.
+        decider = await db.get(User, row.decided_by_id) if row.decided_by_id else None
+        by = f" by {display_name(decider)}" if decider else ""
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"Already {row.status}"
+            f"Already {row.status}{by}"
             + (f" — {row.note}" if row.note else "")
             + ". The agent is no longer waiting on this.",
         )

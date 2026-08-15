@@ -1,8 +1,10 @@
-"""User management, forced password changes, and the schema migration.
+"""User management, display names, forced password changes, and the migration.
 
 The migration test matters most: it simulates a database created *before*
 is_admin existed, which is exactly what an upgrade hits in production. Getting
-it wrong locks the operator out of the new screens.
+it wrong locks the operator out of the new screens. `display_name` rides the
+same fixture, so the additive column is proved against a database that has
+never seen it rather than against one `create_all` has just built.
 """
 import os
 import sqlite3
@@ -55,14 +57,57 @@ legacy.close()
 check("fixture really is the old schema", "is_admin" not in cols_before, str(sorted(cols_before)))
 
 from app.main import app  # noqa: E402
+from app.models import User as UserModel  # noqa: E402
+from app.names import (  # noqa: E402
+    MAX_DISPLAY_NAME,
+    clean_display_name,
+    display_name,
+    summarise,
+)
+
+# --- the resolver itself ----------------------------------------------------
+# Exercised directly, not only through a route. It is the one place the
+# fallback rule is written down, so it is the one place worth pinning: every
+# screen in the product reads a name through this function, and a change here
+# that only the routes covered would pass its tests while renaming everybody.
+check("display name wins when set",
+      display_name(UserModel(username="wsmith", display_name="Walt")) == "Walt")
+check("username is the fallback when unset",
+      display_name(UserModel(username="wsmith", display_name=None)) == "wsmith")
+check("a blank display name falls back rather than rendering empty",
+      display_name(UserModel(username="wsmith", display_name="   ")) == "wsmith")
+check("nobody is still named something",
+      display_name(None) == "someone")
+# Not unique, deliberately. Two Walts is the case the username disambiguates.
+check("two users may share a display name",
+      display_name(UserModel(username="wsmith", display_name="Walt"))
+      == display_name(UserModel(username="wjones", display_name="Walt")))
+check("whitespace-only normalises to null, not to a blank string",
+      clean_display_name("   ") is None, repr(clean_display_name("   ")))
+check("None stays None", clean_display_name(None) is None)
+check("a name is trimmed", clean_display_name("  Walt  ") == "Walt")
+check("an over-long name is truncated rather than stored whole",
+      clean_display_name("W" * 400) == "W" * MAX_DISPLAY_NAME,
+      str(len(clean_display_name("W" * 400))))
+_summary = summarise(UserModel(id=7, username="wsmith", display_name="Walt"))
+check("UserSummary carries both names",
+      (_summary.id, _summary.username, _summary.display_name) == (7, "wsmith", "Walt"),
+      str(_summary))
 
 with TestClient(app) as c:
     # --- migration ---------------------------------------------------
     con = sqlite3.connect(DB_PATH)
     cols = {r[1] for r in con.execute("PRAGMA table_info(users)")}
     con.close()
-    for col in ("is_admin", "must_change_password", "last_login_at"):
+    for col in ("is_admin", "must_change_password", "last_login_at", "display_name"):
         check(f"migration added users.{col}", col in cols, str(sorted(cols)))
+    # Additive means additive: the pre-existing row keeps its name and gains a
+    # null, and nothing backfills it — null already means "call them admin".
+    con = sqlite3.connect(DB_PATH)
+    legacy_row = con.execute("SELECT username, display_name FROM users WHERE id = 1").fetchone()
+    con.close()
+    check("migration left the existing user's display name null (no backfill)",
+          legacy_row == ("admin", None), str(legacy_row))
 
     r = c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
     check("pre-existing user can still sign in", r.status_code == 200, r.text[:150])
@@ -90,6 +135,72 @@ with TestClient(app) as c:
 
     r = c.get("/api/users")
     check("user list", r.status_code == 200 and len(r.json()) == 2, r.text[:200])
+
+    # --- display names, as an administrator ---------------------------
+    check("a user created without one has a null display name",
+          r.status_code == 200 and all(u["display_name"] is None for u in r.json()),
+          str([u.get("display_name") for u in r.json()]))
+
+    r = c.post("/api/users", json={"username": "wsmith", "password": "wsmithpassword",
+                                   "display_name": "Walt"})
+    check("admin can create a user with a display name",
+          r.status_code == 201 and r.json()["display_name"] == "Walt", r.text[:200])
+    walt_id = r.json()["id"] if r.status_code == 201 else None
+
+    # The whole reason the username stays the unique thing.
+    r = c.post("/api/users", json={"username": "wjones", "password": "wjonespassword",
+                                   "display_name": "Walt"})
+    check("a second user may have the same display name",
+          r.status_code == 201 and r.json()["display_name"] == "Walt", r.text[:200])
+    walt2_id = r.json()["id"] if r.status_code == 201 else None
+
+    r = c.post("/api/users", json={"username": "wsmith", "password": "anotherpassword",
+                                   "display_name": "Someone Else"})
+    check("but the username is still unique", r.status_code == 409, str(r.status_code))
+
+    r = c.post("/api/users", json={"username": "blankname", "password": "blanknamepass",
+                                   "display_name": "   "})
+    check("a whitespace-only display name is stored as null, not as a gap",
+          r.status_code == 201 and r.json()["display_name"] is None, r.text[:200])
+    blank_id = r.json()["id"] if r.status_code == 201 else None
+
+    r = c.post("/api/users", json={"username": "toolong", "password": "toolongpassword",
+                                   "display_name": "W" * 129})
+    check("an over-long display name is rejected at the edge",
+          r.status_code == 422, str(r.status_code))
+
+    # UserSummary is the shape every screen that names other people reads, and
+    # it has to carry the display name or the resolver on the client has
+    # nothing to resolve.
+    r = c.get("/api/users/directory")
+    dirn = {u["username"]: u for u in r.json()} if r.status_code == 200 else {}
+    check("the directory carries display names",
+          dirn.get("wsmith", {}).get("display_name") == "Walt", str(dirn.get("wsmith")))
+    check("the directory carries the username too, for telling two Walts apart",
+          {dirn.get("wsmith", {}).get("username"), dirn.get("wjones", {}).get("username")}
+          == {"wsmith", "wjones"}, str(sorted(dirn)))
+    check("the directory exposes nothing else about a person",
+          all(set(u) == {"id", "username", "display_name"} for u in r.json()),
+          str(r.json()[:2]))
+
+    r = c.patch(f"/api/users/{walt2_id}", json={"display_name": "Walt J"})
+    check("admin can set somebody else's display name",
+          r.status_code == 200 and r.json()["display_name"] == "Walt J", r.text[:200])
+    r = c.patch(f"/api/users/{walt2_id}", json={"display_name": "  "})
+    check("admin clearing it with blanks stores null, not a blank",
+          r.status_code == 200 and r.json()["display_name"] is None, r.text[:200])
+    r = c.patch(f"/api/users/{walt_id}", json={"display_name": None})
+    check("admin can clear a display name explicitly",
+          r.status_code == 200 and r.json()["display_name"] is None, r.text[:200])
+    # Not mentioning the field is not the same as sending null.
+    r = c.patch(f"/api/users/{walt2_id}", json={"display_name": "Walt J"})
+    r = c.patch(f"/api/users/{walt2_id}", json={"must_change_password": False})
+    check("a patch that does not mention the name leaves it alone",
+          r.status_code == 200 and r.json()["display_name"] == "Walt J", r.text[:200])
+
+    for uid in (walt_id, walt2_id, blank_id):
+        if uid:
+            c.delete(f"/api/users/{uid}")
 
     # --- self-protection rules ---------------------------------------
     admin_id = 1
@@ -136,6 +247,41 @@ with TestClient(app) as c:
     check("API unblocked after the change", r.status_code == 200, str(r.status_code))
     r = c.get("/api/auth/me")
     check("flag cleared", r.json().get("must_change_password") is False, r.text[:200])
+
+    # --- a display name is yours to set; everyone else's is not -------
+    # Two permissions on one column. Deciding what you are called is
+    # self-service; deciding what somebody *else* is called is an admin act.
+    # Folding them into one route is how a non-admin reaches a PATCH that also
+    # carries `is_admin`, so the split is the thing being tested.
+    r = c.patch("/api/users/me", json={"display_name": "Alice A"})
+    check("a non-admin can set their own display name",
+          r.status_code == 200 and r.json()["display_name"] == "Alice A", r.text[:200])
+    r = c.get("/api/auth/me")
+    check("and it comes back on the session",
+          r.json().get("display_name") == "Alice A", r.text[:200])
+
+    r = c.patch("/api/users/me", json={"display_name": "   "})
+    check("blanking your own name clears it rather than leaving a gap",
+          r.status_code == 200 and r.json()["display_name"] is None, r.text[:200])
+    r = c.patch("/api/users/me", json={"display_name": "Alice A"})
+
+    # "me" must not be swallowed by the admin `/{user_id}` route, which takes
+    # an int and would 422 on it before this route was ever considered.
+    check("the self route is not shadowed by the admin one", r.status_code == 200,
+          f"{r.status_code} {r.text[:160]}")
+
+    r = c.patch("/api/users/me", json={"display_name": "Alice", "is_admin": True})
+    check("the self route cannot be used to grant yourself admin",
+          r.status_code == 200 and r.json()["is_admin"] is False, r.text[:200])
+    r = c.get("/api/auth/me")
+    check("and the admin flag really did not move",
+          r.json().get("is_admin") is False, r.text[:200])
+
+    r = c.patch("/api/users/me", json={"display_name": "A" * 129})
+    check("your own name is length-checked too", r.status_code == 422, str(r.status_code))
+
+    r = c.patch(f"/api/users/{admin_id}", json={"display_name": "Pwned"})
+    check("a non-admin cannot rename somebody else", r.status_code == 403, str(r.status_code))
 
     # --- non-admin is still locked out of admin surfaces --------------
     r = c.get("/api/users")

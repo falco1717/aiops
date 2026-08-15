@@ -22,8 +22,16 @@ from ..models import (
     TeamMember,
     User,
 )
+from ..names import clean_display_name, summarise
 from ..runner import runner
-from ..schemas import UserCreate, UserOut, UserPasswordReset, UserPatch, UserSummary
+from ..schemas import (
+    ProfilePatch,
+    UserCreate,
+    UserOut,
+    UserPasswordReset,
+    UserPatch,
+    UserSummary,
+)
 from ..security import current_admin, current_user, hash_password
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -44,11 +52,40 @@ async def directory(_: User = Depends(current_user), db: AsyncSession = Depends(
 
     Sharing is not an admin action — whoever stores a system decides who else
     may reach it — so it cannot depend on the admin-only listing above. This
-    exposes usernames and nothing else: no roles, no timestamps, no password
-    state.
+    exposes names and nothing else: no roles, no timestamps, no password state.
+
+    Ordered by username rather than display name: the sort has to be stable and
+    display names are optional, so ordering by one would shuffle the list every
+    time somebody set or cleared theirs.
     """
     rows = await db.scalars(select(User).order_by(User.username))
-    return [UserSummary(id=u.id, username=u.username) for u in rows]
+    return [summarise(u) for u in rows]
+
+
+@router.patch("/me", response_model=UserOut)
+async def patch_me(
+    payload: ProfilePatch,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set your own display name.
+
+    Declared above `/{user_id}`, because FastAPI matches in order and the path
+    parameter is an int — "me" would otherwise be rejected as a bad integer
+    before this route was ever considered.
+
+    Separate from the admin route below rather than a special case inside it:
+    an administrator editing somebody is deciding what everyone else calls that
+    person, and this is a person deciding what they are called. Those are the
+    same field but not the same permission, and folding them together is how a
+    non-admin ends up able to PATCH a route that also carries `is_admin`.
+    """
+    data = payload.model_dump(exclude_unset=True)
+    if "display_name" in data:
+        user.display_name = clean_display_name(data["display_name"])
+    await db.commit()
+    await db.refresh(user)
+    return user
 
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -65,6 +102,9 @@ async def create_user(
 
     user = User(
         username=username,
+        # No uniqueness check: display names are not unique by design, so two
+        # Walts are allowed and the usernames beside them do the disambiguating.
+        display_name=clean_display_name(payload.display_name),
         password_hash=hash_password(payload.password),
         is_admin=payload.is_admin,
         must_change_password=payload.must_change_password,
@@ -96,6 +136,10 @@ async def patch_user(
     if data.get("is_admin") is False and user.id == admin.id:
         raise HTTPException(status.HTTP_409_CONFLICT, "You cannot remove your own admin rights")
 
+    # Normalised rather than stored raw: an admin sending "  " would otherwise
+    # leave a blank name that renders as a gap instead of falling back.
+    if "display_name" in data:
+        data["display_name"] = clean_display_name(data["display_name"])
     for key, value in data.items():
         setattr(user, key, value)
     await db.commit()

@@ -32,6 +32,11 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # What to call this person on screen, when the login name is not it. Not
+    # unique on purpose: two people called "Walt" is a real situation, and the
+    # username above is what tells them apart. Null means "use the username" —
+    # see app/names.py, which is the only place that rule is written down.
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     # Admins manage users and provider sign-ins. Everyone can drive agents.
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)

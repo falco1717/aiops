@@ -3,6 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ApiError, api, openSocket } from "../api";
 import { EFFORT_HINT, effortChoices } from "../effort";
+import { displayName, fullName, nameById } from "../names";
+import type { Suggestion, TokenMatch } from "../mentions";
+import { activeToken, emptyHint, suggestionsFor } from "../mentions";
 import type {
   Account,
   AgentEvent,
@@ -16,6 +19,7 @@ import type {
   Run,
   Session,
   SessionFiles,
+  Target,
   Team,
   User,
   UserSummary,
@@ -74,6 +78,28 @@ function formatSize(bytes: number): string {
 /** Sent with a message that carried files but no words of its own. */
 const ATTACHMENTS_ONLY_PROMPT = "Take a look at the attached file(s).";
 
+/** ids for the combobox wiring; the listbox is a singleton per composer. */
+const LISTBOX_ID = "composer-suggestions";
+const optionId = (index: number) => `${LISTBOX_ID}-option-${index}`;
+
+/**
+ * What to call whoever sent a turn.
+ *
+ * Three cases, and the third is the one that matters. `requested_by_id` was
+ * added after sessions became shareable and was never backfilled, so old turns
+ * carry no sender at all. Falling back to "you" there is exactly the bug this
+ * replaces — in a shared transcript the reader is usually not the author — and
+ * falling back to the session owner would be a guess dressed up as a fact. So
+ * an unattributed turn says so.
+ */
+function turnAuthor(run: Run, me: User, directory: UserSummary[]): string {
+  if (run.requested_by_id === null) return "sent before AIOps recorded senders";
+  if (run.requested_by_id === me.id) return "you";
+  const who = directory.find((u) => u.id === run.requested_by_id);
+  // A sender who has since been deleted still has an id on the run.
+  return who ? displayName(who) : "a since-removed user";
+}
+
 /** Kinds that mean the streaming buffer for this run has been superseded. */
 const FLUSHES_LIVE = new Set(["assistant", "thinking", "result", "tool_use"]);
 
@@ -97,9 +123,22 @@ export default function Chat({
   const [renaming, setRenaming] = useState(false);
   const [draftTitle, setDraftTitle] = useState("");
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
-  const [pickerOpen, setPickerOpen] = useState(false);
+  // What `@` offers: exactly the systems this user can reach, which is exactly
+  // what a turn of theirs will be given. Anything else would be a menu of names
+  // the run cannot resolve.
+  const [targets, setTargets] = useState<Target[]>([]);
+  // Where the caret is, tracked because the suggestion menu is a function of
+  // the word the caret is *in* — not of the whole prompt.
+  const [caret, setCaret] = useState(0);
+  const [active, setActive] = useState(0);
+  // The token Escape was pressed on. Typing changes the token, which is what
+  // brings the menu back; moving the caret back to the same word does not.
+  const [dismissed, setDismissed] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  // Somebody else's answers to the approvals above, kept on screen briefly so
+  // a card that disappears is attributable rather than mysterious.
+  const [decisions, setDecisions] = useState<{ id: number; text: string }[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -125,6 +164,9 @@ export default function Chat({
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pinnedRef = useRef(true);
+  // Read by the document-level Escape handler for the ⋯ menu, which must not
+  // fire while the suggestion list is open — see `closeTools` below.
+  const suggestOpenRef = useRef(false);
 
   // Highest persisted event id we hold, so a reconnect can ask for just the
   // gap instead of the whole transcript. Websocket frames carry no id, so this
@@ -180,6 +222,12 @@ export default function Chat({
   // Only needed to put a name to the account ids on a run.
   useEffect(() => {
     api.accounts().then(setAccounts).catch(() => setAccounts([]));
+  }, []);
+
+  // The `@` menu. Not session-scoped: /api/targets is already the caller's own
+  // reachable set, which is the same set the runner materialises for their turn.
+  useEffect(() => {
+    api.targets().then(setTargets).catch(() => setTargets([]));
   }, []);
 
   // For the effort control: which levels this CLI accepts is the CLI's answer,
@@ -317,6 +365,20 @@ export default function Chat({
         } else if (msg.type === "approval.resolved") {
           // Someone answered — possibly in another tab, possibly it timed out.
           setApprovals((prev) => prev.filter((a) => a.id !== msg.approval_id));
+          // Whose answer it was. In a shared session the card can vanish under
+          // somebody who was reading it, and "it disappeared" is not an answer
+          // to "who let the agent run that". Skipped for your own decisions,
+          // which you just made, and for expiries, which nobody made.
+          if (msg.decided_by && msg.decided_by_id !== me.id) {
+            setDecisions((prev) => [
+              ...prev.filter((d) => d.id !== msg.approval_id),
+              { id: msg.approval_id, text: `${msg.decided_by} ${msg.status} this tool call.` },
+            ]);
+            window.setTimeout(
+              () => setDecisions((prev) => prev.filter((d) => d.id !== msg.approval_id)),
+              12000,
+            );
+          }
         } else if (msg.type === "run.started" || msg.type === "run.finished") {
           setLive((prev) => {
             const next = { ...prev };
@@ -335,7 +397,7 @@ export default function Chat({
       window.clearTimeout(retry);
       socket?.close();
     };
-  }, [sessionId, mergeEvents, reload, loadApprovals, onChanged]);
+  }, [sessionId, mergeEvents, reload, loadApprovals, onChanged, me.id]);
 
   // Keep the newest output in view, unless the reader has scrolled up.
   useEffect(() => {
@@ -538,24 +600,125 @@ export default function Chat({
     }
   };
 
-  /** Insert a `/name ` token at the caret. */
-  const insertCapability = (name: string) => {
-    const el = promptRef.current;
-    const token = `/${name} `;
-    if (!el) {
-      setPrompt((p) => (p ? `${p}\n${token}` : token));
-    } else {
-      const start = el.selectionStart ?? prompt.length;
-      const end = el.selectionEnd ?? start;
-      setPrompt(prompt.slice(0, start) + token + prompt.slice(end));
+  // --- inline autocomplete -------------------------------------------
+  //
+  // A menu that follows the word the caret is in, rather than a panel behind a
+  // button. Everything below is derived from (prompt, caret): there is no
+  // "menu is open" flag to get out of step with the text, which is how these
+  // end up hanging over a composer that no longer has a token in it.
+  const token = useMemo(
+    () => (activeRun ? null : activeToken(prompt, caret)),
+    [prompt, caret, activeRun],
+  );
+  const tokenKey = token ? `${token.trigger}${token.start}:${token.query}` : null;
+  const suggestions = useMemo(
+    () => (token ? suggestionsFor(token, capabilities, targets) : []),
+    [token, capabilities, targets],
+  );
+  const menuOpen = token !== null && tokenKey !== dismissed;
+  suggestOpenRef.current = menuOpen;
+
+  // A new token starts at the top. Keyed on the token rather than on the list,
+  // so narrowing a search does not silently leave the highlight on row 7 of a
+  // list that now has two rows.
+  useEffect(() => {
+    setActive(0);
+  }, [tokenKey]);
+
+  /** Put the caret where the DOM says it is. */
+  const syncCaret = (el: HTMLTextAreaElement) => setCaret(el.selectionStart ?? 0);
+
+  /** Replace the live token with a chosen suggestion. */
+  const acceptSuggestion = useCallback(
+    (choice: Suggestion, at: TokenMatch) => {
+      const next = prompt.slice(0, at.start) + choice.insert + prompt.slice(at.end);
+      const caretAt = at.start + choice.insert.length;
+      setPrompt(next);
+      setCaret(caretAt);
+      setDismissed(null);
+      // After the state lands, or setSelectionRange runs against the old value
+      // and the caret jumps to the end of the previous text.
       window.setTimeout(() => {
+        const el = promptRef.current;
+        if (!el) return;
         el.focus();
-        const at = start + token.length;
-        el.setSelectionRange(at, at);
+        el.setSelectionRange(caretAt, caretAt);
       }, 0);
-    }
-    setPickerOpen(false);
+    },
+    [prompt],
+  );
+
+  /**
+   * Open the menu from a button rather than from typing.
+   *
+   * Inserts the trigger character instead of setting a flag, so the button and
+   * the keyboard reach the *same* list through the same code path — a separate
+   * "picker is open" state was the old design and it could disagree with the
+   * text in the box.
+   */
+  const openTrigger = (trigger: "/" | "@") => {
+    const el = promptRef.current;
+    const at = el ? (el.selectionStart ?? prompt.length) : prompt.length;
+    const end = el ? (el.selectionEnd ?? at) : at;
+    // A trigger only counts at the start of a word, so it needs a space in
+    // front of it unless there already is one.
+    const needsSpace = at > 0 && !/\s/.test(prompt[at - 1]);
+    const insert = `${needsSpace ? " " : ""}${trigger}`;
+    const next = prompt.slice(0, at) + insert + prompt.slice(end);
+    const caretAt = at + insert.length;
+    setPrompt(next);
+    setCaret(caretAt);
+    setDismissed(null);
+    window.setTimeout(() => {
+      const box = promptRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(caretAt, caretAt);
+    }, 0);
   };
+
+  // --- dismissing the ⋯ menu -----------------------------------------
+  //
+  // On a phone `.chat-tools.open` is absolutely positioned over most of the
+  // screen, and until now the only way to put it away was the 42px button that
+  // opened it. Escape and a tap outside are what anyone expects of a menu.
+  //
+  // Share and Files close with it on every path, not just the button's: they
+  // are opened from inside this menu, so leaving one up after the menu has gone
+  // reads as a stuck window. Both panels render outside the `.chat-tools`
+  // element, so they are marked as part of its region rather than counted as
+  // "outside".
+  const closeTools = useCallback(() => {
+    setToolsOpen(false);
+    setShareOpen(false);
+    setFilesOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!toolsOpen) return;
+    const outside = (event: Event) => {
+      const el = event.target instanceof Element ? event.target : null;
+      if (el?.closest("[data-tools-region]")) return;
+      // Deliberately no preventDefault: this is a menu, not a modal. The tap
+      // that dismisses it still lands on whatever it was aimed at, so the next
+      // tap is not swallowed and the composer does not feel dead.
+      closeTools();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      // The suggestion list is the more immediate thing and takes Escape first;
+      // this menu gets the next one. The textarea's own handler also stops the
+      // event, and this is the belt to that pair of braces.
+      if (suggestOpenRef.current) return;
+      closeTools();
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [toolsOpen, closeTools]);
 
   const efforts = effortChoices(
     providers.find((p) => p.name === session?.provider),
@@ -649,15 +812,17 @@ export default function Chat({
         {!renaming && (
           <button
             type="button"
+            data-tools-region
             className={`icon-btn chat-more${toolsOpen ? " open" : ""}`}
             aria-expanded={toolsOpen}
+            aria-haspopup="menu"
             onClick={() => {
               // The panels are opened from inside this menu, so they belong to
               // it: leaving Share up after the menu it was launched from has
-              // gone reads as a stuck window rather than a choice.
-              setToolsOpen((v) => !v);
-              setShareOpen(false);
-              setFilesOpen(false);
+              // gone reads as a stuck window rather than a choice. Escape and
+              // an outside tap go through `closeTools` for the same reason.
+              if (toolsOpen) closeTools();
+              else setToolsOpen(true);
             }}
             title="Session settings and actions"
           >
@@ -665,7 +830,7 @@ export default function Chat({
           </button>
         )}
         {!renaming && (
-          <div className={`chat-tools${toolsOpen ? " open" : ""}`}>
+          <div data-tools-region className={`chat-tools${toolsOpen ? " open" : ""}`}>
             {/* Which agent runs this conversation. Dead while a turn is in
                 flight: the prompt has already gone to one CLI, and switching
                 underneath it would leave the reply attributed to the other. */}
@@ -781,7 +946,28 @@ export default function Chat({
           <div key={run.id} style={{ display: "contents" }}>
             <div className="msg prompt">
               <div className="who">
-                you{run.schedule_id ? " (scheduled)" : ""}
+                {/* Who actually sent it, read off the run. A session can be
+                    shared, so "you" was wrong for every turn somebody else
+                    typed — and a scheduled turn is attributed to the schedule's
+                    owner, which is whose credentials it ran with. */}
+                <span
+                  className={
+                    run.requested_by_id === null ? "turn-who unattributed" : "turn-who"
+                  }
+                  title={
+                    run.requested_by_id === null
+                      ? "This turn predates AIOps recording who sent each message, and " +
+                        "the record was never reconstructed. It is not necessarily yours."
+                      : run.requested_by_id === me.id
+                        ? "You sent this turn."
+                        : `Sent by ${fullName(
+                            directory.find((u) => u.id === run.requested_by_id),
+                          )}.`
+                  }
+                >
+                  {turnAuthor(run, me, directory)}
+                </span>
+                {run.schedule_id ? " (scheduled)" : ""}
                 {/* Per turn, not per session: a switched conversation is a
                     mixed one, and reading this off the session would relabel
                     every earlier turn as the agent selected now. */}
@@ -884,6 +1070,12 @@ export default function Chat({
         />
       ))}
 
+      {decisions.map((d) => (
+        <div key={d.id} className="msg system approval-decision" role="status">
+          {d.text}
+        </div>
+      ))}
+
       {filesOpen && <FilesPanel sessionId={sessionId} onClose={() => setFilesOpen(false)} />}
 
       {/* Above the composer for the same reason an approval card is: it is a
@@ -934,34 +1126,15 @@ export default function Chat({
           void stage(Array.from(e.dataTransfer.files));
         }}
       >
-        {pickerOpen && (
-          <div className="picker">
-            <div className="picker-head">
-              <strong>Skills &amp; commands</strong>
-              <button type="button" onClick={() => setPickerOpen(false)}>
-                Close
-              </button>
-            </div>
-            {capabilities.length === 0 ? (
-              <div className="empty" style={{ padding: 14 }}>
-                Nothing found. Skills live in <code>.claude/skills/</code> in the workspace or in
-                the container's <code>~/.claude/</code>.
-              </div>
-            ) : (
-              <ul>
-                {capabilities.map((c) => (
-                  <li key={`${c.kind}:${c.name}`}>
-                    <button type="button" onClick={() => insertCapability(c.name)}>
-                      <span className="cap-name">/{c.name}</span>
-                      <span className={`pill ${c.kind === "skill" ? "ok" : ""}`}>{c.kind}</span>
-                      <span className="cap-src">{c.source}</span>
-                      {c.description && <span className="cap-desc">{c.description}</span>}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+        {menuOpen && token && (
+          <Suggestions
+            trigger={token.trigger}
+            items={suggestions}
+            hint={emptyHint(token, capabilities, targets)}
+            active={active}
+            onHover={setActive}
+            onPick={(choice) => acceptSuggestion(choice, token)}
+          />
         )}
         {(staged.length > 0 || uploading) && (
           <div className="attach-strip">
@@ -983,12 +1156,62 @@ export default function Chat({
           placeholder={
             activeRun
               ? "Agent is working — stop it or wait…"
-              : "Describe the task…  (Ctrl+Enter to send, / for skills, paste or drop files)"
+              : "Describe the task…  (Ctrl+Enter to send, / for skills, @ for systems, paste or drop files)"
           }
           disabled={!!activeRun}
-          onChange={(e) => setPrompt(e.target.value)}
+          // It is a combobox while the menu is up: a text box that owns a list
+          // somebody can arrow through. `aria-expanded` is the part screen
+          // readers use to say so, and it has to be present on the input
+          // itself, not on the list.
+          role="combobox"
+          aria-expanded={menuOpen}
+          aria-controls={menuOpen && suggestions.length > 0 ? LISTBOX_ID : undefined}
+          aria-autocomplete="list"
+          aria-activedescendant={
+            menuOpen && suggestions.length > 0 ? optionId(active) : undefined
+          }
+          onChange={(e) => {
+            setPrompt(e.target.value);
+            syncCaret(e.target);
+          }}
+          // Fires for caret moves as well as selections, which is what keeps
+          // the menu attached to the word the caret is actually in after an
+          // arrow key or a click into the middle of the text.
+          onSelect={(e) => syncCaret(e.currentTarget)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void send(e);
+            // Sending always wins, menu or no menu: Ctrl/Cmd+Enter is the send
+            // key in this composer and must not become "accept a suggestion".
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+              void send(e);
+              return;
+            }
+            if (!menuOpen) return;
+            if (e.key === "Escape") {
+              // Taken here so the ⋯ menu's document-level handler does not also
+              // see it. The list is the more immediate thing; the menu, if it
+              // is open too, gets the next Escape.
+              e.preventDefault();
+              e.stopPropagation();
+              setDismissed(tokenKey);
+              return;
+            }
+            // With nothing to choose from, every key below falls through to the
+            // textarea. Enter must still make a newline when the panel is only
+            // saying "nothing matches".
+            if (suggestions.length === 0) return;
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              setActive((i) => (i + 1) % suggestions.length);
+            } else if (e.key === "ArrowUp") {
+              e.preventDefault();
+              setActive((i) => (i - 1 + suggestions.length) % suggestions.length);
+            } else if (e.key === "Enter" || e.key === "Tab") {
+              // Plain Enter never sent in this composer — it makes a newline —
+              // so taking it here costs nothing and matches every other
+              // autocomplete. Tab does the same rather than moving focus.
+              e.preventDefault();
+              if (token) acceptSuggestion(suggestions[active], token);
+            }
           }}
           onPaste={(e) => {
             // A screenshot on the clipboard arrives here as a file with no name
@@ -1029,14 +1252,29 @@ export default function Chat({
               <span className="pill" style={{ marginLeft: 6 }}>{staged.length}</span>
             )}
           </button>
+          {/* Kept because the inline menu is invisible until you know to type
+              the character. Both buttons insert the trigger and let the same
+              code path open the same list — there is no second picker. */}
           <button
             type="button"
-            onClick={() => setPickerOpen((v) => !v)}
-            title="Insert a skill or slash command"
+            onClick={() => openTrigger("/")}
+            disabled={!!activeRun}
+            title="Insert a skill or slash command — or just type / in the box"
           >
             / Skills
             {capabilities.length > 0 && (
               <span className="pill" style={{ marginLeft: 6 }}>{capabilities.length}</span>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => openTrigger("@")}
+            disabled={!!activeRun}
+            title="Insert a stored system by name — or just type @ in the box"
+          >
+            @ Systems
+            {targets.length > 0 && (
+              <span className="pill" style={{ marginLeft: 6 }}>{targets.length}</span>
             )}
           </button>
           {session?.provider_session_id && (
@@ -1050,9 +1288,88 @@ export default function Chat({
   );
 }
 
-/** "alice", "alice and bob", "alice, bob and carol". */
+/**
+ * The list the composer's `/` and `@` menus draw.
+ *
+ * A listbox owned by the textarea, not a dialog: focus never leaves the box, so
+ * the options are `<li role="option">` rather than buttons, and a pointer press
+ * is cancelled before it can move focus.
+ */
+function Suggestions({
+  trigger,
+  items,
+  hint,
+  active,
+  onPick,
+  onHover,
+}: {
+  trigger: "/" | "@";
+  items: Suggestion[];
+  hint: string;
+  active: number;
+  onPick: (choice: Suggestion) => void;
+  onHover: (index: number) => void;
+}) {
+  const listRef = useRef<HTMLUListElement>(null);
+
+  // Arrowing past the bottom of a scrolled list must bring the row into view;
+  // `aria-activedescendant` moves the accessibility cursor but not the pixels.
+  useEffect(() => {
+    const el = listRef.current?.querySelector<HTMLElement>(`#${CSS.escape(optionId(active))}`);
+    el?.scrollIntoView({ block: "nearest" });
+  }, [active, items.length]);
+
+  const label = trigger === "/" ? "Skills & commands" : "Stored systems";
+
+  return (
+    <div className="picker suggest">
+      <div className="picker-head">
+        <strong>{label}</strong>
+        <span className="picker-keys">↑↓ move · Enter or Tab insert · Esc close</span>
+      </div>
+      {items.length === 0 ? (
+        // Never a silent empty box: a trigger that matches nothing has to say
+        // whether the list is empty or the word is wrong, because those want
+        // opposite responses from the reader.
+        <div className="picker-empty" role="status">
+          {hint}
+        </div>
+      ) : (
+        <ul id={LISTBOX_ID} role="listbox" aria-label={label} ref={listRef}>
+          {items.map((s, i) => (
+            <li
+              key={s.key}
+              id={optionId(i)}
+              role="option"
+              aria-selected={i === active}
+              className={`suggest-row${i === active ? " active" : ""}`}
+              // Two handlers rather than one on pointerdown. mousedown is
+              // cancelled purely to keep focus — and the caret — in the
+              // textarea we are about to write into; the choice itself is made
+              // on click. Picking on pointerdown instead would fire the moment
+              // a finger touched a row, so a drag meant to scroll a long list
+              // would insert whatever it started on. click is synthesised from
+              // a tap, so this stays one code path for mouse and touch.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => onPick(s)}
+              onMouseMove={() => onHover(i)}
+            >
+              <span className="cap-name">{s.label}</span>
+              {s.badge && <span className="pill">{s.badge}</span>}
+              {s.source && <span className="cap-src">{s.source}</span>}
+              {s.detail && <span className="cap-desc">{s.detail}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** "alice", "alice and bob", "alice, bob and carol" — by display name. */
 function names(people: UserSummary[]): string {
-  const list = people.map((p) => p.username).sort();
+  // Sorted on what is shown, so the sentence reads in the order it is drawn.
+  const list = people.map(displayName).sort();
   if (list.length === 0) return "nobody else";
   if (list.length === 1) return list[0];
   return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
@@ -1306,7 +1623,7 @@ function FilesPanel({ sessionId, onClose }: { sessionId: string; onClose: () => 
   }, [load]);
 
   return (
-    <div className="files-panel">
+    <div className="files-panel" data-tools-region>
       <div className="files-head">
         <strong>Files</strong>
         <span className="files-root mono">{data?.root ?? "…"}</span>
@@ -1373,7 +1690,7 @@ function Sharing({
 
   const mine = me.is_admin || session.owner_id === me.id;
   const nameOf = (id: number | null) =>
-    users.find((u) => u.id === id)?.username ?? (id === null ? "nobody" : `user ${id}`);
+    id === null ? "nobody" : nameById(users, id, `user ${id}`);
 
   const save = async (changes: Partial<Session>) => {
     setBusy(true);
@@ -1396,7 +1713,9 @@ function Sharing({
   };
 
   return (
-    <div className="session-share">
+    // Opened from the ⋯ menu, so it counts as part of it: a tap in here must
+    // not read as a tap outside the menu and put both away.
+    <div className="session-share" data-tools-region>
       {error && <div className="error-banner">{error}</div>}
       <fieldset className="sharing">
         <legend>Who can see this session</legend>
@@ -1444,7 +1763,10 @@ function Sharing({
                 .filter((u) => u.id !== session.owner_id)
                 .map((u) => (
                   <label key={u.id} className="row share-row">
-                    <span style={{ margin: 0, flex: 1 }}>{u.username}</span>
+                    {/* Both names, because letting somebody in is a decision
+                        with a consequence and display names are not unique —
+                        two people called "Walt" must be tellable apart here. */}
+                    <span style={{ margin: 0, flex: 1 }}>{fullName(u)}</span>
                     <input
                       type="checkbox"
                       checked={shared.includes(u.id)}
@@ -1478,7 +1800,7 @@ function Sharing({
                   .filter((u) => u.id !== session.owner_id)
                   .map((u) => (
                     <option key={u.id} value={u.id}>
-                      {u.username}
+                      {fullName(u)}
                     </option>
                   ))}
               </select>

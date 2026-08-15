@@ -29,8 +29,8 @@ from ..schemas import (
     SessionOut,
     SessionPatch,
     TranscriptOut,
-    UserSummary,
 )
+from ..names import summarise
 from ..runner import runner
 from ..security import current_user
 from ..services import (
@@ -456,16 +456,14 @@ async def list_events(
 def _rendered(exposure: exposure_facts.Exposure) -> ExposureOut:
     return ExposureOut(
         session_id=exposure.session_id,
-        viewers=[UserSummary(id=v.id, username=v.username) for v in exposure.viewers],
+        viewers=[summarise(v) for v in exposure.viewers],
         systems=[
             ExposureSystem(id=t.id, name=t.name, slug=t.slug) for t in exposure.systems
         ],
         at_stake=exposure.at_stake,
         acknowledged=exposure.acknowledged,
         acknowledged_at=exposure.acknowledged_at,
-        new_viewers=[
-            UserSummary(id=v.id, username=v.username) for v in exposure.new_viewers
-        ],
+        new_viewers=[summarise(v) for v in exposure.new_viewers],
         needs_acknowledgement=exposure.needs_acknowledgement,
     )
 

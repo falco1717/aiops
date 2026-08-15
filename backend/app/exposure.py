@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .access import session_viewer_ids
 from .models import Event, Run, Session, SessionExposureAck, Target, User, utcnow
+from .names import display_name
 from .ssh_targets import visible_targets
 
 #: What the transcript note is tagged with, so it can be found after the fact
@@ -190,7 +191,13 @@ REFUSAL = (
 
 
 def refusal(exposure: Exposure) -> str:
-    return REFUSAL.format(who=_join(v.username for v in exposure.new_viewers))
+    # Named the way the reader sees them named everywhere else — this is a
+    # sentence a person has to make a decision from, and a login name they have
+    # never seen is a worse prompt than the name on their screen. The transcript
+    # record written by `record_use` below deliberately does *not* follow suit:
+    # that one is the audit trail, and an audit trail wants the identifier that
+    # is unique.
+    return REFUSAL.format(who=_join(display_name(v) for v in exposure.new_viewers))
 
 
 async def record_use(

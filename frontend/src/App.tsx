@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError, api } from "./api";
+import { displayName } from "./names";
 import Logo, { Mark } from "./components/Logo";
 import type { User } from "./types";
 import Account, { ChangePassword } from "./views/Account";
@@ -110,8 +111,8 @@ export default function App() {
           </NavLink>
         ))}
         <div className="sidebar-foot">
-          <NavLink to="/account" className="nav-link">
-            {user.username}
+          <NavLink to="/account" className="nav-link" title={user.username}>
+            {displayName(user)}
             {user.is_admin && <span className="pill ok" style={{ marginLeft: 6 }}>admin</span>}
           </NavLink>
           <button onClick={logout} style={{ marginTop: 8, width: "100%" }}>
