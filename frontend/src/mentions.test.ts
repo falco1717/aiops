@@ -16,6 +16,7 @@ import type { Capability, Target } from "./types";
 import type { TokenMatch } from "./mentions";
 import {
   activeToken,
+  applySuggestion,
   capabilitySuggestions,
   emptyHint,
   suggestionsFor,
@@ -26,21 +27,6 @@ import {
 function must(token: TokenMatch | null): TokenMatch {
   if (!token) throw new Error("expected a live token, got null");
   return token;
-}
-
-/**
- * What the composer does with an accepted suggestion.
- *
- * Mirrors `acceptSuggestion` in views/Chat.tsx exactly — the replacement spans
- * `start`..`end` and the caret lands after the inserted text. Duplicated here
- * on purpose: these tests are about whether `activeToken` hands that code the
- * right boundaries, so the arithmetic it will apply has to be visible.
- */
-function accept(text: string, token: TokenMatch, insert: string): { text: string; caret: number } {
-  return {
-    text: text.slice(0, token.start) + insert + text.slice(token.end),
-    caret: token.start + insert.length,
-  };
 }
 
 function cap(name: string, description = "", kind: Capability["kind"] = "command"): Capability {
@@ -106,7 +92,7 @@ describe("regression: caret parked on the trigger must not open the menu", () =>
     // token, so there is nothing to accept — which is the assertion above.
     expect(activeToken("/rel", 0)).toBeNull();
     const token = must(activeToken("/rel", 4));
-    expect(accept("/rel", token, "/release ")).toEqual({ text: "/release ", caret: 9 });
+    expect(applySuggestion("/rel", token, "/release ")).toEqual({ text: "/release ", caret: 9 });
   });
 });
 
@@ -122,7 +108,7 @@ describe("regression: the replacement covers the whole word, not just up to the 
   it("accepting mid-word leaves no orphaned tail", () => {
     const text = "/deploy";
     const token = must(activeToken(text, 4));
-    expect(accept(text, token, "/deploy-check ")).toEqual({
+    expect(applySuggestion(text, token, "/deploy-check ")).toEqual({
       text: "/deploy-check ",
       caret: 14,
     });
@@ -135,7 +121,7 @@ describe("regression: the replacement covers the whole word, not just up to the 
     // The double space is not a typo: every insertion carries a trailing space
     // so the menu does not immediately reopen on the token just accepted, and
     // here it lands in front of a word that already had one.
-    expect(accept(text, token, "/deploy-check ")).toEqual({
+    expect(applySuggestion(text, token, "/deploy-check ")).toEqual({
       text: "run /deploy-check  now",
       caret: 18,
     });
@@ -261,7 +247,7 @@ describe("@ offers stored systems by slug", () => {
     const token = must(activeToken(text, 4));
     expect(token).toEqual({ trigger: "@", query: "pro", start: 0, end: 6 });
     const [prod] = targetSuggestions(TARGETS, token.query);
-    expect(accept(text, token, prod.insert)).toEqual({ text: "prod-db ", caret: 8 });
+    expect(applySuggestion(text, token, prod.insert)).toEqual({ text: "prod-db ", caret: 8 });
   });
 });
 

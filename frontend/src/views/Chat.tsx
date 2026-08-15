@@ -5,7 +5,7 @@ import { ApiError, api, openSocket } from "../api";
 import { EFFORT_HINT, effortChoices } from "../effort";
 import { displayName, fullName, nameById } from "../names";
 import type { Suggestion, TokenMatch } from "../mentions";
-import { activeToken, emptyHint, suggestionsFor } from "../mentions";
+import { activeToken, applySuggestion, emptyHint, suggestionsFor } from "../mentions";
 import type {
   Account,
   AgentEvent,
@@ -631,8 +631,7 @@ export default function Chat({
   /** Replace the live token with a chosen suggestion. */
   const acceptSuggestion = useCallback(
     (choice: Suggestion, at: TokenMatch) => {
-      const next = prompt.slice(0, at.start) + choice.insert + prompt.slice(at.end);
-      const caretAt = at.start + choice.insert.length;
+      const { text: next, caret: caretAt } = applySuggestion(prompt, at, choice.insert);
       setPrompt(next);
       setCaret(caretAt);
       setDismissed(null);

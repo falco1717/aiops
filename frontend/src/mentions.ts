@@ -72,6 +72,26 @@ export function activeToken(text: string, caret: number): TokenMatch | null {
   return { trigger: char as Trigger, query, start, end };
 }
 
+/**
+ * The text and caret that accepting a suggestion leaves behind.
+ *
+ * The replacement spans `start`..`end` — the whole word, not just the part
+ * before the caret — and the caret lands after the inserted text, which is
+ * where someone who just picked `/deploy ` expects to carry on typing. Pure so
+ * the composer's arithmetic can be tested without a DOM: the component keeps
+ * the setState and the `setSelectionRange` around the call.
+ */
+export function applySuggestion(
+  text: string,
+  token: TokenMatch,
+  insert: string,
+): { text: string; caret: number } {
+  return {
+    text: text.slice(0, token.start) + insert + text.slice(token.end),
+    caret: token.start + insert.length,
+  };
+}
+
 /** One row of the suggestion list. */
 export type Suggestion = {
   /** Stable within a list; used for the option element's DOM id. */
