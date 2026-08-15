@@ -6,6 +6,7 @@ import { EFFORT_HINT, effortChoices } from "../effort";
 import { displayName, fullName, nameById } from "../names";
 import type { Suggestion, TokenMatch } from "../mentions";
 import { activeToken, applySuggestion, emptyHint, suggestionsFor } from "../mentions";
+import { composerKeyAction } from "../composerKeys";
 import type {
   Account,
   AgentEvent,
@@ -25,6 +26,32 @@ import type {
   UserSummary,
   WsMessage,
 } from "../types";
+
+/**
+ * The phone layout, as the stylesheet defines it.
+ *
+ * There was no JavaScript-side notion of "mobile" in this codebase before this
+ * — the split was drawn entirely in CSS — and inventing a second definition
+ * would guarantee the two drift apart. So this is the *same string* the mobile
+ * block in `styles.css` opens with, and desktop is its exact complement rather
+ * than a `min-width` a fractional viewport could fall between.
+ */
+const MOBILE_QUERY = "(max-width: 860px)";
+
+/** True at the desktop layout. Re-reads on resize, so a dragged window keeps up. */
+function useIsDesktop(): boolean {
+  const [isDesktop, setIsDesktop] = useState(
+    () => typeof window === "undefined" || !window.matchMedia(MOBILE_QUERY).matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia(MOBILE_QUERY);
+    const onChange = () => setIsDesktop(!mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return isDesktop;
+}
 
 type ChatEvent = Pick<
   AgentEvent,
@@ -618,6 +645,10 @@ export default function Chat({
   const menuOpen = token !== null && tokenKey !== dismissed;
   suggestOpenRef.current = menuOpen;
 
+  // Enter sends at the desktop layout and makes a newline on a phone. The rule
+  // itself is in `composerKeys.ts`; this is only the width half of it.
+  const isDesktop = useIsDesktop();
+
   // A new token starts at the top. Keyed on the token rather than on the list,
   // so narrowing a search does not silently leave the highlight on row 7 of a
   // list that now has two rows.
@@ -1155,7 +1186,9 @@ export default function Chat({
           placeholder={
             activeRun
               ? "Agent is working — stop it or wait…"
-              : "Describe the task…  (Ctrl+Enter to send, / for skills, @ for systems, paste or drop files)"
+              : isDesktop
+                ? "Describe the task…  (Enter to send, Shift+Enter for a new line, / for skills, @ for systems, paste or drop files)"
+                : "Describe the task…  (Ctrl+Enter to send, / for skills, @ for systems, paste or drop files)"
           }
           disabled={!!activeRun}
           // It is a combobox while the menu is up: a text box that owns a list
@@ -1178,38 +1211,44 @@ export default function Chat({
           // arrow key or a click into the middle of the text.
           onSelect={(e) => syncCaret(e.currentTarget)}
           onKeyDown={(e) => {
-            // Sending always wins, menu or no menu: Ctrl/Cmd+Enter is the send
-            // key in this composer and must not become "accept a suggestion".
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-              void send(e);
-              return;
-            }
-            if (!menuOpen) return;
-            if (e.key === "Escape") {
-              // Taken here so the ⋯ menu's document-level handler does not also
-              // see it. The list is the more immediate thing; the menu, if it
-              // is open too, gets the next Escape.
-              e.preventDefault();
-              e.stopPropagation();
-              setDismissed(tokenKey);
-              return;
-            }
-            // With nothing to choose from, every key below falls through to the
-            // textarea. Enter must still make a newline when the panel is only
-            // saying "nothing matches".
-            if (suggestions.length === 0) return;
-            if (e.key === "ArrowDown") {
-              e.preventDefault();
-              setActive((i) => (i + 1) % suggestions.length);
-            } else if (e.key === "ArrowUp") {
-              e.preventDefault();
-              setActive((i) => (i - 1 + suggestions.length) % suggestions.length);
-            } else if (e.key === "Enter" || e.key === "Tab") {
-              // Plain Enter never sent in this composer — it makes a newline —
-              // so taking it here costs nothing and matches every other
-              // autocomplete. Tab does the same rather than moving focus.
-              e.preventDefault();
-              if (token) acceptSuggestion(suggestions[active], token);
+            // The whole rule — which modifier does what, and what changes when
+            // the suggestion list is up or the window is phone-sized — lives in
+            // `composerKeys.ts` and is tested there. This switch is only the
+            // wiring: preventDefault, and the state each answer implies.
+            switch (
+              composerKeyAction(e, {
+                menuOpen,
+                suggestionCount: suggestions.length,
+                enterSends: isDesktop,
+              })
+            ) {
+              case "send":
+                // `send` calls preventDefault itself, so the Enter that sent
+                // the message never also lands a newline in the box.
+                void send(e);
+                return;
+              case "dismiss":
+                // Taken here so the ⋯ menu's document-level handler does not
+                // also see it. The list is the more immediate thing; the menu,
+                // if it is open too, gets the next Escape.
+                e.preventDefault();
+                e.stopPropagation();
+                setDismissed(tokenKey);
+                return;
+              case "accept":
+                e.preventDefault();
+                if (token) acceptSuggestion(suggestions[active], token);
+                return;
+              case "next":
+                e.preventDefault();
+                setActive((i) => (i + 1) % suggestions.length);
+                return;
+              case "prev":
+                e.preventDefault();
+                setActive((i) => (i - 1 + suggestions.length) % suggestions.length);
+                return;
+              case "pass":
+                return;
             }
           }}
           onPaste={(e) => {

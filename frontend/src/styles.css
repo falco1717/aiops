@@ -653,9 +653,19 @@ button.big { font-size: 15px; padding: 11px 18px; }
   background: none; border: none; padding: 0; margin-bottom: 8px;
   color: var(--accent); cursor: pointer; font-size: 12px; text-decoration: underline;
 }
+/* `background` and `color` are set together on purpose. A <select> whose
+   background-color computes to `transparent` does not merely show the page
+   through the closed pill — Chrome draws the *dropdown* on its own white
+   surface, and the option text, still var(--text), lands at 1.27:1 on it. That
+   is what `background: var(--panel)` did here: no such token exists, so the
+   declaration was invalid at computed-value time and background-color fell back
+   to its initial value rather than to the var(--bg) the base select rule sets.
+   Only desktop showed it, because a phone renders the list as a native sheet
+   that ignores CSS entirely. Any change here must keep a real, opaque colour. */
 .approval-select {
   width: auto; padding: 4px 8px; font-size: 12px;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-raised); color: var(--text);
+  border: 1px solid var(--border); border-radius: 999px;
 }
 
 @media (max-width: 860px) {
@@ -678,7 +688,7 @@ button.big { font-size: 15px; padding: 11px 18px; }
 .keyfile-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .keyfile-label {
   display: inline-block; padding: 8px 14px; border-radius: 8px; cursor: pointer;
-  background: var(--panel); border: 1px dashed var(--border); color: var(--text);
+  background: var(--bg-raised); border: 1px dashed var(--border); color: var(--text);
   font-size: 13px; width: auto; margin: 0;
 }
 .keyfile-label:hover { border-color: var(--accent); color: var(--accent); }
@@ -701,7 +711,7 @@ button.big { font-size: 15px; padding: 11px 18px; }
 .exposure-collapsed {
   display: flex; align-items: center; gap: 8px; width: calc(100% - 36px);
   margin: 0 18px 10px; padding: 7px 12px; text-align: left;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px;
   color: var(--text-dim); font-size: 12px; cursor: pointer;
 }
 .exposure-collapsed:hover { border-color: var(--warn); color: var(--text); }
@@ -734,7 +744,7 @@ button.big { font-size: 15px; padding: 11px 18px; }
 .install-tabs { gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
 .install-tab {
   width: auto; min-height: 0; padding: 6px 12px; font-size: 12px;
-  background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 999px;
   color: var(--text-dim); cursor: pointer;
 }
 .install-tab:hover { color: var(--text); }
