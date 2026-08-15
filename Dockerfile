@@ -6,9 +6,23 @@ WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install
 COPY frontend/ ./
-# The dev config writes into ../backend/app/static; inside the builder we want a
-# local dist/ that stage 2 can copy.
-RUN npx tsc --noEmit && npx vite build --outDir dist --emptyOutDir
+# Types, then behaviour, then the bundle — cheapest signal first, and any of the
+# three failing fails the build.
+#
+# The unit tests run here rather than in a separate step because there is no CI
+# to skip: this image is what gets built and deployed, so the build is the only
+# gate every change actually passes through, exactly as `tsc --noEmit` already
+# relies on. They are pure functions with no DOM and no fixtures, so the cost is
+# a couple of seconds on a build that spends minutes on apt and npm — cheap
+# enough that "it slows every deploy" does not buy anything worth the risk of a
+# check nobody runs.
+#
+# `npm test` rather than `npx vitest run` so the command is defined once, in
+# package.json, and a developer running it by hand runs the same thing the build
+# does. (The vite line stays as npx because it needs a different --outDir: the
+# dev config writes into ../backend/app/static, and inside the builder we want a
+# local dist/ that stage 3 can copy.)
+RUN npx tsc --noEmit && npm test && npx vite build --outDir dist --emptyOutDir
 
 
 # ---------- stage 2: the privilege-dropping helper ----------
