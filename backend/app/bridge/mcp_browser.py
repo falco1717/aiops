@@ -324,7 +324,13 @@ class Socks5Proxy:
                 host = socket.inet_ntoa(await reader.readexactly(4))
             elif atyp == 3:
                 length = (await reader.readexactly(1))[0]
-                host = (await reader.readexactly(length)).decode("idna", errors="replace")
+                # ASCII, not the idna codec: a client has already punycoded an
+                # international name by the time it reaches a SOCKS proxy, and
+                # decoding it back to unicode would produce a string that
+                # matches nothing the gate holds. (The idna codec also refuses
+                # any error handler but "strict", which turned every request
+                # into a silently closed connection.)
+                host = (await reader.readexactly(length)).decode("ascii", errors="replace")
             elif atyp == 4:
                 host = socket.inet_ntop(socket.AF_INET6, await reader.readexactly(16))
             else:
@@ -359,8 +365,12 @@ class Socks5Proxy:
             await _pump(reader, writer, upstream_reader, upstream)
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
-        except Exception:  # noqa: BLE001 - one page load must not stop the proxy
-            pass
+        except Exception as exc:  # noqa: BLE001 - one page load must not stop the proxy
+            # Written down rather than swallowed. A fault in here closes the
+            # connection with no SOCKS reply, which the browser reports as a
+            # generic proxy failure — indistinguishable, without this line,
+            # from the gate having refused the destination.
+            self.log("failed", detail=f"proxy fault: {type(exc).__name__}: {exc}")
         finally:
             for handle in (upstream, writer):
                 if handle is not None:
