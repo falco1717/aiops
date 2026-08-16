@@ -81,6 +81,21 @@ services:
       AIOPS_CLAUDE_BIN: ${AIOPS_CLAUDE_BIN:-claude}
       AIOPS_CODEX_BIN: ${AIOPS_CODEX_BIN:-codex}
       AIOPS_SCHEDULER_TICK_SECONDS: ${AIOPS_SCHEDULER_TICK_SECONDS:-20}
+      # Keeping a provider sign-in from lapsing. A Claude OAuth token lives
+      # eight hours and the CLI only renews it when a turn starts after it has
+      # gone; this gives it the chance beforehand instead. Switching the watch
+      # off does not break anything — it puts the renewal back on the critical
+      # path of the next turn, which is where it was.
+      AIOPS_CREDENTIAL_WATCH_ENABLED: ${AIOPS_CREDENTIAL_WATCH_ENABLED:-true}
+      AIOPS_CREDENTIAL_CHECK_SECONDS: ${AIOPS_CREDENTIAL_CHECK_SECONDS:-300}
+      AIOPS_CREDENTIAL_REFRESH_LEAD_SECONDS: ${AIOPS_CREDENTIAL_REFRESH_LEAD_SECONDS:-1800}
+      AIOPS_CREDENTIAL_RETRY_SECONDS: ${AIOPS_CREDENTIAL_RETRY_SECONDS:-900}
+      # The last resort when `claude auth status` did not renew it: one
+      # tool-less turn on the cheapest model, because a turn is what makes the
+      # CLI refresh. Measured at a fifth of a cent; set false to forbid it.
+      AIOPS_CREDENTIAL_PROBE_ENABLED: ${AIOPS_CREDENTIAL_PROBE_ENABLED:-true}
+      AIOPS_CREDENTIAL_PROBE_MODEL: ${AIOPS_CREDENTIAL_PROBE_MODEL:-haiku}
+      AIOPS_CREDENTIAL_PROBE_TIMEOUT_SECONDS: ${AIOPS_CREDENTIAL_PROBE_TIMEOUT_SECONDS:-120}
       # The agent's browser: a headless Chromium the agent drives through MCP
       # tools. Internal addresses are reached only through a relay node, which
       # means through the same gate an ssh connection passes.

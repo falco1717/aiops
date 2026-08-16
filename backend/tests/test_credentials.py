@@ -24,6 +24,7 @@ import asyncio
 import ast
 import json
 import os
+import shutil
 import stat
 import sys
 from datetime import datetime, timedelta, timezone
@@ -268,10 +269,25 @@ check(
 
 
 # --- 4. everything that needs a database or a subprocess ----------------
+def aware(when):
+    """SQLite hands back naive datetimes for a timezone-aware column.
+
+    The same difference between the two backends that time.ts exists for on the
+    front end. Nothing in the app compares a stored timestamp to `now` — the
+    watch compares what it just read off disk — but the assertions here do.
+    """
+    if when is not None and when.tzinfo is None:
+        return when.replace(tzinfo=timezone.utc)
+    return when
+
+
 async def live_checks():
     await init_db()
 
     root = os.path.abspath("./.test-credentials")
+    # These are credential *directories*: a file left behind by an earlier run
+    # would make "this account is not signed in" quietly false.
+    shutil.rmtree(root, ignore_errors=True)
     default_dir = os.path.join(root, "claude-default")
     second_dir = os.path.join(root, "claude-second")
     codex_dir = os.path.join(root, "codex-default")
@@ -474,7 +490,7 @@ async def live_checks():
             )
             check(
                 "the second account's recorded expiry is its own",
-                abs((second_row.credential_expires_at - plenty).total_seconds()) < 1,
+                abs((aware(second_row.credential_expires_at) - plenty).total_seconds()) < 1,
             )
             check(
                 "a codex account is left out of the watch entirely",
@@ -567,6 +583,7 @@ async def live_checks():
     )
 
     settings.claude_bin = original_bin
+    shutil.rmtree(root, ignore_errors=True)
     await engine.dispose()
 
 
