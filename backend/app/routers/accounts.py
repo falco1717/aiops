@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth_flows import login_manager
-from .. import agent_env
+from .. import agent_env, credentials
 from ..config import settings
 from ..db import get_db
 from ..models import AccountAccess, ProviderAccount, User
@@ -85,7 +85,12 @@ async def _status(account: ProviderAccount) -> tuple[bool | None, str | None]:
 
 
 async def _out(account: ProviderAccount, user: User) -> AccountOut:
-    signed_in, detail = await _status(account)
+    # Both shell out to the agent user; run them together so the page costs one
+    # round trip per account rather than two.
+    (signed_in, detail), state = await asyncio.gather(
+        _status(account), credentials.read_state(account)
+    )
+    state = credentials.state_for_output(account, state)
     return AccountOut(
         id=account.id,
         name=account.name,
@@ -103,6 +108,16 @@ async def _out(account: ProviderAccount, user: User) -> AccountOut:
         account_detail=detail,
         allowed_user_ids=[g.user_id for g in account.grants],
         usable_by_me=_may_use(account, user),
+        credential_expires_at=state.expires_at,
+        credential_checked_at=account.credential_checked_at,
+        credential_refreshed_at=account.credential_refreshed_at,
+        credential_refresh_error=account.credential_refresh_error,
+        # So the UI can say "AIOps is keeping this fresh" rather than implying
+        # it when the watch is switched off.
+        credential_watch_enabled=(
+            settings.credential_watch_enabled
+            and account.provider in credentials.CREDENTIAL_FILES
+        ),
     )
 
 

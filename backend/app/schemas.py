@@ -463,6 +463,14 @@ class AccountOut(BaseModel):
     account_detail: str | None
     allowed_user_ids: list[int]
     usable_by_me: bool
+    # When this sign-in's OAuth credential lapses, and what the credential
+    # watch has been able to do about it. Null for a provider whose expiry
+    # AIOps does not read (Codex), and for an account that is signed out.
+    credential_expires_at: datetime | None = None
+    credential_checked_at: datetime | None = None
+    credential_refreshed_at: datetime | None = None
+    credential_refresh_error: str | None = None
+    credential_watch_enabled: bool = False
 
 
 # --- usage -------------------------------------------------------------

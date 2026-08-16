@@ -215,6 +215,13 @@ export type Account = {
   account_detail: string | null;
   allowed_user_ids: number[];
   usable_by_me: boolean;
+  /** When the provider credential lapses. Null when AIOps cannot read one. */
+  credential_expires_at: string | null;
+  credential_checked_at: string | null;
+  credential_refreshed_at: string | null;
+  credential_refresh_error: string | null;
+  /** Whether the background watch is refreshing this account at all. */
+  credential_watch_enabled: boolean;
 };
 
 export type UsageWindow = {

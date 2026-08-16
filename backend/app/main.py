@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from . import agent_env
 from .approvals import reap_pending_approvals
 from .config import settings
+from .credentials import credential_loop
 from .db import SessionLocal, init_db
 from .models import Run, Session, User
 from .migrate import run_migrations
@@ -116,9 +117,12 @@ async def lifespan(app: FastAPI):
     # before anyone configures anything must have somewhere to be used from.
     await relay_hub.start_forwarder()
 
-    task: asyncio.Task | None = None
+    tasks: list[asyncio.Task] = []
     if settings.scheduler_enabled:
-        task = asyncio.create_task(scheduler_loop(), name="scheduler")
+        tasks.append(asyncio.create_task(scheduler_loop(), name="scheduler"))
+    if settings.credential_watch_enabled:
+        # Started after the migrations that add the columns it writes.
+        tasks.append(asyncio.create_task(credential_loop(), name="credentials"))
 
     os.makedirs(settings.workspace_root, exist_ok=True)
     os.makedirs(settings.accounts_root, exist_ok=True)
@@ -134,8 +138,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        if task:
+        for task in tasks:
             task.cancel()
+        for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         await runner.shutdown()

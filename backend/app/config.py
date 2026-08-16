@@ -158,6 +158,27 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     scheduler_tick_seconds: int = 20
 
+    # --- credential watch ----------------------------------------------
+    # A Claude OAuth token lives 8 hours and the CLI only replaces it when a
+    # turn happens to start after it has lapsed. Left alone, that puts the
+    # refresh on the critical path of the next turn — and a refresh that fails
+    # is found out mid-run. This watch does the refresh beforehand instead; see
+    # credentials.py for what it can and cannot fix.
+    credential_watch_enabled: bool = True
+    credential_check_seconds: int = 300
+    # How close to expiry to start trying. The CLI has a refresh margin of its
+    # own and will decline until it is inside it, so this is an opportunity to
+    # refresh early rather than an instruction to.
+    credential_refresh_lead_seconds: int = 1800
+    # An attempt that errored says nothing about whether the credential is
+    # still good, so unlike a decline it is worth retrying.
+    credential_retry_seconds: int = 900
+    # The fallback when `claude auth status` alone did not do it: the smallest
+    # real turn the CLI will run, since a turn is what triggers a refresh.
+    credential_probe_enabled: bool = True
+    credential_probe_model: str = "haiku"
+    credential_probe_timeout_seconds: int = 120
+
     # --- http ----------------------------------------------------------
     cors_origins: str = ""
     cookie_secure: bool = True

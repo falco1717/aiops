@@ -138,6 +138,20 @@ class ProviderAccount(Base):
     limit_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # When this account's OAuth credential lapses, as last read off disk by the
+    # credential watch (credentials.py). Recorded rather than derived on demand
+    # so the value survives a page that nobody has opened — and so a lapse is
+    # visible before it interrupts a turn.
+    credential_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    credential_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    credential_refreshed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    credential_refresh_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     # Stored rather than derived, so an account can adopt a credential

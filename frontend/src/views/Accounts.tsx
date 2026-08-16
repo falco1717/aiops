@@ -1,6 +1,7 @@
 import type * as React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { credentialStatus } from "../credentials";
 import { fullName } from "../names";
 import { formatUtc, isFuture } from "../time";
 import type { Account, LoginFlow, ProviderInfo, User } from "../types";
@@ -228,6 +229,9 @@ function AccountCard({
 
   const active = flow && ["starting", "awaiting_user", "completing"].includes(flow.status);
   const isLimited = isFuture(account.limited_until);
+  // Recomputed on every render rather than memoised: the only input that
+  // changes between renders is the clock, which is exactly what it reads.
+  const credential = credentialStatus(account);
   const siblings = accounts.filter((a) => a.provider === account.provider && a.id !== account.id);
   const fallback = accounts.find((a) => a.id === account.fallback_account_id);
 
@@ -242,6 +246,19 @@ function AccountCard({
           {account.signed_in ? "signed in" : "signed out"}
         </span>
         {isLimited && <span className="pill cancelled">limit hit</span>}
+        {credential.label && (
+          <span
+            className={`pill ${
+              credential.level === "soon"
+                ? "warn"
+                : credential.level === "ok"
+                  ? ""
+                  : "failed"
+            }`}
+          >
+            {credential.label}
+          </span>
+        )}
         {!account.usable_by_me && <span className="pill">no access</span>}
       </div>
 
@@ -266,6 +283,17 @@ function AccountCard({
             ` · resets ${formatUtc(account.limit_resets_at)}`}
           <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 4 }}>
             Reported by the CLI on the last run.
+          </div>
+        </div>
+      )}
+
+      {credential.detail && (
+        <div className={credential.level === "soon" ? "warn-banner" : "error-banner"}>
+          <strong>Sign-in</strong> {credential.detail}
+          <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 4 }}>
+            Expires {formatUtc(account.credential_expires_at)}
+            {account.credential_refreshed_at &&
+              ` · last renewed by AIOps ${formatUtc(account.credential_refreshed_at)}`}
           </div>
         </div>
       )}
@@ -471,6 +499,15 @@ function AccountCard({
           <div className="mono" style={{ color: "var(--text-dim)", fontSize: 11 }}>
             {account.config_dir}
           </div>
+          {account.credential_watch_enabled && (
+            <div className="field-hint">
+              {account.credential_expires_at
+                ? `Credential expires ${formatUtc(account.credential_expires_at)}. AIOps renews it in the background shortly before then, so an idle spell does not turn into a sign-in.`
+                : "No credential expiry could be read — either this account is signed out, or its provider does not publish one."}
+              {account.credential_checked_at &&
+                ` Last checked ${formatUtc(account.credential_checked_at)}.`}
+            </div>
+          )}
         </div>
       )}
     </div>

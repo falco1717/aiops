@@ -56,6 +56,10 @@ COLUMNS: dict[str, dict[str, str]] = {
         "limit_window": "VARCHAR(32)",
         "limit_resets_at": "TIMESTAMP WITH TIME ZONE",
         "limit_seen_at": "TIMESTAMP WITH TIME ZONE",
+        "credential_expires_at": "TIMESTAMP WITH TIME ZONE",
+        "credential_checked_at": "TIMESTAMP WITH TIME ZONE",
+        "credential_refreshed_at": "TIMESTAMP WITH TIME ZONE",
+        "credential_refresh_error": "VARCHAR(200)",
     },
     "schedules": {
         "account_id": "INTEGER",
