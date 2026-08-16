@@ -1,5 +1,6 @@
 import type {
   Account,
+  ActiveRun,
   AgentEvent,
   Approval,
   ApprovalAnswer,
@@ -296,6 +297,12 @@ export const api = {
 
   // runs
   runs: (limit = 50) => request<Run[]>(`/api/runs?limit=${limit}`),
+  /**
+   * Every turn still in flight that this user is allowed to see — the feed
+   * behind the working indicator. Scoped by the ordinary session-visibility
+   * rule, so an administrator sees their own work and nobody else's.
+   */
+  activeRuns: () => request<ActiveRun[]>("/api/runs/active"),
   cancelRun: (id: number) => request<unknown>(`/api/runs/${id}/cancel`, { method: "POST" }),
   /**
    * Take a queued message back out of the line. Refused with 409 once the agent

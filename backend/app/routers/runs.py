@@ -4,18 +4,31 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
-from sqlalchemy import desc, select
+from sqlalchemy import case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import attachments as store, browsing
 from ..access import can_see_session, sessions_visible_to
 from ..db import get_db
-from ..models import Run, Session, User
+from ..models import Event, Run, Session, User
+from ..names import display_name
 from ..runner import runner, settle_session
-from ..schemas import RunOut
+from ..schemas import ActiveRunOut, RunOut, WorkEvent
 from ..security import current_user
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
+
+#: How many of a turn's most recent steps travel with the active-work summary.
+#: Enough for the client to say what is happening now and which background tasks
+#: are still open under it, and no more: this is polled from every screen.
+RECENT_STEPS = 25
+
+#: How much of one step's text goes with it. The client shows the first line of
+#: it and nothing else, so this only has to be longer than a line.
+STEP_TEXT_CHARS = 240
+
+#: How much of the opening message identifies a row in the list.
+PROMPT_CHARS = 160
 
 
 async def _get(db: AsyncSession, run_id: int, user: User) -> Run:
@@ -46,6 +59,114 @@ async def list_runs(
     if status_filter:
         stmt = stmt.where(Run.status == status_filter)
     return list(await db.scalars(stmt))
+
+
+@router.get("/active", response_model=list[ActiveRunOut])
+async def active_runs(
+    user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    """Every turn still in flight in a session this user can see.
+
+    Declared above `/{run_id}` deliberately: FastAPI matches routes in the order
+    they are registered, and while `run_id: int` would reject the word "active"
+    rather than swallow it, it would answer 422 instead of this.
+
+    The scope is `sessions_visible_to` and nothing else. An administrator sees
+    exactly their own work here — the asymmetry is the point, and a "what is
+    everyone running" view is precisely what that rule exists to prevent, so
+    this must never grow one.
+
+    Both queued and running turns are returned. A message waiting behind
+    somebody else's turn is in flight as far as the person who sent it is
+    concerned, and leaving it out would make the indicator disagree with the
+    session it is pointing at.
+    """
+    rows = list(
+        await db.execute(
+            select(Run, Session.title)
+            .join(Session, Session.id == Run.session_id)
+            .where(Run.status.in_(("queued", "running")), sessions_visible_to(user))
+            # Running turns first, then the queue in the order it will run —
+            # which is by id, the same order the dispatcher takes them in.
+            # Spelled out rather than relying on "running" sorting after
+            # "queued", which is true of these two words and of nothing else.
+            .order_by(case((Run.status == "running", 0), else_=1), Run.id)
+        )
+    )
+    if not rows:
+        return []
+
+    # One lookup for every sender named in the list rather than one per row: a
+    # shared session's queue is often several turns from the same person.
+    sender_ids = {run.requested_by_id for run, _ in rows if run.requested_by_id is not None}
+    senders = {
+        u.id: display_name(u)
+        for u in (
+            await db.scalars(select(User).where(User.id.in_(sender_ids)))
+            if sender_ids
+            else []
+        )
+    }
+
+    out: list[ActiveRunOut] = []
+    for run, title in rows:
+        out.append(
+            ActiveRunOut(
+                run_id=run.id,
+                session_id=run.session_id,
+                session_title=title,
+                status=run.status,
+                provider=run.provider,
+                prompt=run.prompt[:PROMPT_CHARS],
+                requested_by_id=run.requested_by_id,
+                requested_by=senders.get(run.requested_by_id or -1),
+                created_at=run.created_at,
+                started_at=run.started_at,
+                tools=await _tool_calls(db, run.id),
+                recent=await _recent_steps(db, run.id),
+            )
+        )
+    return out
+
+
+async def _tool_calls(db: AsyncSession, run_id: int) -> int:
+    return (
+        await db.scalar(
+            select(func.count())
+            .select_from(Event)
+            .where(Event.run_id == run_id, Event.kind == "tool_use")
+        )
+    ) or 0
+
+
+async def _recent_steps(db: AsyncSession, run_id: int) -> list[WorkEvent]:
+    """The tail of a run's events, oldest last, with the text cut short.
+
+    Read newest-first and then reversed, so the database can answer it off the
+    (run_id, seq) index without sorting a turn that has produced ten thousand
+    events.
+    """
+    rows = list(
+        await db.scalars(
+            select(Event)
+            .where(Event.run_id == run_id)
+            .order_by(desc(Event.seq))
+            .limit(RECENT_STEPS)
+        )
+    )
+    rows.reverse()
+    return [
+        WorkEvent(
+            run_id=e.run_id,
+            seq=e.seq,
+            kind=e.kind,
+            text=None if e.text is None else e.text[:STEP_TEXT_CHARS],
+            tool_name=e.tool_name,
+            parent_tool_use_id=e.parent_tool_use_id,
+            agent_name=e.agent_name,
+        )
+        for e in rows
+    ]
 
 
 @router.get("/{run_id}", response_model=RunOut)

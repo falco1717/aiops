@@ -256,6 +256,54 @@ class RunOut(ORM):
     finished_at: datetime | None
 
 
+class WorkEvent(BaseModel):
+    """One recent step of a turn still in flight, cut down to what a summary needs.
+
+    Deliberately not `EventOut`. This is polled from every screen in the app,
+    and a tool result can be a hundred kilobytes: sending whole events here
+    would put megabytes on the wire every few seconds to render two lines. The
+    field names match the client's `TranscriptEvent` exactly so the same tested
+    functions that read a transcript read this too.
+    """
+
+    run_id: int
+    seq: int
+    kind: str
+    #: Truncated server-side; the client only ever shows its first line.
+    text: str | None
+    tool_name: str | None
+    parent_tool_use_id: str | None
+    agent_name: str | None
+
+
+class ActiveRunOut(BaseModel):
+    """A turn that has not finished, for the indicator that says work is happening.
+
+    Only ever turns in sessions the caller can see — the same rule as everywhere
+    else, with administrators getting nothing extra by being administrators.
+    """
+
+    run_id: int
+    session_id: str
+    session_title: str
+    #: queued | running.
+    status: str
+    provider: str | None
+    #: The opening of the message that started it, so a row is recognisable.
+    prompt: str
+    requested_by_id: int | None
+    #: Already resolved to what that person is called, because this list is read
+    #: from screens that have no user directory loaded.
+    requested_by: str | None
+    created_at: datetime
+    started_at: datetime | None
+    #: Tool calls issued so far. Counted rather than derived from `recent`,
+    #: which is only the tail.
+    tools: int
+    #: The last few steps, newest last. Empty for a turn that has not started.
+    recent: list[WorkEvent] = []
+
+
 class EventOut(ORM):
     id: int
     run_id: int

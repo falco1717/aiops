@@ -196,6 +196,44 @@ export type AgentEvent = {
   created_at: string;
 };
 
+/**
+ * One recent step of a turn in flight, as the active-work summary sends it.
+ *
+ * The same field names as a transcript event on purpose: `buildRows` and
+ * `turnProgress` read this without a translation layer, so what the indicator
+ * says a turn is doing is decided by the same tested rules as what the
+ * transcript says.
+ */
+export type WorkEvent = {
+  run_id: number;
+  seq: number;
+  kind: string;
+  /** Truncated by the server; only its first line is ever shown. */
+  text: string | null;
+  tool_name: string | null;
+  parent_tool_use_id: string | null;
+  agent_name: string | null;
+};
+
+/** A turn that has not finished, in a session the reader can see. */
+export type ActiveRun = {
+  run_id: number;
+  session_id: string;
+  session_title: string;
+  /** queued | running. */
+  status: string;
+  provider: string | null;
+  prompt: string;
+  requested_by_id: number | null;
+  /** Already resolved to a display name by the server. */
+  requested_by: string | null;
+  created_at: string;
+  started_at: string | null;
+  tools: number;
+  /** The tail of what it has done, oldest first. Empty before it starts. */
+  recent: WorkEvent[];
+};
+
 /** One named provider sign-in — "Walt's Claude", "Jordan's Claude". */
 export type Account = {
   id: number;
