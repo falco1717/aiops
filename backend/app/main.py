@@ -8,9 +8,9 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
@@ -194,13 +194,59 @@ async def health():
 
 
 # --- single-page app --------------------------------------------------
-if STATIC_DIR.is_dir():
-    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+#
+# Two cache rules, and a deploy was invisible to an already-open browser for
+# want of them. The build fingerprints the bundle, so the only file that says
+# *which* bundle to load is index.html — and it went out with no Cache-Control
+# and no Expires at all. Given neither, a browser is free to invent a freshness
+# lifetime (RFC 9111 §4.2.2 — commonly a tenth of the age since Last-Modified)
+# and does, so the shell came back off disk without asking and kept naming
+# yesterday's bundle. Three shipped features looked broken for a day.
 
-    _STATIC_ROOT = STATIC_DIR.resolve()
+#: The shell, and the files beside it a build does not fingerprint (mark.svg,
+#: logo.svg). `no-cache` is not `no-store`: the copy is still kept, it just has
+#: to be revalidated, and the usual answer is a bodyless 304.
+REVALIDATE_CACHE_CONTROL = "no-cache"
+#: Content-addressed output under /assets. A new build cannot change one of
+#: these — it emits a different name — so a year is correct, and `immutable`
+#: stops the browser revalidating them on an ordinary reload as well.
+IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+class CachedStaticFiles(StaticFiles):
+    """`StaticFiles` that says how long its responses may be reused.
+
+    Starlette already emits `ETag` and `Last-Modified` and already answers a
+    conditional request with a 304; the one thing it leaves out is the header
+    that decides whether the browser asks at all. Setting it after the parent
+    has chosen between 200 and 304 puts it on both — a 304 that dropped it
+    would re-arm heuristic freshness on the very response meant to end it.
+    """
+
+    def __init__(self, *args, cache_control: str, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.cache_control = cache_control
+
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["cache-control"] = self.cache_control
+        return response
+
+
+def mount_spa(app: FastAPI, static_dir: Path) -> None:
+    """Serve the built frontend out of `static_dir`, with the rules above."""
+    assets = CachedStaticFiles(
+        directory=static_dir / "assets", cache_control=IMMUTABLE_CACHE_CONTROL
+    )
+    shell = CachedStaticFiles(
+        directory=static_dir, cache_control=REVALIDATE_CACHE_CONTROL
+    )
+    app.mount("/assets", assets, name="assets")
+
+    static_root = static_dir.resolve()
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def spa(full_path: str):
+    async def spa(request: Request, full_path: str):
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         if full_path:
@@ -208,7 +254,13 @@ if STATIC_DIR.is_dir():
             # it can contain `..`. Resolve it and require the result to stay
             # inside the static root, or this route serves arbitrary files to
             # anyone — it is deliberately reachable before login.
-            candidate = (STATIC_DIR / full_path).resolve()
-            if candidate.is_file() and candidate.is_relative_to(_STATIC_ROOT):
-                return FileResponse(candidate)
-        return FileResponse(STATIC_DIR / "index.html")
+            candidate = (static_dir / full_path).resolve()
+            if candidate.is_file() and candidate.is_relative_to(static_root):
+                return await shell.get_response(full_path, request.scope)
+        # Every client-side route — /sessions/<id> and the rest — lands here,
+        # so the deep link has to carry exactly the headers `/` does.
+        return await shell.get_response("index.html", request.scope)
+
+
+if STATIC_DIR.is_dir():
+    mount_spa(app, STATIC_DIR)

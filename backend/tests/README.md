@@ -274,6 +274,25 @@ The model list is pinned against `codex debug models` on codex-cli 0.147.0.
 Before this, the hardcoded list named three models that catalog has never heard
 of; the UI offered them and every run using one failed.
 
+## `test_static.py`
+
+Cache headers on the built frontend — the one bug class in here that was
+invisible to every other suite and shipped anyway. The app shell went out with
+no `Cache-Control` and no `Expires`, which lets a browser invent a freshness
+lifetime of its own (RFC 9111 §4.2.2). index.html is the only file that names
+the content-hashed bundle, so an already-open browser kept loading the previous
+day's JavaScript off disk and three shipped features looked broken to the
+person who shipped them. Nothing failed; there was simply nothing asserting it.
+
+So it pins both halves. Everything that can return the **shell** — `/`, a deep
+link like `/sessions/<id>`, any unknown path — must carry a revalidate
+directive and a validator, and answer `If-None-Match` with a 304 that *still*
+carries the directive; everything under **/assets** is content-addressed and
+must be `public, max-age=31536000, immutable`, with a name from an older build
+answering 404 rather than falling through to the shell. It builds its own
+static directory and mounts it with the application's own `mount_spa`, so it
+runs in a clean clone where `app/static` does not exist.
+
 ## `test_users.py`
 
 Accounts, roles, and the schema migration. It builds a **pre-upgrade database**
