@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
-from . import agent_env, exposure, handoff
+from . import agent_env, browsing, exposure, handoff
 from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
@@ -440,15 +440,30 @@ class Runner:
                 and approval_mode == "ask"
                 and provider.supports_interactive_approval
             )
+            # A browser is offered on the CLI path only, and only where the
+            # provider can be told to load an MCP server on the command line.
+            # Decided before the token below because it is one of the two things
+            # that now needs one.
+            wants_browser = (
+                settings.browser_enabled
+                and sess.provider == "claude"
+                and not interactive_codex
+            )
+
             # Only the CLI path needs a token: it identifies a bridge running as
             # a grandchild process. The adapter is in-process and calls the
             # broker directly, so issuing one for it would be a secret with no
             # holder.
+            #
+            # Issued for a browsing turn in every approval mode, not only "ask":
+            # the browser fetches its reach and its stored credentials with it,
+            # and it authorises nothing on its own — it names a run, and every
+            # endpoint that takes it decides for itself what that run may have.
             token = (
                 run_tokens.issue(run.id, sess.id)
-                if approval_mode == "ask"
-                and provider.supports_interactive_approval
+                if provider.supports_interactive_approval
                 and not interactive_codex
+                and (approval_mode == "ask" or wants_browser)
                 else None
             )
 
@@ -474,15 +489,11 @@ class Runner:
             # a subnet, so a host on it can be reached without being stored
             # first. Scoped to the asker for the same reason the systems are.
             subnet_nodes = await relay.subnet_nodes_for(db, asker)
-            ssh_ctx = ssh_targets.prepare(
-                targets,
-                nodes,
-                subnet_nodes,
-                who=(
-                    f"{asker.username if asker else 'nobody'} "
-                    f"(run {run.id}, session {sess.id})"
-                ),
+            who = (
+                f"{asker.username if asker else 'nobody'} "
+                f"(run {run.id}, session {sess.id})"
             )
+            ssh_ctx = ssh_targets.prepare(targets, nodes, subnet_nodes, who=who)
             # A decrypted private key is on disk from here until cleanup, so
             # everything that follows runs inside this try. It used to be a
             # `finally` that opened ninety lines further down, which left the
@@ -493,6 +504,29 @@ class Runner:
                 usable = [t for t in targets if ssh_ctx and t.slug in ssh_ctx.names]
                 target_note = ssh_targets.describe(usable, nodes, subnet_nodes)
 
+                # The browser's reach is built from the same rows the ssh config
+                # was, so the two cannot disagree about what this turn may
+                # reach. The grant is what the loopback API answers from, and it
+                # is dropped in the same `finally` that removes the ssh
+                # materials — a browser has no reach after its run ends.
+                browser_env: dict[str, str] = {}
+                browser_note: str | None = None
+                if wants_browser and token:
+                    reach = browsing.reach_document(usable, nodes, subnet_nodes)
+                    browsing.grants.issue(
+                        run.id, reach, run.requested_by_id, who, browsing.make_run_dir(run.id)
+                    )
+                    browser_note = browsing.describe(reach)
+                    browser_env = {
+                        "AIOPS_BROWSER_DIR": browsing.grants.get(run.id).directory,
+                        "AIOPS_BROWSER_SANDBOX": settings.browser_sandbox,
+                        "AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS": str(
+                            settings.browser_page_timeout_seconds
+                        ),
+                        "AIOPS_BROWSER_SESSION_SECONDS": str(settings.browser_session_seconds),
+                        "AIOPS_BROWSER_MAX_SCREENSHOTS": str(settings.browser_max_screenshots),
+                    }
+
                 # Say in the transcript that somebody's stored credentials were
                 # put to work in front of other people. Written here, next to the
                 # decision, rather than at the API — the API knows what was
@@ -502,7 +536,10 @@ class Runner:
                     db, run, sess, usable, asker=asker
                 )
                 preset_prompt = preset.system_prompt if preset else None
-                system_prompt = "\n\n".join(p for p in (preset_prompt, target_note) if p) or None
+                system_prompt = (
+                    "\n\n".join(p for p in (preset_prompt, target_note, browser_note) if p)
+                    or None
+                )
 
                 # The transcript keeps the operator's own words; the agent gets them
                 # plus where the files landed. Storing the paths on the run instead
@@ -576,6 +613,7 @@ class Runner:
                         account_env=account_env,
                         approval_mode=approval_mode,
                         approval_token=token,
+                        browser=bool(browser_note),
                     )
                     argv = spec.argv
                     if spec.assigned_session_id and not sess.provider_session_id:
@@ -644,6 +682,10 @@ class Runner:
                         }
                         if ssh_ctx:
                             env.update(ssh_ctx.env)
+                        # After the ssh materials, which is where the relay
+                        # token and forwarder address come from: the browser's
+                        # proxy speaks the same protocol to the same listener.
+                        env.update(browser_env)
                         try:
                             proc = await agent_env.spawn(
                                 spec.argv,
@@ -679,6 +721,11 @@ class Runner:
                 # attempt that wrote them — failover makes a fresh set.
                 if ssh_ctx:
                     ssh_ctx.cleanup()
+                # And the browser's reach, and the screenshots it took. A
+                # screenshot of a logged-in internal application is not
+                # something to leave lying in a temp directory after the turn
+                # that needed it has ended.
+                browsing.grants.revoke(run_id)
         return status, exit_code, state, account, next_account
 
     # -- execution engines ---------------------------------------------

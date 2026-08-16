@@ -81,6 +81,19 @@ services:
       AIOPS_CLAUDE_BIN: ${AIOPS_CLAUDE_BIN:-claude}
       AIOPS_CODEX_BIN: ${AIOPS_CODEX_BIN:-codex}
       AIOPS_SCHEDULER_TICK_SECONDS: ${AIOPS_SCHEDULER_TICK_SECONDS:-20}
+      # The agent's browser: a headless Chromium the agent drives through MCP
+      # tools. Internal addresses are reached only through a relay node, which
+      # means through the same gate an ssh connection passes.
+      AIOPS_BROWSER_ENABLED: ${AIOPS_BROWSER_ENABLED:-true}
+      # Chromium's own sandbox needs an unprivileged user namespace, and
+      # Docker's default seccomp profile blocks the syscall that creates one —
+      # the same wall bubblewrap hits above. Set this to "on" *and* give the
+      # container seccomp=unconfined to keep it; left "off" Chromium runs
+      # without its internal sandbox, still as the unprivileged agent user.
+      AIOPS_BROWSER_SANDBOX: ${AIOPS_BROWSER_SANDBOX:-off}
+      AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS: ${AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS:-30}
+      AIOPS_BROWSER_SESSION_SECONDS: ${AIOPS_BROWSER_SESSION_SECONDS:-900}
+      AIOPS_BROWSER_MAX_SCREENSHOTS: ${AIOPS_BROWSER_MAX_SCREENSHOTS:-40}
       # Relay nodes. The forwarder is loopback-only inside this container and
       # takes an ephemeral port by default, so none of this is published; it is
       # here because a setting absent from this block cannot be changed at all.

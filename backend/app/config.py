@@ -97,6 +97,28 @@ class Settings(BaseSettings):
     # listener; nothing is published to the host.
     internal_api_url: str = "http://127.0.0.1:8000"
 
+    # --- the agent's browser -------------------------------------------
+    # A real Chromium the agent drives through MCP tools. Off unless the image
+    # actually has one: a checkout without Playwright installed would otherwise
+    # advertise tools to every turn that cannot start, and the CLI would spend
+    # the first seconds of each run failing to reach an MCP server. The image
+    # and docker-compose.yml both turn it on.
+    browser_enabled: bool = False
+    # Chromium's own sandbox. It needs an unprivileged user namespace, which
+    # Docker's default seccomp profile blocks — the same wall bubblewrap hits
+    # for Codex (see BWRAP_HINT in runner.py). "on" keeps it and lets the
+    # browser fail loudly with what to change; "off" runs without it, still as
+    # the unprivileged agent user inside the container.
+    browser_sandbox: str = "on"
+    # How long one page may take, and how long a browser may live before it is
+    # closed out from under a turn that forgot about it. A headless browser is
+    # the easiest thing in this container to leave running.
+    browser_page_timeout_seconds: int = 30
+    browser_session_seconds: int = 900
+    # Screenshots are per-run and deleted with it; this bounds a loop that
+    # photographs every scroll position of something large.
+    browser_max_screenshots: int = 40
+
     # --- relay nodes ---------------------------------------------------
     # Where a run's ProxyCommand helper hands its bytes to the app. Loopback
     # only: the helper is a process inside this container, and nothing outside

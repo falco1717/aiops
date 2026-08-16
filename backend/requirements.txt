@@ -11,6 +11,10 @@ croniter==6.0.0
 # Encrypts stored system credentials at rest (Fernet).
 cryptography==44.0.0
 python-multipart==0.0.20
+# Drives the headless Chromium an agent browses with. Only the browser bridge
+# imports it, and only when a tool is actually called, so a checkout without the
+# browser binaries installed still runs every test and every turn.
+playwright==1.49.1
 # zoneinfo has no bundled database on Windows, and slim Linux images often ship
 # without /usr/share/zoneinfo. Schedules are timezone-aware, so carry our own.
 tzdata>=2024.1

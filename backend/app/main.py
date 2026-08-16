@@ -25,6 +25,7 @@ from .routers import (
     accounts,
     approvals,
     auth,
+    browsing,
     nodes,
     presets,
     providers,
@@ -171,6 +172,10 @@ for module in (
 
 # Token-authenticated callback used by the in-container approval bridge.
 app.include_router(approvals.internal)
+# And by the browser bridge, for the three things it is not allowed to decide
+# for itself: where it may go, what it must write down, and a credential it is
+# given to type but never to keep.
+app.include_router(browsing.internal)
 # Node-facing relay endpoints. Authenticated by a node's own credential rather
 # than a session cookie, so they are mounted separately from the router above.
 app.include_router(nodes.relay_router)

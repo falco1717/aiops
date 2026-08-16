@@ -78,6 +78,9 @@ class Provider:
         approval_mode: str = "ask",
         approval_token: str | None = None,
         effort: str | None = None,
+        #: Register the browser MCP server for this turn. A provider that has no
+        #: way to load one ignores it rather than refusing the run.
+        browser: bool = False,
     ) -> RunSpec:
         raise NotImplementedError
 

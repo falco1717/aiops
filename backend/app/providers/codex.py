@@ -71,6 +71,12 @@ class CodexProvider(Provider):
         approval_mode: str = "ask",
         approval_token: str | None = None,
         effort: str | None = None,
+        #: Accepted and ignored. Codex loads MCP servers from its own config
+        #: file rather than from the command line, so wiring the browser in here
+        #: would mean writing into a CLI's state directory on every turn. Left
+        #: unbuilt rather than half-built: a Codex session gets no browser, and
+        #: says so, instead of getting tools that fail on first use.
+        browser: bool = False,
     ) -> RunSpec:
         argv = [settings.codex_bin, "exec"]
         if provider_session_id:

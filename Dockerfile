@@ -83,6 +83,26 @@ RUN python3 -m venv /opt/venv
 COPY backend/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
+# The browser an agent drives. Chromium alone — not the three Playwright
+# installs by default — and into a shared path rather than a home directory,
+# because the process that runs it is the agent user and the process that
+# installed it is root. `a+rX` is what makes that work: the agent needs to read
+# and execute the tree, and nothing needs to write to it.
+#
+# This is the expensive line in the image (a few hundred megabytes of browser
+# and the X/graphics libraries it links against). It is a separate layer from
+# everything above so a change to the application source does not rebuild it.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN python3 -m playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /opt/playwright \
+    # Chromium's setuid sandbox helper, for a container that has been given
+    # back the syscalls its namespace sandbox needs. Harmless where it has
+    # not: without CAP_SYS_ADMIN it simply fails and the browser is started
+    # with the sandbox off (AIOPS_BROWSER_SANDBOX), which is the default here.
+    && find /opt/playwright -name chrome-sandbox -exec chown root:root {} \; \
+         -exec chmod 4755 {} \; || true
+
 # The user every agent process runs as. It shares the application's group —
 # that is how workspaces and credential directories are shared — but not its
 # uid, which is what puts the app's /proc entries, memory and private files out
@@ -123,12 +143,13 @@ COPY deploy/relay/aiops_relay_node.py \
      deploy/relay/README.md \
      ./relay/
 
-# Two scripts in the package are run from the agent's side of the boundary: the
-# MCP approval bridge, spawned by the Claude CLI, and the relay ProxyCommand,
-# spawned by ssh. /app is not readable by the agent user, so they are installed
-# where it can reach them. Same files, copied at build time, so they cannot
-# drift from the ones the tests exercise.
+# Three scripts in the package are run from the agent's side of the boundary:
+# the MCP approval bridge and the MCP browser, both spawned by the Claude CLI,
+# and the relay ProxyCommand, spawned by ssh. /app is not readable by the agent
+# user, so they are installed where it can reach them. Same files, copied at
+# build time, so they cannot drift from the ones the tests exercise.
 RUN install -D -m 0755 /app/app/bridge/mcp_approver.py /opt/aiops-agent/mcp_approver.py \
+    && install -D -m 0755 /app/app/bridge/mcp_browser.py /opt/aiops-agent/mcp_browser.py \
     && install -D -m 0755 /app/app/relay_connect.py /opt/aiops-agent/relay_connect.py
 
 # /attachments must exist here, not just at startup: Docker seeds a fresh named
@@ -153,8 +174,14 @@ EXPOSE 8000
 
 # Where the helpers above ended up. Set here rather than only in compose so an
 # image run by hand still isolates its agents.
+#
+# The browser is in this image, so an image run by hand offers it too. Chromium's
+# own sandbox stays off because the syscall it needs is blocked by Docker's
+# default seccomp profile; see docker-compose.yml for what to change to keep it.
 ENV AIOPS_AGENT_RUNAS=/usr/local/bin/aiops-runas \
-    AIOPS_AGENT_HELPER_DIR=/opt/aiops-agent
+    AIOPS_AGENT_HELPER_DIR=/opt/aiops-agent \
+    AIOPS_BROWSER_ENABLED=true \
+    AIOPS_BROWSER_SANDBOX=off
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1

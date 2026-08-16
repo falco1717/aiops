@@ -22,6 +22,23 @@ BRIDGE_SCRIPT = helper_script(
     str(Path(__file__).resolve().parent.parent / "bridge" / "mcp_approver.py"),
 )
 
+#: The browser. Registered under its own name so its tools are addressed as
+#: mcp__aiops_browser__navigate and can be named individually in --allowedTools.
+BROWSER_SERVER_NAME = "aiops_browser"
+BROWSER_SCRIPT = helper_script(
+    "mcp_browser.py",
+    str(Path(__file__).resolve().parent.parent / "bridge" / "mcp_browser.py"),
+)
+#: Every browser tool is pre-allowed at the CLI, which is not the loosening it
+#: looks like. Two of the three approval modes give the CLI no prompt tool at
+#: all, so a tool left unlisted is *denied* rather than asked about, and the
+#: browser would simply not work outside "ask". The gating that matters is done
+#: by the bridge itself: it reads the session's approval mode and puts a click,
+#: a fill or a sign-in to the same broker a Bash call goes to, while a page load
+#: and a screenshot — which are reads — go through silently. Leaving it to the
+#: CLI's prompt would instead ask about every navigation and nothing else.
+BROWSER_TOOLS = ("navigate", "read_page", "screenshot", "click", "fill", "login", "close")
+
 
 class ClaudeProvider(Provider):
     """Drives the Claude Code CLI in headless streaming mode.
@@ -75,6 +92,7 @@ class ClaudeProvider(Provider):
         approval_mode: str = "ask",
         approval_token: str | None = None,
         effort: str | None = None,
+        browser: bool = False,
     ) -> RunSpec:
         argv = [
             settings.claude_bin,
@@ -109,26 +127,39 @@ class ClaudeProvider(Provider):
         argv += ["--permission-mode", mode]
 
         env = dict(account_env or {})
+        servers: dict[str, dict] = {}
+        extra_tools: list[str] = []
+
         if approval_mode == "ask" and approval_token:
             # Without a prompt tool the CLI does not pause on a permission
             # decision — it refuses the call, notes it in `permission_denials`
             # and finishes. Pointing it at our MCP bridge is what turns that
             # refusal into a question a human can answer.
-            argv += [
-                "--mcp-config",
-                json.dumps(
-                    {
-                        "mcpServers": {
-                            MCP_SERVER_NAME: {
-                                "command": sys.executable,
-                                "args": [str(BRIDGE_SCRIPT)],
-                            }
-                        }
-                    }
-                ),
-                "--permission-prompt-tool",
-                f"mcp__{MCP_SERVER_NAME}__ask",
-            ]
+            servers[MCP_SERVER_NAME] = {
+                "command": sys.executable,
+                "args": [str(BRIDGE_SCRIPT)],
+            }
+            argv += ["--permission-prompt-tool", f"mcp__{MCP_SERVER_NAME}__ask"]
+
+        if browser and approval_token:
+            servers[BROWSER_SERVER_NAME] = {
+                "command": sys.executable,
+                "args": [str(BROWSER_SCRIPT)],
+            }
+            extra_tools += [f"mcp__{BROWSER_SERVER_NAME}__{name}" for name in BROWSER_TOOLS]
+            # The bridge asks for a click exactly when the session would ask
+            # about a Bash call, so it has to be told which mode it is in — the
+            # presence of a token is not the same question.
+            env["AIOPS_BROWSER_APPROVALS"] = approval_mode
+
+        if servers:
+            argv += ["--mcp-config", json.dumps({"mcpServers": servers})]
+
+        if approval_token:
+            # Held by both bridges: it names this run and grants nothing else.
+            # Issued for a browsing turn even outside "ask" mode, because the
+            # browser's reach and its stored credentials are fetched with it and
+            # a run without one would simply have no browser.
             env["AIOPS_APPROVAL_TOKEN"] = approval_token
             env["AIOPS_INTERNAL_URL"] = settings.internal_api_url
             env["AIOPS_PROVIDER"] = self.name
@@ -144,8 +175,13 @@ class ClaudeProvider(Provider):
                 + 60
             )
 
-        if allowed_tools:
-            argv += ["--allowedTools", allowed_tools]
+        if allowed_tools or extra_tools:
+            # A preset's list is kept exactly as it was written and the browser's
+            # tools are added to it: a preset that names its tools is narrowing
+            # what the agent may do, and silently dropping its list to make room
+            # for ours would be the opposite of that.
+            listed = [t for t in (allowed_tools or "").split(",") if t.strip()]
+            argv += ["--allowedTools", ",".join([*listed, *extra_tools])]
         if system_prompt:
             argv += ["--append-system-prompt", system_prompt]
         argv += self.split_args(extra_args)
