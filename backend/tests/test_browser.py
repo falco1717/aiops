@@ -788,9 +788,11 @@ async def live_checks():
     # password field's own rectangle, photographed with the production mask and
     # then without it, for two passwords of very different lengths.
     field = page.locator(mb.PASSWORD_SELECTOR)
-    box = await field.bounding_box()
-    clip = {"x": box["x"] - 2, "y": box["y"] - 2,
-            "width": box["width"] + 4, "height": box["height"] + 4}
+    # The field's own box, exactly: that is the rectangle Playwright paints
+    # over, and the rectangle the typed value is rendered into. A pixel outside
+    # it belongs to the focus ring, which moves for reasons that have nothing to
+    # do with the password.
+    clip = await field.bounding_box()
     shots = {}
     for label, value in (("short", "a" * 8), ("long", "z" * 40)):
         await page.fill(mb.PASSWORD_SELECTOR, value)
