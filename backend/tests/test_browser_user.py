@@ -396,7 +396,18 @@ async def live_checks():
         return
 
     mb.BROWSER_RUNAS = SHIM
-    driver = mb.Browser(mb.Aiops())
+    # The reach a run gets when one node covers one office network, and a
+    # recorder for what the proxy decided about each request. `note` is what
+    # the production code calls; overriding it here is how the decisions become
+    # visible without an app to post them to.
+    seen = []
+    aiops = mb.Aiops()
+    aiops.reach = {
+        "routes": [{"node": "test-node", "host": "probe.invalid", "port": 8989}],
+        "subnets": [], "systems": [],
+    }
+    aiops.note = lambda action, **fields: seen.append((action, fields))
+    driver = mb.Browser(aiops)
     try:
         try:
             page = await driver.page()
@@ -425,6 +436,31 @@ async def live_checks():
         env_of = as_browser(["id", "-u"])
         check("and that uid is the one the helper reports",
               str(browser_uid) == text(env_of), f"{browser_uid} vs {text(env_of)}")
+
+        # The proxy is a listener in *this* process, on loopback, and the
+        # browser is now somebody else. Nothing about a TCP socket cares, but
+        # "the gate is still in the path" is the one claim the uid split could
+        # quietly have broken, so it is measured rather than reasoned about.
+        # Both navigations fail on purpose; what is being read is where they
+        # went. On a page of its own, because a navigation that failed is still
+        # unwinding when goto() returns and destroys the execution context of
+        # whatever is put on that page next.
+        probe = await page.context.new_page()
+        for url in ("http://probe.invalid:8989/", "http://127.0.0.1:8000/api/health"):
+            try:
+                await probe.goto(url, wait_until="domcontentloaded", timeout=15000)
+            except Exception:  # noqa: BLE001 - the failure is the point
+                pass
+        await probe.close()
+        check("a browser running as another user still reaches the proxy in this one",
+              any(fields.get("host") == "probe.invalid" for _a, fields in seen), str(seen)[:300])
+        check("and the routing decision is still made about what it asked for",
+              any(fields.get("node") == "test-node" for _a, fields in seen), str(seen)[:300])
+        check("BYPASS: loopback is refused to it exactly as before",
+              any(action == "refused" and fields.get("host") == "127.0.0.1"
+                  for action, fields in seen), str(seen)[:300])
+        check("BYPASS: and nothing was opened to either of them",
+              not any(action == "opened" for action, _f in seen), str(seen)[:300])
 
         # A page, and a screenshot of it, through the production code path.
         await page.set_content("<h1>Isolated</h1><input type=password value=hunter2>")
