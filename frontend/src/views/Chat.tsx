@@ -2025,9 +2025,10 @@ function SubagentGroup({ row }: { row: SubagentRow }) {
         aria-expanded={shown}
       >
         <span className="subagent-caret">{shown ? "▾" : "▸"}</span>
-        <span className="subagent-name">
-          {row.name || (row.running ? "working" : "background task")}
-        </span>
+        {/* The CLI names a subagent it spawned; it does not name the task it
+            narrates around an ordinary tool call, and calling that one a
+            "subagent" claimed something untrue about it. */}
+        <span className="subagent-name">{row.name || "background task"}</span>
         {row.running && <span className="live-dot" aria-hidden="true" />}
         <span className="subagent-meta">
           {row.activity && <span className="subagent-doing">{row.activity}</span>}
