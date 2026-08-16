@@ -8,6 +8,9 @@ import type { Suggestion, TokenMatch } from "../mentions";
 import { activeToken, applySuggestion, emptyHint, suggestionsFor } from "../mentions";
 import { composerKeyAction } from "../composerKeys";
 import { canWithdraw, composerState, queueView } from "../queue";
+import type { SubagentRow, TranscriptEvent } from "../transcript";
+import { buildRows, elapsed, turnProgress } from "../transcript";
+import { parseUtc } from "../time";
 import type { Draft } from "../questions";
 import {
   emptyDraft,
@@ -19,7 +22,6 @@ import {
 } from "../questions";
 import type {
   Account,
-  AgentEvent,
   Approval,
   ApprovalMode,
   ApprovalQuestion,
@@ -64,46 +66,13 @@ function useIsDesktop(): boolean {
   return isDesktop;
 }
 
-type ChatEvent = Pick<
-  AgentEvent,
-  "run_id" | "seq" | "kind" | "text" | "tool_name" | "parent_tool_use_id" | "agent_name"
-> & {
-  id?: number;
-  is_error?: boolean;
-};
-
 /**
- * Main-loop messages carry a null parent_tool_use_id; a subagent's carry the id
- * of the Agent tool call that spawned it. Consecutive events sharing a parent
- * are folded into one collapsible group, which reads the same as the nesting
- * Claude Code shows without needing to resolve tool-call ids.
+ * Main-loop messages carry a null parent_tool_use_id; work done under a tool
+ * call — a subagent, or a task the CLI narrates — carries that call's id. How
+ * those become rows, and which of them say something new, lives in
+ * `transcript.ts` next to the recorded evidence for each rule.
  */
-type Row =
-  | { type: "event"; event: ChatEvent }
-  | { type: "subagent"; parentId: string; name: string; events: ChatEvent[] };
-
-function groupSubagents(events: ChatEvent[]): Row[] {
-  const rows: Row[] = [];
-  for (const e of events) {
-    if (!e.parent_tool_use_id) {
-      rows.push({ type: "event", event: e });
-      continue;
-    }
-    const last = rows[rows.length - 1];
-    if (last?.type === "subagent" && last.parentId === e.parent_tool_use_id) {
-      last.events.push(e);
-      if (!last.name && e.agent_name) last.name = e.agent_name;
-    } else {
-      rows.push({
-        type: "subagent",
-        parentId: e.parent_tool_use_id,
-        name: e.agent_name ?? "",
-        events: [e],
-      });
-    }
-  }
-  return rows;
-}
+type ChatEvent = TranscriptEvent;
 
 const eventKey = (e: ChatEvent) => `${e.run_id}:${e.seq}`;
 
@@ -1189,15 +1158,20 @@ export default function Chat({
               </div>
             )}
 
-            {groupSubagents(eventsByRun.get(run.id) ?? []).map((row) =>
+            {buildRows(eventsByRun.get(run.id) ?? [], {
+              live: run.status === "running",
+            }).map((row) =>
               row.type === "event" ? (
                 <Bubble key={eventKey(row.event)} event={row.event} />
+              ) : row.type === "outcome" ? (
+                /* Not a message — the CLI's own one-word account of a turn that
+                   did not end with a reply. Kept because for an interrupted run
+                   it is the only thing the agent said about it. */
+                <div key={row.key} className={`msg system outcome${row.error ? " bad" : ""}`}>
+                  the agent's turn ended: {row.text}
+                </div>
               ) : (
-                <SubagentGroup
-                  key={`sub:${row.parentId}:${eventKey(row.events[0])}`}
-                  name={row.name}
-                  events={row.events}
-                />
+                <SubagentGroup key={`sub:${row.parentId}:${eventKey(row.steps[0])}`} row={row} />
               ),
             )}
 
@@ -1206,6 +1180,16 @@ export default function Chat({
                 <div className="who">assistant · streaming</div>
                 <pre>{live[run.id]}</pre>
               </div>
+            )}
+
+            {/* What the agent is doing right now, in place of the spinner that
+                said only that something was. */}
+            {run.status === "running" && (
+              <WorkingStrip
+                run={run}
+                events={eventsByRun.get(run.id) ?? []}
+                streaming={Boolean(live[run.id])}
+              />
             )}
 
             {run.status !== "succeeded" && run.status !== "running" && run.status !== "queued" && (
@@ -2015,28 +1999,96 @@ function Sharing({
   );
 }
 
-function SubagentGroup({ name, events }: { name: string; events: ChatEvent[] }) {
-  // Open while the subagent is still working, so you can watch it think; the
-  // reader can collapse it once it has finished.
-  const [open, setOpen] = useState(true);
-  const tools = events.filter((e) => e.kind === "tool_use").length;
+/**
+ * Work happening under one tool call, live while it is happening.
+ *
+ * The header carries what this one is currently doing rather than only a step
+ * count, because that is the question being asked of it — a count answers "is
+ * it stuck" but never "on what". While several run at once each gets its own
+ * header, so two concurrent tasks read as two things, not as one busy blur.
+ *
+ * Collapsed by default once finished: the steps are worth having and not worth
+ * the screen. A running one opens itself.
+ */
+function SubagentGroup({ row }: { row: SubagentRow }) {
+  const [open, setOpen] = useState<boolean | null>(null);
+  const shown = open ?? row.running;
+  const steps = row.steps.length;
   return (
-    <div className="subagent">
-      <button className="subagent-head" onClick={() => setOpen((v) => !v)}>
-        <span className="subagent-caret">{open ? "▾" : "▸"}</span>
-        <span className="subagent-name">{name || "subagent"}</span>
+    <div className={`subagent${row.running ? " running" : ""}`}>
+      <button
+        className="subagent-head"
+        onClick={() => setOpen(!shown)}
+        aria-expanded={shown}
+      >
+        <span className="subagent-caret">{shown ? "▾" : "▸"}</span>
+        <span className="subagent-name">
+          {row.name || (row.running ? "working" : "background task")}
+        </span>
+        {row.running && <span className="live-dot" aria-hidden="true" />}
         <span className="subagent-meta">
-          {events.length} step{events.length === 1 ? "" : "s"}
-          {tools > 0 && ` · ${tools} tool call${tools === 1 ? "" : "s"}`}
+          {row.activity && <span className="subagent-doing">{row.activity}</span>}
+          <span className="subagent-count">
+            {steps} step{steps === 1 ? "" : "s"}
+            {row.tools > 0 && ` · ${row.tools} tool call${row.tools === 1 ? "" : "s"}`}
+            {row.running && " · running"}
+          </span>
         </span>
       </button>
-      {open && (
+      {shown && (
         <div className="subagent-body">
-          {events.map((e) => (
+          {row.steps.map((e) => (
             <Bubble key={eventKey(e)} event={e} />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The turn in flight, said out loud.
+ *
+ * A spinner answers "is anything happening"; the question people actually have
+ * of a long turn is "on what, and for how long". Both are readable off events
+ * that were already arriving — the tool call it is on, the count of the ones
+ * before it — so this costs no new plumbing, only the clock.
+ *
+ * The clock ticks once a second and only while a turn is running, so an idle
+ * session re-renders nothing.
+ */
+function WorkingStrip({
+  run,
+  events,
+  streaming,
+}: {
+  run: Run;
+  events: ChatEvent[];
+  streaming: boolean;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const progress = turnProgress(events, { streaming });
+  // `started_at` is null for the moment between dispatch and spawn.
+  const since = run.started_at ? parseUtc(run.started_at).getTime() : null;
+  const age = since !== null && !Number.isNaN(since) ? elapsed(since, now) : null;
+
+  return (
+    <div className="working" role="status">
+      <div className="working-head">
+        <span className="live-dot" aria-hidden="true" />
+        <span className="working-doing">{progress.doing}</span>
+        {age && <span className="working-time">{age}</span>}
+      </div>
+      {progress.detail && <pre className="working-detail">{progress.detail}</pre>}
+      <div className="working-meta">
+        {progress.steps} step{progress.steps === 1 ? "" : "s"}
+        {progress.tools > 0 && ` · ${progress.tools} tool call${progress.tools === 1 ? "" : "s"}`}
+      </div>
     </div>
   );
 }
@@ -2306,7 +2358,11 @@ function Bubble({ event }: { event: ChatEvent }) {
     return <div className="msg system">{event.text}</div>;
   }
 
-  const long = (event.text?.length ?? 0) > 1200;
+  // Only machine output folds away. A long *reply* is the thing the reader
+  // opened the session for, and putting it behind a "…(3848 chars)" summary
+  // made the answer the one part of the turn you had to go looking for.
+  const foldable = event.kind === "tool_use" || event.kind === "tool_result" || event.kind === "user";
+  const long = foldable && (event.text?.length ?? 0) > 1200;
   return (
     <div className={`msg ${event.kind}${event.is_error ? " error" : ""}`}>
       <div className="who">{label}</div>
