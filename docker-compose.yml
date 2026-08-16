@@ -87,9 +87,16 @@ services:
       AIOPS_BROWSER_ENABLED: ${AIOPS_BROWSER_ENABLED:-true}
       # Chromium's own sandbox needs an unprivileged user namespace, and
       # Docker's default seccomp profile blocks the syscall that creates one —
-      # the same wall bubblewrap hits above. Set this to "on" *and* give the
-      # container seccomp=unconfined to keep it; left "off" Chromium runs
-      # without its internal sandbox, still as the unprivileged agent user.
+      # the same wall bubblewrap hits above. Measured in this image: with the
+      # default profile the browser refuses to start at all with the sandbox
+      # on, and with `security_opt: [seccomp=unconfined]` it starts sandboxed
+      # as the unprivileged agent user. So "on" is a real option and it costs
+      # one line here; it is not the default because turning off the profile
+      # that protects the whole container to sandbox one process inside it is
+      # a trade an operator should make deliberately. Left "off", Chromium
+      # runs without its internal sandbox — still as the agent user, still
+      # unable to read /app, and still reaching nothing the relay gate has
+      # not allowed.
       AIOPS_BROWSER_SANDBOX: ${AIOPS_BROWSER_SANDBOX:-off}
       AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS: ${AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS:-30}
       AIOPS_BROWSER_SESSION_SECONDS: ${AIOPS_BROWSER_SESSION_SECONDS:-900}

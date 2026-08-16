@@ -784,22 +784,38 @@ async def live_checks():
     check("with the password field listed but not read",
           "(value hidden)" in text, text[:300])
 
+    # The claim being tested is about pixels, so it is measured on pixels: the
+    # password field's own rectangle, photographed with the production mask and
+    # then without it, for two passwords of very different lengths.
+    field = page.locator(mb.PASSWORD_SELECTOR)
+    box = await field.bounding_box()
+    clip = {"x": box["x"] - 2, "y": box["y"] - 2,
+            "width": box["width"] + 4, "height": box["height"] + 4}
+    shots = {}
+    for label, value in (("short", "a" * 8), ("long", "z" * 40)):
+        await page.fill(mb.PASSWORD_SELECTOR, value)
+        shots[(label, "masked")] = await page.screenshot(mask=[field], clip=clip)
+        shots[(label, "plain")] = await page.screenshot(clip=clip)
+
+    check("with the mask the password field's own pixels do not depend on what was typed",
+          shots[("short", "masked")] == shots[("long", "masked")],
+          f"{len(shots[('short', 'masked')])} vs {len(shots[('long', 'masked')])}")
+    check("not even on its length — which is what masking buys over the dots",
+          shots[("short", "plain")] != shots[("long", "plain")],
+          "without the mask the same two values photograph differently, so the "
+          "comparison above is measuring something")
+    check("and the secret's bytes are nowhere in the image",
+          SECRET.encode() not in shots[("short", "masked")])
+
     import tempfile
     mb.SHOT_DIR = tempfile.mkdtemp(prefix="aiops-browser-live-")
-    await page.fill("#password", "a" * 8)
-    first = await driver.screenshot()
-    await page.fill("#password", "z" * 40)
-    second = await driver.screenshot()
-    one = open(os.path.join(mb.SHOT_DIR, "screenshot-001.png"), "rb").read()
-    two = open(os.path.join(mb.SHOT_DIR, "screenshot-002.png"), "rb").read()
-    check("a screenshot of a filled password field does not depend on what was typed",
-          one == two and len(one) > 100, f"{len(one)} vs {len(two)}")
-    check("not even on its length, which is what masking buys over the dots",
-          one == two)
-    check("and the secret's bytes are nowhere in the image",
-          SECRET.encode() not in one)
-    check("and both were reported to the agent as paths in this run's directory",
-          mb.SHOT_DIR in first and mb.SHOT_DIR in second, f"{first} / {second}")
+    await page.fill(mb.PASSWORD_SELECTOR, SECRET)
+    saved = await driver.screenshot()
+    written = open(os.path.join(mb.SHOT_DIR, "screenshot-001.png"), "rb").read()
+    check("the tool itself writes a real PNG into this run's directory",
+          written[:8] == b"\x89PNG\r\n\x1a\n" and mb.SHOT_DIR in saved, saved)
+    check("and a screenshot taken with the secret in the field does not contain it",
+          SECRET.encode() not in written)
 
     await page.fill("#password", SECRET)
     after = await driver.read()

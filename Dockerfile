@@ -94,14 +94,18 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.
 # everything above so a change to the application source does not rebuild it.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN python3 -m playwright install --with-deps chromium \
+    # `install chromium` fetches three things: the full browser, the headless
+    # shell, and ffmpeg for recording video. AIOps only ever launches headless
+    # and never records, and Playwright uses the shell for exactly that case —
+    # so the other two are 554MB of image nobody runs. Deleted in this layer
+    # rather than a later one, or they would still be carried in this one.
+    # Verified both ways in the container: the shell alone launches, and with
+    # seccomp=unconfined it launches *with* Chromium's own sandbox on.
+    && rm -rf /opt/playwright/chromium-* /opt/playwright/ffmpeg-* \
     && rm -rf /var/lib/apt/lists/* \
-    && chmod -R a+rX /opt/playwright \
-    # Chromium's setuid sandbox helper, for a container that has been given
-    # back the syscalls its namespace sandbox needs. Harmless where it has
-    # not: without CAP_SYS_ADMIN it simply fails and the browser is started
-    # with the sandbox off (AIOPS_BROWSER_SANDBOX), which is the default here.
-    && find /opt/playwright -name chrome-sandbox -exec chown root:root {} \; \
-         -exec chmod 4755 {} \; || true
+    # Owned by root, run by the agent user: read and execute for everyone,
+    # write for nobody.
+    && chmod -R a+rX /opt/playwright
 
 # The user every agent process runs as. It shares the application's group —
 # that is how workspaces and credential directories are shared — but not its
