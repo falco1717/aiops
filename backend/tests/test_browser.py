@@ -265,7 +265,8 @@ async def bypass_checks():
     honest = browsing.reach_document([], {}, [node])
     check("the honest reach document says exactly what the node was given",
           honest["subnets"] == [{"node": "office", "cidr": "198.51.100.0/25",
-                                 "ports": [8989]}], str(honest["subnets"]))
+                                 "ports": [8989], "all_ports": False}],
+          str(honest["subnets"]))
 
     forged = {
         "routes": [],
