@@ -9,6 +9,18 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
+# Two dependencies that are not the application's, and that fail three suites
+# apiece from the middle rather than at the start. Checked here so a clean image
+# is told what to install in one line instead of one suite at a time.
+missing=""
+python -c "import httpx" 2>/dev/null || missing="$missing\n  pip install -r requirements-dev.txt   (httpx)"
+command -v ssh-keygen >/dev/null 2>&1 || missing="$missing\n  apt-get install -y openssh-client     (ssh-keygen)"
+if [ -n "$missing" ]; then
+    printf 'Missing test prerequisites:%b\n' "$missing"
+    printf 'See tests/README.md.\n'
+    exit 1
+fi
+
 export AIOPS_JWT_SECRET=test
 export AIOPS_ADMIN_PASSWORD=devpassword123
 export AIOPS_COOKIE_SECURE=false

@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import attachments as store, browsing
 from ..access import can_see_session, sessions_visible_to
 from ..db import get_db
 from ..models import Run, Session, User
@@ -51,6 +53,48 @@ async def get_run(
     run_id: int, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
     return await _get(db, run_id, user)
+
+
+@router.get("/{run_id}/screenshots/{name}")
+async def run_screenshot(
+    run_id: int,
+    name: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """One photograph the agent's browser took during this turn.
+
+    Session content, so it is visible to exactly the people the transcript it
+    sits in is visible to — `_get` above is the same `can_see_session` rule the
+    prompt and the events go through, and administrators get nothing extra by
+    being administrators, which is deliberate.
+
+    Addressed by run rather than by session because that is what it belongs to:
+    a screenshot exists for the length of one turn and is deleted with it, in
+    the same `finally` that removes the run's decrypted ssh materials. There is
+    no second copy anywhere with a longer life, which is why a finished turn
+    answers 404 here — the record that a screenshot was taken stays in the
+    transcript, the pixels do not outlive the turn that needed them.
+
+    Served under exactly the rules an attachment is: a content type off the list
+    of things a browser will not execute, `nosniff` so it cannot guess past
+    that, and a download disposition. The bytes came off a page the agent chose,
+    and they arrive on the same origin as the session cookie.
+    """
+    await _get(db, run_id, user)
+    path = browsing.screenshot_path(run_id, name)
+    if path is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "That screenshot is not available. Screenshots live for the length of "
+            "the turn that took them and are deleted with it.",
+        )
+    return FileResponse(
+        path,
+        media_type=store.download_type(name),
+        filename=name,
+        headers=store.DOWNLOAD_HEADERS,
+    )
 
 
 @router.post("/{run_id}/cancel", status_code=status.HTTP_202_ACCEPTED)

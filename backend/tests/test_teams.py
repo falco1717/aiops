@@ -216,6 +216,10 @@ with TestClient(app) as c:
     check("nor read the run that carries the prompt", r.status_code == 404, str(r.status_code))
     r = c.post(f"/api/runs/{run_id}/cancel")
     check("nor cancel it", r.status_code == 404, str(r.status_code))
+    # A screenshot is a photograph of a page the agent was signed in to, so it
+    # is as private as the transcript it sits in and follows the same rule.
+    r = c.get(f"/api/runs/{run_id}/screenshots/screenshot-001.png")
+    check("nor look at what its browser photographed", r.status_code == 404, str(r.status_code))
     r = c.get("/api/runs")
     check("and it is absent from the run list",
           r.status_code == 200 and all(row["id"] != run_id for row in r.json()), r.text[:200])
@@ -374,6 +378,8 @@ with TestClient(app) as c:
           r.status_code == 404, f"{r.status_code} {r.text[:160]}")
     r = c.get(f"/api/runs/{run_id}")
     check("nor read the run carrying the prompt", r.status_code == 404, str(r.status_code))
+    r = c.get(f"/api/runs/{run_id}/screenshots/screenshot-001.png")
+    check("nor look at what its browser photographed", r.status_code == 404, str(r.status_code))
     r = c.get("/api/runs")
     check("nor find it in the run list",
           r.status_code == 200 and all(row["id"] != run_id for row in r.json()), r.text[:200])

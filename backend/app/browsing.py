@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import tempfile
+from pathlib import Path
 
 from . import relay
 from .models import RelayNode, Target
@@ -201,3 +203,40 @@ def make_run_dir(run_id: int) -> str:
     path = tempfile.mkdtemp(prefix=f"aiops-browser-{run_id}-")
     os.chmod(path, RUN_DIR_MODE)
     return path
+
+
+#: The only names `Browser.screenshot` generates, and therefore the only names
+#: the transcript will resolve. Written as an exact shape rather than as a
+#: sanitiser: there is nothing here a person named, so anything that is not one
+#: of ours is not a name to clean up but a request to refuse.
+SHOT_NAME = re.compile(r"^screenshot-\d{3}\.png$")
+
+
+def screenshot_path(run_id: int, name: str) -> str | None:
+    """The file one of this run's screenshots is in, or None.
+
+    Three ways to get None, and the caller says the same thing about all three
+    because they are the same fact from outside: the run never had a browser,
+    the run has ended and its directory went with it, or that is not a name this
+    module writes.
+
+    The resolve-and-compare at the end is not redundant with the pattern above.
+    The run directory is group-writable by the agent — it has to be, because
+    reading a screenshot by path is how the agent looks at one — so a symlink
+    called `screenshot-001.png` pointing at a file only the app can read is
+    something the agent could plant. `resolve()` follows it, and the comparison
+    then puts it outside the root and refuses it.
+    """
+    grant = grants.get(run_id)
+    if grant is None or not grant.directory:
+        return None
+    if not SHOT_NAME.match(name or ""):
+        return None
+    try:
+        root = Path(grant.directory).resolve()
+        candidate = (root / name).resolve()
+    except OSError:
+        return None
+    if not candidate.is_relative_to(root) or not candidate.is_file():
+        return None
+    return str(candidate)

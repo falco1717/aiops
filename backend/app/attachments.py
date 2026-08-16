@@ -56,6 +56,16 @@ _SERVABLE_TYPES = {
     "text/markdown",
 }
 
+#: Sent with every response that carries bytes somebody else chose. The
+#: Content-Type is already restricted to types a browser will not execute (see
+#: `download_type`); this stops it guessing a different one anyway.
+#:
+#: Lives here rather than in one router because more than one endpoint serves
+#: those bytes now — an upload, a file the agent wrote, and a screenshot its
+#: browser took — and the header set is a property of *serving user content*,
+#: not of any one of them.
+DOWNLOAD_HEADERS = {"X-Content-Type-Options": "nosniff"}
+
 #: Directories the files panel never walks into. A workspace is usually a git
 #: repo with its dependencies installed; none of that is agent output.
 _SKIP_DIRS = {

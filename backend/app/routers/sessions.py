@@ -49,7 +49,9 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 #: Downloads are user-controlled bytes on the same origin as the session cookie.
 #: The Content-Type is already restricted to types a browser will not execute
 #: (see attachments.download_type); this stops it guessing a different one.
-_DOWNLOAD_HEADERS = {"X-Content-Type-Options": "nosniff"}
+#: Defined in the store so the run's screenshot endpoint serves under the same
+#: rule rather than a copy of it.
+_DOWNLOAD_HEADERS = store.DOWNLOAD_HEADERS
 
 
 async def _get(db: AsyncSession, session_id: str, user: User) -> Session:

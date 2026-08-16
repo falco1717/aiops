@@ -514,13 +514,28 @@ API docs are at `/docs` once you're signed in.
 
 ### Tests
 
-Two dependency-light scripts drive the real app through Starlette's
-`TestClient`. `test_runner.py` swaps in a stand-in CLI so the subprocess
-supervisor, stream parser, websocket fan-out, session resumption and
-cancellation are all exercised without a signed-in provider:
+Dependency-light scripts drive the real app through Starlette's `TestClient`.
+`test_runner.py` swaps in a stand-in CLI so the subprocess supervisor, stream
+parser, websocket fan-out, session resumption and cancellation are all
+exercised without a signed-in provider.
+
+The suites need two things the application does not — `openssh-client` for the
+`ssh-keygen` that builds a real key pair, and `httpx` for the one suite that
+runs the app under a real uvicorn:
+
+```bash
+apt-get install -y openssh-client        # system package; the image has it already
+pip install -r backend/requirements-dev.txt   # pulls in requirements.txt too
+```
+
+Then, with **neither agent CLI on PATH** (several suites assert what happens
+when the binary is missing):
 
 ```bash
 cd backend
+tests/run_all.sh                          # every suite, fresh database each
+
+# or one at a time
 export AIOPS_DATABASE_URL="sqlite+aiosqlite:///./test.db" AIOPS_JWT_SECRET=test
 export AIOPS_ADMIN_PASSWORD=devpassword123 AIOPS_COOKIE_SECURE=false
 export AIOPS_WORKSPACE_ROOT="$PWD/.test-workspaces"

@@ -8,6 +8,8 @@ import type { Suggestion, TokenMatch } from "../mentions";
 import { activeToken, applySuggestion, emptyHint, suggestionsFor } from "../mentions";
 import { composerKeyAction } from "../composerKeys";
 import { canWithdraw, composerState, queueView } from "../queue";
+import { shotsIn } from "../screenshots";
+import { ScreenshotStrip } from "../components/Screenshots";
 import type { SubagentRow, TranscriptEvent } from "../transcript";
 import { buildRows, elapsed, turnProgress } from "../transcript";
 import { parseUtc } from "../time";
@@ -2367,6 +2369,10 @@ function Bubble({ event }: { event: ChatEvent }) {
   // made the answer the one part of the turn you had to go looking for.
   const foldable = event.kind === "tool_use" || event.kind === "tool_result" || event.kind === "user";
   const long = foldable && (event.text?.length ?? 0) > 1200;
+  // What the agent's browser photographed, drawn where it took it. The result
+  // line stays as well: it is what the agent was told, and a picture that has
+  // since expired with its turn would otherwise leave nothing behind.
+  const shots = shotsIn(event.kind, event.text);
   return (
     <div className={`msg ${event.kind}${event.is_error ? " error" : ""}`}>
       <div className="who">{label}</div>
@@ -2378,6 +2384,7 @@ function Bubble({ event }: { event: ChatEvent }) {
       ) : (
         <pre>{event.text}</pre>
       )}
+      <ScreenshotStrip runId={event.run_id} shots={shots} />
     </div>
   );
 }

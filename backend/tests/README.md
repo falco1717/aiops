@@ -1,8 +1,36 @@
 # Tests
 
-Two standalone scripts, no pytest required. Both drive the app through
-Starlette's `TestClient`, so the lifespan, scheduler wiring, database, runner and
-websocket are all real.
+Standalone scripts, no pytest required. They drive the app through Starlette's
+`TestClient`, so the lifespan, scheduler wiring, database, runner and websocket
+are all real.
+
+## What they need installed
+
+Two things beyond the application's own requirements, and both of them have
+cost somebody an afternoon by failing halfway through a suite rather than at
+the start:
+
+```bash
+# from the repository root, in a clean python:3.11-slim
+apt-get update && apt-get install -y --no-install-recommends openssh-client
+pip install -r backend/requirements-dev.txt
+```
+
+* **`openssh-client`** is a system package, not a pip one. `test_targets` and
+  `test_exposure` generate a real ed25519 key pair with `ssh-keygen` instead of
+  pasting a fixture, and `test_isolation` and `test_relay` want an `ssh` on
+  PATH to shim. The runtime image installs it already (see the `Dockerfile`),
+  so this only bites in a bare Python image.
+* **`httpx`** comes from `backend/requirements-dev.txt`, which pulls in
+  `requirements.txt` as well. `test_relay` runs the app under a real uvicorn on
+  a real port and needs a client that speaks to a socket rather than to an ASGI
+  app in-process.
+
+`run_all.sh` checks for both before it starts and says which is missing, rather
+than letting three suites fail with a traceback about something else.
+
+Nothing else is needed: no Playwright browsers (the browser suites exercise the
+pure logic and stub the driver), and deliberately **neither agent CLI on PATH**.
 
 Run them **from the `backend/` directory** with a throwaway SQLite database:
 
@@ -74,6 +102,16 @@ It also covers the two properties that make serving user content on this origin
 safe — every download is `Content-Disposition: attachment` and no upload is ever
 labelled a type a browser will execute — and that every new endpoint is 401
 without a session.
+
+The third kind of bytes is here too: a screenshot the agent's browser took,
+served from the run's own directory at `/api/runs/{id}/screenshots/{name}`. Only
+the names AIOps generates resolve (`screenshot-001.png`, and not
+`screenshot-1.png`, `.PNG`, a traversal, or another file in the same
+directory), a symlink planted in that directory under an accepted name is
+refused — the agent can write there, because reading a capture back by path is
+how it looks at one — and the whole thing is asserted to disappear when the run
+ends: the directory goes, and the endpoint answers 404 with a sentence saying
+why. There is deliberately no second copy with a longer life.
 
 Set `AIOPS_ATTACHMENTS_ROOT` to a throwaway directory before running it; the
 suite does that for itself, but nothing else should be pointed at the real one.
@@ -184,7 +222,8 @@ checks the agent cannot be pointed at an address the run was not given, and that
 revoking a node mid-flight drops it. Everything in the first half would pass
 against a relay that generated perfect config and moved no bytes at all.
 
-It needs `httpx` as well as the app's own requirements.
+It is the suite that needs `httpx` (see "What they need installed" above), and
+it wants an `ssh` on PATH for the ProxyCommand half.
 
 ## `test_effort.py`
 

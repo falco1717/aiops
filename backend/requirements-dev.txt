@@ -1,0 +1,23 @@
+# Everything the suites in backend/tests need that the application does not.
+#
+# Separate from requirements.txt because that file is what the runtime image
+# installs, and an HTTP client that exists only to drive a test has no business
+# in a production container. Installing this one installs both:
+#
+#     pip install -r backend/requirements-dev.txt
+#
+# There is also a *system* package the suites need, which pip cannot supply:
+#
+#     openssh-client        # for ssh-keygen
+#
+# test_targets and test_exposure generate a real ed25519 key pair rather than
+# pasting a fixture, so `ssh-keygen` has to exist. The runtime image already
+# installs openssh-client (see the Dockerfile — `ssh` is how an agent reaches a
+# stored system), so this only bites when the gate is run in a bare
+# python:3.11-slim. backend/tests/README.md has the whole command.
+-r requirements.txt
+
+# test_relay does not stop at the TestClient: it runs the app under a real
+# uvicorn on a real port and drives the actual relay agent from deploy/relay
+# against it, so it needs a client that speaks to a socket.
+httpx==0.28.1
