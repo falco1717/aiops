@@ -236,6 +236,27 @@ check(
     len(credentials._state_from({"error": "x" * 900}).error) == 200,
 )
 
+# A read that failed and an account that is signed out both come back with no
+# expiry. Only the second is a fact about the credential; confusing them lets
+# one slow tick blank what the accounts page is showing.
+check(
+    "a credential that was read is authoritative",
+    credentials.CredentialState(present=True, expires_at=expires).authoritative,
+)
+check(
+    "an account with no credential file is authoritative too — it is signed out",
+    credentials.CredentialState(error=credentials.NO_CREDENTIAL).authoritative,
+)
+check(
+    "a provider AIOps does not read is authoritative: nothing to report",
+    credentials.CredentialState().authoritative,
+)
+check(
+    "but a read that timed out is not, so nothing is concluded from it",
+    credentials.CredentialState(error="timed out reading credential state").authoritative
+    is False,
+)
+
 
 # --- 3. the module is incapable of writing a credential ----------------
 source = open(os.path.join(ROOT, "credentials.py"), encoding="utf-8").read()
@@ -545,6 +566,51 @@ async def live_checks():
         "a failing watch still leaves the credential file alone",
         open(credential_file, "rb").read() == before_bytes,
     )
+
+    # -- 4ea. a read that fails changes nothing -------------------------
+    async with SessionLocal() as db:
+        row = await db.get(ProviderAccount, first_id)
+        remembered, remembered_error = row.credential_expires_at, row.credential_refresh_error
+
+    real_read = credentials.read_state
+
+    async def unreadable(_account):
+        return credentials.CredentialState(error="timed out reading credential state")
+
+    credentials.read_state = unreadable
+    try:
+        await credentials.refresh_due_accounts()
+    finally:
+        credentials.read_state = real_read
+    async with SessionLocal() as db:
+        row = await db.get(ProviderAccount, first_id)
+        check(
+            "a tick that could not read the credential leaves the known expiry alone",
+            row.credential_expires_at == remembered,
+            f"{row.credential_expires_at} vs {remembered}",
+        )
+        check(
+            "and does not withdraw the failure it had already recorded",
+            row.credential_refresh_error == remembered_error,
+        )
+
+    # Signing out, by contrast, is a fact: the expiry and the stale failure go.
+    os.remove(credential_file)
+    await credentials.refresh_due_accounts()
+    async with SessionLocal() as db:
+        row = await db.get(ProviderAccount, first_id)
+        check(
+            "an account that is signed out reports no expiry rather than an old one",
+            row.credential_expires_at is None,
+            str(row.credential_expires_at),
+        )
+        check(
+            "and its stale renewal failure is withdrawn with it",
+            row.credential_refresh_error is None,
+            str(row.credential_refresh_error),
+        )
+    write_credential(credential_file, lapsed)
+    await credentials.refresh_due_accounts()
 
     # -- 4f. what the API hands the browser -------------------------------
     from app.models import User as UserRow

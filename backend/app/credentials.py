@@ -66,10 +66,15 @@ log = logging.getLogger("aiops.credentials")
 #: touch. A Codex account simply reports no expiry and is never probed.
 CREDENTIAL_FILES = {"claude": ".credentials.json"}
 
+#: The reader's word for "there is nothing here" — a signed-out account, not a
+#: failure to look. The distinction decides whether a stored expiry is cleared
+#: or kept: a timeout reading the file must not blank what the UI is showing.
+NO_CREDENTIAL = "no credential file"
+
 #: Runs on the agent's side of the isolation boundary and prints one flat JSON
 #: object. Every field it can emit is a bool, a number, or a short enum name —
 #: there is no branch in which a token, or any prefix of one, reaches stdout.
-_READER = """
+_READER = f"NO_CREDENTIAL_MARKER = {NO_CREDENTIAL!r}\n" + """
 import json, os, sys
 path = sys.argv[1]
 out = {"present": os.path.exists(path)}
@@ -77,7 +82,7 @@ try:
     with open(path, "rb") as fh:
         data = json.loads(fh.read().decode("utf-8"))
 except FileNotFoundError:
-    out["error"] = "no credential file"
+    out["error"] = NO_CREDENTIAL_MARKER
 except OSError as exc:
     out["error"] = "unreadable: %s" % exc.__class__.__name__
 except ValueError:
@@ -109,6 +114,16 @@ class CredentialState:
     @property
     def known(self) -> bool:
         return self.expires_at is not None
+
+    @property
+    def authoritative(self) -> bool:
+        """True when this really is the account's state, not a failure to look.
+
+        A signed-out account and a read that timed out both come back without
+        an expiry, and treating them the same would let one slow tick erase the
+        expiry the accounts page is showing.
+        """
+        return self.expires_at is not None or self.error in (None, NO_CREDENTIAL)
 
 
 @dataclass
@@ -395,11 +410,20 @@ async def refresh_due_accounts(now: datetime | None = None) -> int:
         for account in accounts:
             state = await read_state(account)
             account.credential_checked_at = now
-            account.credential_expires_at = state.expires_at
+            if state.authoritative:
+                account.credential_expires_at = state.expires_at
+            elif state.error:
+                # A read that failed is not evidence about the credential, so
+                # the last thing actually seen is left standing.
+                log.warning("could not read %s credential state: %s", account.name, state.error)
             if not state.known:
                 # Not signed in, or a shape we do not recognise. Either way
-                # there is nothing to keep alive and nothing to warn about.
+                # there is nothing to keep alive and nothing to warn about —
+                # including any failure recorded against a credential that is
+                # no longer there.
                 _attempts.pop(account.id, None)
+                if state.authoritative:
+                    account.credential_refresh_error = None
                 continue
 
             attempt = _attempts.get(account.id)
@@ -468,7 +492,7 @@ async def credential_loop() -> None:
 
 
 def state_for_output(account: ProviderAccount, state: CredentialState) -> CredentialState:
-    """Prefer a live read, fall back to what the watch last recorded."""
-    if state.known or state.error:
+    """Prefer a live read; fall back to the watch's record if it did not land."""
+    if state.authoritative:
         return state
     return replace(state, expires_at=account.credential_expires_at)
