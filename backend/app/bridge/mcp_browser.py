@@ -510,10 +510,19 @@ class BrowserUnavailable(RuntimeError):
 #: are the ones that close the ways around it and keep a headless browser in a
 #: container from wandering off on its own.
 CHROMIUM_ARGS = [
-    # Nothing may resolve a name in this process's own resolver. With SOCKS5 the
-    # browser never needs to — the proxy resolves — so this is the second lock
-    # on the door the routing decision guards.
-    "--host-resolver-rules=MAP * ~NOTFOUND",
+    # Nothing may resolve a name in the browser's own resolver. With SOCKS5 it
+    # never needs to — the proxy is handed the name and resolves it after the
+    # routing decision — so this is the second lock on the door that decision
+    # guards, and it closes the gap where some other part of Chromium resolves
+    # something and dials it.
+    #
+    # The EXCLUDE is not decoration. Chromium puts its *proxy's* address
+    # through the same resolver, so `MAP * ~NOTFOUND` on its own makes the
+    # browser unable to reach the proxy at all and every navigation fails with
+    # ERR_PROXY_CONNECTION_FAILED. Excluding the loopback address costs
+    # nothing: the proxy refuses loopback destinations regardless of what
+    # resolves.
+    "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1",
     "--disable-background-networking",
     "--disable-component-update",
     "--disable-sync",

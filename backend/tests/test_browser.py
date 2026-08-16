@@ -169,8 +169,12 @@ check("SOCKS5 rather than an HTTP proxy, so the browser never resolves a name it
 check("BYPASS: loopback bypass is switched off, or the app's own API would be "
       "reachable without the proxy seeing it",
       opts["proxy"].get("bypass") == "<-loopback>", str(opts["proxy"]))
+rule = next((a for a in opts["args"] if a.startswith("--host-resolver-rules")), "")
 check("Chromium's own resolver is disabled as a second lock",
-      "--host-resolver-rules=MAP * ~NOTFOUND" in opts["args"], str(opts["args"]))
+      "MAP * ~NOTFOUND" in rule, rule)
+check("except for the proxy's own address, which that rule would otherwise "
+      "make unreachable — every navigation then fails at the proxy, not the gate",
+      "EXCLUDE 127.0.0.1" in rule, rule)
 check("the sandbox setting is honoured rather than always disabled",
       opts["chromium_sandbox"] is True
       and mb.launch_options(1, sandbox=False)["chromium_sandbox"] is False)
@@ -756,7 +760,15 @@ async def live_checks():
         skip("the real browser", "Playwright is not installed in this environment")
         return
 
-    proxy = mb.Socks5Proxy(NOTHING, lambda *a, **kw: None)
+    # A reach naming one host nothing can resolve, so what is asserted is the
+    # decision and not somebody's DNS. Chromium hands a SOCKS5 proxy the name
+    # unresolved, which is the property being relied on.
+    seen = []
+    proxy = mb.Socks5Proxy(
+        {"routes": [{"node": "test-node", "host": "probe.invalid", "port": 8989}],
+         "subnets": [], "systems": []},
+        lambda action, **kw: seen.append((action, kw)),
+    )
     port = await proxy.start()
     options = mb.launch_options(port)
     pw = await async_playwright().start()
@@ -769,6 +781,25 @@ async def live_checks():
         return
 
     page = await (await browser.new_context()).new_page()
+
+    # Every byte the browser sends has to arrive at the routing decision. These
+    # two navigations fail on purpose; what is being measured is *where*.
+    for url in ("http://probe.invalid:8989/", "http://127.0.0.1:9/"):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        except Exception:  # noqa: BLE001 - the failure is the point
+            pass
+    check("a real Chromium reaches the proxy, so the resolver lock has not shut it out",
+          bool(seen), str(seen))
+    check("and hands it the hostname unresolved, which is why a name can be judged at all",
+          any(kw.get("host") == "probe.invalid" for _a, kw in seen), str(seen))
+    check("a routed host is taken to the node it was matched against",
+          any(kw.get("node") == "test-node" for _a, kw in seen), str(seen))
+    check("BYPASS: and a real browser told to open the loopback is refused there",
+          any(action == "refused" and kw.get("host") == "127.0.0.1"
+              for action, kw in seen), str(seen))
+    check("BYPASS: nothing was opened to either of them",
+          not any(action == "opened" for action, _kw in seen), str(seen))
     await page.set_content(
         "<h1>Sign in</h1><form>"
         "<input id=user type=text><input id=password type=password>"
