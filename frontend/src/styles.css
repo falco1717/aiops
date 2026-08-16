@@ -1052,6 +1052,29 @@ button.big { font-size: 15px; padding: 11px 18px; }
 .share-row { gap: 10px; margin: 6px 0; align-items: center; }
 .share-row select { width: auto; min-width: 140px; }
 
+/* --- opening a relay node to every port --------------------------------
+   A raised block inside the fieldset rather than one more label in the run of
+   them, because it is the only control in there that widens reach on its own
+   rather than describing it. `--bg-raised` on `--bg-panel` is the surface pair
+   the rest of the app uses for this; there is no `--panel` token and inventing
+   one here is how the contrast went wrong last time. */
+.all-ports {
+  margin: 10px 0 0; padding: 10px 12px;
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px;
+}
+/* The border alone, not a fill: the state has to be visible at a glance while
+   the sentence under it stays as readable as it is when switched off. The
+   class comes from React rather than from `:has(input:checked)` so the state
+   is one thing in one place, and so it does not depend on a selector. */
+.all-ports.on { border-color: var(--warn); }
+.all-ports .hint { font-size: 12px; line-height: 1.5; }
+/* The ports box goes disabled while every port is allowed, and it still has to
+   be readable — it is showing the list that comes back when this is switched
+   off, which is what the sentence beside it promises. Dimmed to the same token
+   every other label uses, rather than by the browser's default half opacity,
+   which lands under 3:1. */
+.sharing input:disabled { color: var(--text-dim); background: var(--bg); opacity: 1; }
+
 /* --- the exposure warning, put away -----------------------------------
    Expanded it is deliberately long; standing on screen for the life of a
    conversation it would just train people to look past it. Collapsed it keeps

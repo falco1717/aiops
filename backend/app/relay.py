@@ -26,6 +26,7 @@ import ipaddress
 import logging
 import secrets
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from sqlalchemy import or_, select
 
@@ -143,13 +144,51 @@ def normalise_ports(values) -> list[int]:
     return out
 
 
-def subnet_rules(node: RelayNode) -> list[tuple[str, ipaddress.IPv4Network, tuple[int, ...]]]:
+class SubnetRule(NamedTuple):
+    """One (node, network, ports) rule, as the gate compares it.
+
+    A named tuple rather than a bare triple because of the fourth field. "Every
+    port" has to travel beside the port list, not inside it: a sentinel *in*
+    `ports` would be a value the port parser could conceivably produce, and the
+    one property this feature has to have is that nothing produces it by
+    accident. Here it is a separate boolean that only `RelayNode.allow_all_ports`
+    can set, and reading it is `rule.all_ports` with nothing to interpret.
+
+    `ports` keeps its real contents even when `all_ports` is set. The column is
+    still there, so switching all-ports off restores exactly the list that was
+    in force before rather than dropping the node back to the default.
+    """
+
+    slug: str
+    network: ipaddress.IPv4Network
+    ports: tuple[int, ...]
+    #: Set only from the node's own column, and it relaxes the port comparison
+    #: alone. `network` is still the whole of which addresses exist.
+    all_ports: bool = False
+
+
+def ports_phrase(ports, all_ports: bool) -> str:
+    """How one rule's ports read in prose, spelled once so every reader agrees."""
+    if all_ports:
+        return "every port"
+    listed = tuple(ports)
+    return ("port " if len(listed) == 1 else "ports ") + ", ".join(str(p) for p in listed)
+
+
+def subnet_rules(node: RelayNode) -> list[SubnetRule]:
     """One node's subnet reach, as the gate compares it.
 
     Whatever is in the column is re-validated on the way out rather than
     trusted: the rows outlive the code that wrote them, and a rule that no
     longer passes today's checks must stop working rather than keep its
     grandfathered reach.
+
+    All-ports is read here and nowhere else, from the boolean column, through
+    `bool()` — a NULL left by some path that predates the migration is false
+    rather than an exception or a truthy surprise. It cannot be reached by a
+    validation failure either: the `except` below abandons the node's whole
+    rule set, so a bad port list costs the node its reach instead of buying it
+    everything.
     """
     try:
         cidrs = normalise_cidrs(node.allowed_cidrs)
@@ -158,9 +197,11 @@ def subnet_rules(node: RelayNode) -> list[tuple[str, ipaddress.IPv4Network, tupl
         log.warning("relay node %r has an unusable subnet rule, ignoring it: %s", node.slug, exc)
         return []
     if not cidrs:
+        # Including when all-ports is set. Every port of nothing is nothing.
         return []
     allowed = tuple(ports) or DEFAULT_ALLOWED_PORTS
-    return [(node.slug, ipaddress.ip_network(c), allowed) for c in cidrs]
+    every = bool(node.allow_all_ports)
+    return [SubnetRule(node.slug, ipaddress.ip_network(c), allowed, every) for c in cidrs]
 
 
 # --- credentials -------------------------------------------------------
@@ -210,9 +251,9 @@ class RelayGrant:
     * `routes` — exact (node, host, port) triples, one per stored system the
       requester may reach. A hostname is allowed here because an operator
       typed it and it names one machine.
-    * `subnets` — (node, network, ports) rules, from nodes the requester may
-      route through that have been given an explicit CIDR. These match by
-      address only; see `allows` for why a name is never resolved against one.
+    * `subnets` — `SubnetRule`s, from nodes the requester may route through
+      that have been given an explicit CIDR. These match by address only; see
+      `allows` for why a name is never resolved against one.
 
     `who` is carried so the stream log says which person and which turn a
     connection belongs to, rather than only that some run opened one.
@@ -221,7 +262,7 @@ class RelayGrant:
     def __init__(
         self,
         routes: set[tuple[str, str, int]],
-        subnets: list[tuple[str, ipaddress.IPv4Network, tuple[int, ...]]] | None = None,
+        subnets: list[SubnetRule] | None = None,
         who: str = "",
     ) -> None:
         self.routes = set(routes)
@@ -250,7 +291,7 @@ class RelayTokens:
     def issue(
         self,
         routes: set[tuple[str, str, int]],
-        subnets: list[tuple[str, ipaddress.IPv4Network, tuple[int, ...]]] | None = None,
+        subnets: list[SubnetRule] | None = None,
         who: str = "",
     ) -> str:
         token = secrets.token_urlsafe(32)
@@ -267,6 +308,13 @@ class RelayTokens:
         that happened to resolve to an in-range address here would authorise a
         connection the node then makes to a completely different machine. So
         names are only ever reachable as the exact triples an operator stored.
+
+        `rule.all_ports` relaxes the port comparison and only the port
+        comparison. `address in rule.network` is still ANDed in below and is
+        still the whole of which machines exist: an all-ports node is a node
+        every port of *its own networks* can be reached on, not a node that has
+        stopped caring where it dials. An out-of-range host is refused here
+        with all-ports set exactly as it is without it.
         """
         grant = self._grants.get(token)
         if grant is None:
@@ -280,9 +328,39 @@ class RelayTokens:
         except ValueError:
             return False
         return any(
-            slug == node_slug and port in ports and address in network
-            for slug, network, ports in grant.subnets
+            rule.slug == node_slug
+            and (rule.all_ports or port in rule.ports)
+            and address in rule.network
+            for rule in grant.subnets
         )
+
+    def via_all_ports(self, token: str, node_slug: str, host: str, port: int) -> bool:
+        """Whether this connection is only allowed because the node is all-ports.
+
+        For the log line, so an audit can tell "3389 was explicitly listed" from
+        "3389 was allowed because somebody opened this node to everything".
+
+        It authorises nothing and is not a second gate: it is asked *after*
+        `allows` has already said yes, and it answers False for everything
+        `allows` would refuse — an unknown token, a stored triple, a port that
+        really was on the list. Adding a check here could only ever make the log
+        quieter, never make a connection possible.
+        """
+        grant = self._grants.get(token)
+        if grant is None or (node_slug, host, port) in grant.routes:
+            return False
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        matching = [
+            rule
+            for rule in grant.subnets
+            if rule.slug == node_slug and address in rule.network
+        ]
+        if any(port in rule.ports for rule in matching):
+            return False  # it was on the list; all-ports did not decide anything
+        return any(rule.all_ports for rule in matching)
 
     def describe(self, token: str) -> str:
         """Who this token belongs to, for the log line. Never the token itself."""
@@ -566,7 +644,17 @@ class RelayHub:
             await writer.drain()
             # Only now may the far host's first bytes be delivered.
             stream.go.set()
-            log.info("relay: %s:%s opened via node %s for %s", host, port, slug, who)
+            # Said out loud when the port was not on a list. Reading back
+            # "3389 opened via node x" a month later, the question an audit
+            # actually has is which grant carried it, and the answer is not
+            # recoverable from the node's row by then — it may have been
+            # changed since.
+            basis = (
+                " (node is open on every port)"
+                if tokens.via_all_ports(token, slug, host, port)
+                else ""
+            )
+            log.info("relay: %s:%s opened via node %s for %s%s", host, port, slug, who, basis)
             await stream.finished.wait()
         except (ConnectionResetError, BrokenPipeError):
             pass

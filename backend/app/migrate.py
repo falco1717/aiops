@@ -50,6 +50,18 @@ COLUMNS: dict[str, dict[str, str]] = {
     "relay_nodes": {
         "allowed_cidrs": "JSON",
         "allowed_ports": "JSON",
+        # BOOLEAN because the model says `mapped_column(Boolean, ...)`, and the
+        # type here is keyed to what the model actually declares rather than to
+        # what the value looks like — a column added at a shape the model does
+        # not agree with is a bug this file has shipped before.
+        #
+        # NOT NULL DEFAULT FALSE rather than a bare nullable column, unlike the
+        # two above. Those default to NULL and every reader treats NULL as "no
+        # reach", so an upgrade widens nothing. This one is the opposite
+        # question — it *is* the widening — so it is given a stored false on
+        # every existing row rather than a null that anything downstream would
+        # have to be trusted to interpret.
+        "allow_all_ports": "BOOLEAN NOT NULL DEFAULT FALSE",
     },
     "provider_accounts": {
         "limit_status": "VARCHAR(32)",

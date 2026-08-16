@@ -705,6 +705,15 @@ class NodePatch(BaseModel):
     #: person typing in the box needs to read.
     allowed_cidrs: list[str] | None = None
     allowed_ports: list[int | str] | None = None
+    #: Reach `allowed_cidrs` on every port instead of `allowed_ports`.
+    #:
+    #: `bool | None` and nothing looser, which is the opposite choice from the
+    #: two fields above and for the same reason they are loose. There is no
+    #: sentence to write about a malformed value here: the only thing to say
+    #: about a caller who did not send true or false is that they did not ask
+    #: for this, and `None` — the field left out entirely — is what
+    #: `exclude_unset` then turns into "leave it exactly as it was".
+    allow_all_ports: bool | None = None
 
 
 class NodeOut(BaseModel):
@@ -730,6 +739,9 @@ class NodeOut(BaseModel):
     #: only ever set by a person.
     allowed_cidrs: list[str]
     allowed_ports: list[int]
+    #: True when those networks are open on every port rather than on the list.
+    #: Always present, never inferred from an empty `allowed_ports`.
+    allow_all_ports: bool
     owner_id: int | None
     grants: list[NodeGrant]
     #: owner | manage | use — what the caller may do with it.

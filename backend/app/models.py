@@ -489,6 +489,21 @@ class RelayNode(Base):
     #: a subnet route exists to let an agent ssh somewhere, and a blank list
     #: opening every port would be the opposite of what it was asked for.
     allowed_ports: Mapped[list] = mapped_column(JSON, default=lambda: [22])
+    #: Reach those subnets on *every* port, instead of the list above.
+    #:
+    #: A column of its own rather than a value inside `allowed_ports`, and that
+    #: is the whole design. `allowed_ports` is parsed from a box a person types
+    #: into, so a sentinel living in it would mean a typo, a stray element or a
+    #: lenient parse could *produce* "everything" — exactly the accident an
+    #: empty list is already careful not to be. Nothing can be typed into a
+    #: boolean. It is NOT NULL with a default of false, so a row that predates
+    #: the column, a request that omits the key, and a node nobody has touched
+    #: all read the same way and read it without interpretation.
+    #:
+    #: It relaxes the *port* check and nothing else. `allowed_cidrs` still
+    #: decides which addresses exist at all, so a node with this set and no
+    #: CIDRs reaches precisely what it did before: nothing.
+    allow_all_ports: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_by_id: Mapped[int | None] = mapped_column(

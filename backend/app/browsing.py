@@ -64,6 +64,13 @@ def reach_document(
     is deliberate and is why the refusal text names the port and the node: an
     agent should not be able to widen a node's reach by asking nicely, and an
     operator should be told exactly what to add.
+
+    `all_ports` is the operator's answer to having to enumerate them, and it
+    travels here as its own key rather than as a value inside `ports`, so the
+    browser reads it the way the gate does. It is only ever copied from the
+    rule the gate itself was issued, so the document cannot claim it for a node
+    that will not be granted it — and it still says nothing about *which
+    addresses*, which is the half neither side may relax.
     """
     nodes = nodes or {}
     routes = [
@@ -76,9 +83,19 @@ def reach_document(
         if t.relay_node_id and t.relay_node_id in nodes
     ]
     subnets = [
-        {"node": slug, "cidr": str(network), "ports": list(ports)}
+        # `all_ports` is copied straight off the same `SubnetRule` the gate was
+        # issued, so the document cannot claim it for a node the gate will not
+        # grant it for. It is written on every entry rather than only the true
+        # ones: a key that is sometimes absent is a key a reader has to guess
+        # the meaning of, and the guess this feature cannot afford is "true".
+        {
+            "node": rule.slug,
+            "cidr": str(rule.network),
+            "ports": list(rule.ports),
+            "all_ports": bool(rule.all_ports),
+        }
         for node in (subnet_nodes or [])
-        for slug, network, ports in relay.subnet_rules(node)
+        for rule in relay.subnet_rules(node)
     ]
     #: Which stored systems `login` will accept a slug for. Never a secret and
     #: never a hostname the agent could not already see in its ssh briefing —
@@ -116,8 +133,9 @@ def describe(reach: dict) -> str:
     subnets = reach.get("subnets") or []
     if subnets:
         listed = "\n".join(
-            f"- {entry['cidr']} on port{'' if len(entry['ports']) == 1 else 's'} "
-            f"{', '.join(str(p) for p in entry['ports'])} — via relay node {entry['node']}"
+            f"- {entry['cidr']} on "
+            f"{relay.ports_phrase(entry['ports'], bool(entry.get('all_ports')))}"
+            f" — via relay node {entry['node']}"
             for entry in subnets
         )
         lines.append(
