@@ -784,7 +784,11 @@ async def live_checks():
 
     # Every byte the browser sends has to arrive at the routing decision. These
     # two navigations fail on purpose; what is being measured is *where*.
-    for url in ("http://probe.invalid:8989/", "http://127.0.0.1:9/"):
+    # 8000 rather than something obviously dead: it is the port this
+    # application's own API listens on, which is the thing a browser on the
+    # loopback must not be able to reach. (Chromium refuses a handful of ports
+    # outright — 9 among them — and a navigation it never makes proves nothing.)
+    for url in ("http://probe.invalid:8989/", "http://127.0.0.1:8000/api/health"):
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
         except Exception:  # noqa: BLE001 - the failure is the point
