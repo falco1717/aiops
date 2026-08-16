@@ -520,6 +520,12 @@ class Runner:
                     browser_env = {
                         "AIOPS_BROWSER_DIR": browsing.grants.get(run.id).directory,
                         "AIOPS_BROWSER_SANDBOX": settings.browser_sandbox,
+                        # The shim that starts Chromium as a user which is
+                        # neither this one nor the agent's, and which is in
+                        # neither of their groups — so a renderer exploit on a
+                        # hostile page cannot read the keys materialised for
+                        # this run a few lines above.
+                        "AIOPS_BROWSER_RUNAS": settings.browser_runas,
                         "AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS": str(
                             settings.browser_page_timeout_seconds
                         ),

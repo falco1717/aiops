@@ -128,6 +128,8 @@ async def lifespan(app: FastAPI):
     # was true, so it is settled at every boot rather than at image build.
     agent_env.share_startup_paths()
     log.info("Agent processes run as: %s", agent_env.probe_identity())
+    if settings.browser_enabled:
+        log.info("The agent's browser runs as: %s", agent_env.probe_browser_identity())
     log.info("AIOps ready. Workspace root: %s", settings.workspace_root)
     try:
         yield

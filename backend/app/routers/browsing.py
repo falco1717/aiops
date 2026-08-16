@@ -29,7 +29,8 @@ internal = APIRouter(prefix="/api/internal/browser", tags=["internal"], include_
 #: Actions worth a line each. Anything else the browser reports is recorded
 #: under its own name too — the list is here so the log reads consistently, not
 #: to filter what is written down.
-_ACTIONS = ("navigate", "opened", "refused", "failed", "click", "fill", "login", "screenshot")
+_ACTIONS = ("start", "navigate", "opened", "refused", "failed", "click", "fill", "login",
+            "screenshot")
 
 
 def _resolve(payload: dict, request: Request) -> tuple[int, str]:

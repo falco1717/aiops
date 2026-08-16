@@ -1,9 +1,11 @@
 """The application's half of the agent browser.
 
 The browser itself runs on the other side of the isolation boundary — a
-Playwright Chromium started by an MCP server that is a subprocess of the agent,
-as the agent's own user. What lives here is everything that side is not allowed
-to decide for itself:
+Playwright Chromium started by an MCP server that is a subprocess of the agent.
+The MCP server is the agent's, at the agent's uid; the browser under it is not,
+and runs as a third user in a group of its own so that a page which takes over
+a renderer cannot read the run's decrypted SSH keys. What lives here is
+everything neither of them is allowed to decide for itself:
 
 * **what it may reach** — built from exactly the same rows the run's ssh config
   is built from, so a browser and an `ssh` in the same turn have identical
@@ -34,8 +36,12 @@ from .models import RelayNode, Target
 log = logging.getLogger("aiops.browser")
 
 #: Same reasoning as the per-run ssh directory: owned by the app, readable and
-#: writable by the agent's group, closed to everyone else. The browser writes
-#: its screenshots here and the agent reads them back to look at them.
+#: writable by the agent's group, closed to everyone else — which now includes
+#: the browser user, and deliberately. Screenshots are written into it by
+#: Playwright's client, a thread of the agent's MCP bridge, not by Chromium; the
+#: browser hands back bytes and never opens a file here. So the directory is
+#: written by the agent and read by the agent, and giving the browser user
+#: access to it would only re-open a path nothing needs.
 RUN_DIR_MODE = 0o770
 
 

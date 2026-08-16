@@ -107,9 +107,18 @@ class Settings(BaseSettings):
     # Chromium's own sandbox. It needs an unprivileged user namespace, which
     # Docker's default seccomp profile blocks — the same wall bubblewrap hits
     # for Codex (see BWRAP_HINT in runner.py). "on" keeps it and lets the
-    # browser fail loudly with what to change; "off" runs without it, still as
-    # the unprivileged agent user inside the container.
+    # browser fail loudly with what to change; "off" runs without it. Either
+    # way Chromium runs as its own unprivileged user inside the container (see
+    # browser_runas), which is what actually bounds a renderer exploit here.
     browser_sandbox: str = "on"
+    # The shim Playwright is pointed at instead of its own node binary. It
+    # execs the privilege-dropping helper, which drops to a *third* user —
+    # neither the app's nor the agent's — before starting the browser stack.
+    # That is what keeps a renderer exploit away from the run's decrypted SSH
+    # keys, which are readable by the agent's group because `ssh` has to load
+    # them. Empty runs the browser as the agent user, which is where it was
+    # before this existed; the image sets it.
+    browser_runas: str = ""
     # How long one page may take, and how long a browser may live before it is
     # closed out from under a turn that forgot about it. A headless browser is
     # the easiest thing in this container to leave running.

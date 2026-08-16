@@ -35,6 +35,9 @@ FROM node:22-bookworm-slim AS runas
 ARG AGENT_UID=1001
 ARG APP_UID=1000
 ARG APP_GID=1000
+ARG BROWSER_UID=1002
+ARG BROWSER_GID=1002
+ARG BROWSER_HOME=/home/aiops-browser
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY deploy/runas/aiops-runas.c /tmp/aiops-runas.c
@@ -42,6 +45,9 @@ RUN gcc -static -O2 -Wall -Wextra -Werror \
       -DAIOPS_AGENT_UID=${AGENT_UID} \
       -DAIOPS_AGENT_GID=${APP_GID} \
       -DAIOPS_APP_UID=${APP_UID} \
+      -DAIOPS_BROWSER_UID=${BROWSER_UID} \
+      -DAIOPS_BROWSER_GID=${BROWSER_GID} \
+      -DAIOPS_BROWSER_HOME=\"${BROWSER_HOME}\" \
       -o /tmp/aiops-runas /tmp/aiops-runas.c \
     && strip /tmp/aiops-runas
 
@@ -52,6 +58,9 @@ RUN gcc -static -O2 -Wall -Wextra -Werror \
 FROM node:22-bookworm-slim AS runtime
 
 ARG AGENT_UID=1001
+ARG BROWSER_UID=1002
+ARG BROWSER_GID=1002
+ARG BROWSER_HOME=/home/aiops-browser
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -114,6 +123,26 @@ RUN python3 -m playwright install --with-deps chromium \
 RUN useradd --uid ${AGENT_UID} --gid node --no-create-home \
       --shell /usr/sbin/nologin --comment "AIOps agent" aiops-agent
 
+# The user Chromium runs as, and the *only* account in the image with a group
+# of its own. That is the point of it. A run's SSH private keys are decrypted
+# to disk group-readable by `node` because `ssh` — running as the agent — has
+# to load them; anything in that group can read them. The browser renders pages
+# nobody vetted, its own sandbox is off under Docker's default seccomp profile,
+# and a renderer exploit is therefore code execution: before this user existed
+# that code arrived at the agent's uid, holding the agent's group, next to the
+# keys. Now it arrives here, where /app is unreadable, the run directory is
+# unreadable, and the group grants nothing.
+#
+# Its home is the whole of what it may write: Playwright puts the browser
+# profile and its scratch files under TMPDIR, and the helper points both HOME
+# and TMPDIR here.
+RUN groupadd --gid ${BROWSER_GID} aiops-browser \
+    && useradd --uid ${BROWSER_UID} --gid ${BROWSER_GID} --no-create-home \
+      --shell /usr/sbin/nologin --comment "AIOps browser" aiops-browser \
+    && mkdir -p ${BROWSER_HOME}/tmp \
+    && chown -R ${BROWSER_UID}:${BROWSER_GID} ${BROWSER_HOME} \
+    && chmod 0700 ${BROWSER_HOME} ${BROWSER_HOME}/tmp
+
 # A workspace is a bind mount whose files belong to whoever owns them on the
 # host, and git refuses to read a repository owned by another uid. That check
 # protects a multi-user workstation from a planted .git; here both users are
@@ -156,6 +185,29 @@ RUN install -D -m 0755 /app/app/bridge/mcp_approver.py /opt/aiops-agent/mcp_appr
     && install -D -m 0755 /app/app/bridge/mcp_browser.py /opt/aiops-agent/mcp_browser.py \
     && install -D -m 0755 /app/app/relay_connect.py /opt/aiops-agent/relay_connect.py
 
+# The shim that puts the browser on the other side of the uid boundary.
+#
+# Playwright starts a Node driver and that driver starts Chromium, so the uid
+# has to change at or above the driver — a switch below it would leave the
+# driver creating the browser's profile directory as the wrong user, and would
+# leave the process that parses CDP messages coming back from a compromised
+# renderer running as the agent. PLAYWRIGHT_NODEJS_PATH is Playwright's own
+# documented hook for "use this node instead of mine", so it is pointed at
+# this: three lines that exec the setuid helper, which drops to the browser
+# user, sweeps the run's credentials out of the environment and execs the real
+# node. Everything below it — the driver, the browser process, every renderer —
+# is that user's.
+#
+# The node path is asked of the installed package rather than written out, so a
+# Playwright upgrade that moves it fails the build here instead of at the first
+# turn that tries to browse.
+RUN NODE_BIN="$(python3 -c 'from playwright._impl._driver import compute_driver_executable as c; print(c()[0])')" \
+    && test -x "$NODE_BIN" \
+    && printf '#!/bin/sh\n# Generated at build time. Starts Playwright as the browser user.\nexec /usr/local/bin/aiops-runas --as-browser %s "$@"\n' "$NODE_BIN" \
+       > /opt/aiops-agent/browser-node \
+    && chmod 0755 /opt/aiops-agent/browser-node \
+    && cat /opt/aiops-agent/browser-node
+
 # /attachments must exist here, not just at startup: Docker seeds a fresh named
 # volume from the image, so a directory absent at build time gets mounted
 # root-owned and the app cannot write into it. /home/node/accounts is in the
@@ -182,10 +234,14 @@ EXPOSE 8000
 # The browser is in this image, so an image run by hand offers it too. Chromium's
 # own sandbox stays off because the syscall it needs is blocked by Docker's
 # default seccomp profile; see docker-compose.yml for what to change to keep it.
+# Which is exactly why AIOPS_BROWSER_RUNAS matters more than that switch does:
+# with Chromium's internal sandbox off, the uid it runs as is the only thing
+# standing between a hostile page and this run's credentials.
 ENV AIOPS_AGENT_RUNAS=/usr/local/bin/aiops-runas \
     AIOPS_AGENT_HELPER_DIR=/opt/aiops-agent \
     AIOPS_BROWSER_ENABLED=true \
-    AIOPS_BROWSER_SANDBOX=off
+    AIOPS_BROWSER_SANDBOX=off \
+    AIOPS_BROWSER_RUNAS=/opt/aiops-agent/browser-node
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1

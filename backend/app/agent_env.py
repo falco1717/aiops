@@ -227,6 +227,37 @@ def probe_identity() -> str:
     return result.stdout.decode("utf-8", "replace").strip()
 
 
+def browser_isolation_enabled() -> bool:
+    """True when the browser runs as its own user rather than as the agent."""
+    return isolation_enabled() and bool((settings.browser_runas or "").strip())
+
+
+def probe_browser_identity() -> str:
+    """Who Chromium actually runs as, asked of the helper in the same way.
+
+    Worth its own line at boot next to the agent's. The browser is the only
+    thing in this container that executes content nobody vetted, and "which
+    user is that" is the answer the whole isolation rests on — a shim that is
+    present but pointed at nothing, or a helper built without the browser mode,
+    would otherwise be discovered from a failed turn.
+    """
+    if not isolation_enabled():
+        return "disabled (the browser shares the application's user)"
+    if not browser_isolation_enabled():
+        return "disabled (the browser runs as the agent user)"
+    try:
+        result = subprocess.run(
+            [settings.agent_runas.strip(), "--as-browser", "id"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"BROKEN: {exc}"
+    if result.returncode != 0:
+        return f"BROKEN: {result.stderr.decode('utf-8', 'replace').strip() or result.returncode}"
+    return result.stdout.decode("utf-8", "replace").strip()
+
+
 # -- what the agent may reach ------------------------------------------
 
 

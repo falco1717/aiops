@@ -94,10 +94,20 @@ services:
       # one line here; it is not the default because turning off the profile
       # that protects the whole container to sandbox one process inside it is
       # a trade an operator should make deliberately. Left "off", Chromium
-      # runs without its internal sandbox — still as the agent user, still
-      # unable to read /app, and still reaching nothing the relay gate has
-      # not allowed.
+      # runs without its internal sandbox — but as its own user (below), still
+      # unable to read /app or this run's credentials, and still reaching
+      # nothing the relay gate has not allowed.
       AIOPS_BROWSER_SANDBOX: ${AIOPS_BROWSER_SANDBOX:-off}
+      # Browser isolation, and the setting that actually carries the weight
+      # while the line above says "off". This shim starts Playwright — and so
+      # Chromium, and so every renderer — as a third user: not the app's, not
+      # the agent's, and in neither of their groups. A run's decrypted SSH
+      # private keys are readable by the agent's group because `ssh` has to
+      # load them, so a renderer exploit landing at the agent's uid could read
+      # them; landing here it cannot read them, cannot read /app, and has no
+      # AIOPS_* variable in its environment. Emptying this runs the browser as
+      # the agent again, which is the state this was written to end.
+      AIOPS_BROWSER_RUNAS: ${AIOPS_BROWSER_RUNAS-/opt/aiops-agent/browser-node}
       AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS: ${AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS:-30}
       AIOPS_BROWSER_SESSION_SECONDS: ${AIOPS_BROWSER_SESSION_SECONDS:-900}
       AIOPS_BROWSER_MAX_SCREENSHOTS: ${AIOPS_BROWSER_MAX_SCREENSHOTS:-40}

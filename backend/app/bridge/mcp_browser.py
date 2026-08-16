@@ -32,6 +32,20 @@ page, and adds it to a redaction set that every string leaving this process is
 run through. Screenshots are taken with password fields masked, so a photograph
 of a filled login form carries no credential into the transcript.
 
+**Who it runs as.** This process is the agent's: a child of the CLI, holding
+the run's relay token and the loopback token, at the agent's uid. The *browser*
+is not. Playwright's node driver, and every Chromium process under it, are
+started through the privilege-dropping helper as a third user — its own uid, in
+its own group, in neither the app's group nor the agent's. That boundary is the
+answer to the only question a headless browser really raises: a renderer
+exploit on a hostile page is code execution, Chromium's own sandbox is off in
+this container because Docker's seccomp profile blocks the user namespace it
+needs, and before this the code landed at the agent's uid — with read access to
+the run's decrypted SSH private keys, which are group-readable to the agent
+because `ssh` has to load them. `browser_environ` and the helper's own sweep
+are the second half of it: the browser stack starts from an environment with
+the run's credentials taken out of it.
+
 Deliberately importable without Playwright: everything above the
 `Browser` class is pure logic the test suite exercises with no browser present.
 """
@@ -58,7 +72,14 @@ APPROVAL_MODE = os.environ.get("AIOPS_BROWSER_APPROVALS", "ask")
 RELAY_TOKEN = os.environ.get("AIOPS_RELAY_TOKEN", "")
 RELAY_ADDR = os.environ.get("AIOPS_RELAY_ADDR", "")
 #: Where screenshots land. Created by the runner for this run and deleted with it.
+#: Written by *this* process — Playwright's Python client is what turns a
+#: screenshot into a file, not the browser — so the directory never has to be
+#: reachable by the browser user at all. See `Browser.screenshot`.
 SHOT_DIR = os.environ.get("AIOPS_BROWSER_DIR", "")
+#: The shim that starts Playwright's driver as the browser user. Empty outside
+#: the image, where there is no setuid helper to do it with; the browser then
+#: runs as this process does, which is what it did before the split existed.
+BROWSER_RUNAS = os.environ.get("AIOPS_BROWSER_RUNAS", "")
 SANDBOX = os.environ.get("AIOPS_BROWSER_SANDBOX", "on").strip().lower() not in ("0", "off", "false")
 PAGE_TIMEOUT_MS = int(os.environ.get("AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS", "30")) * 1000
 SESSION_SECONDS = int(os.environ.get("AIOPS_BROWSER_SESSION_SECONDS", "900"))
@@ -269,6 +290,63 @@ def redact(text, secrets) -> str:
         if secret and len(secret) >= 3:
             text = text.replace(secret, REDACTED)
     return text
+
+
+# =====================================================================
+# What the browser starts from: not this process's environment
+# =====================================================================
+#: Exactly agent_env.py's list, and for exactly its reasons — with nothing
+#: added back. An agent needs AIOPS_WORKSPACE_ROOT; a browser needs nothing
+#: from AIOps at all.
+#:
+#: What this removes in practice is the run's own credentials, which the runner
+#: adds to the agent's environment and which are therefore in this process:
+#: AIOPS_SSHPASS_* is a stored system's password, AIOPS_ASKPASS_* names a
+#: program that prints a key's passphrase, AIOPS_RELAY_TOKEN opens streams
+#: through a relay node, AIOPS_APPROVAL_TOKEN speaks to the app's loopback API.
+_BLOCKED_PREFIXES = ("AIOPS_", "POSTGRES_", "PG")
+_BLOCKED_NAMES = frozenset({"DATABASE_URL", "SECRET_KEY", "JWT_SECRET", "ADMIN_PASSWORD"})
+
+
+def blocked_in_browser(name: str) -> bool:
+    upper = name.upper()
+    return upper in _BLOCKED_NAMES or any(upper.startswith(p) for p in _BLOCKED_PREFIXES)
+
+
+def browser_environ(env) -> dict:
+    """The environment the browser stack is allowed to inherit.
+
+    Pure, so the sweep can be asserted without a browser: everything below is
+    about a process that only exists inside the image.
+    """
+    return {name: value for name, value in dict(env).items() if not blocked_in_browser(name)}
+
+
+def seal_environment() -> list:
+    """Apply that sweep to this process, and point Playwright at the shim.
+
+    In place rather than by handing an environment to a subprocess, because the
+    subprocess is not ours to start: Playwright reads `os.environ` when it
+    launches its driver and takes no argument for it. Everything this module
+    needs was read into a constant at import, so removing the variables now
+    costs nothing here and means the driver — and every Chromium under it —
+    inherits an environment with the run's credentials gone.
+
+    Not the boundary on its own. The helper sweeps the same list again on the
+    other side of the uid switch, where the process asking cannot skip it. This
+    is what makes the sweep true even in a checkout with no helper compiled.
+
+    Returns the names removed, for the log line.
+    """
+    dropped = [name for name in list(os.environ) if blocked_in_browser(name)]
+    for name in dropped:
+        os.environ.pop(name, None)
+    if BROWSER_RUNAS:
+        # Playwright's own documented hook for "use this node instead of the
+        # one I shipped". The shim it names execs the setuid helper, so the
+        # driver and every browser process below it are the browser user's.
+        os.environ["PLAYWRIGHT_NODEJS_PATH"] = BROWSER_RUNAS
+    return dropped
 
 
 # =====================================================================
@@ -602,6 +680,17 @@ class Browser:
         self._proxy = Socks5Proxy(self.aiops.reach, self._log)
         port = await self._proxy.start()
         self.started = time.monotonic()
+        # Before the driver is started, and therefore before anything of the
+        # browser's exists: this is the only moment at which the environment it
+        # inherits can still be decided.
+        dropped = seal_environment()
+        self.aiops.note(
+            "start",
+            detail=(
+                f"browser stack starting as {'its own user' if BROWSER_RUNAS else 'the agent'}"
+                f"; {len(dropped)} variable(s) withheld from it"
+            ),
+        )
         self._pw = await async_playwright().start()
         try:
             self._browser = await self._pw.chromium.launch(**launch_options(port))
@@ -675,6 +764,15 @@ class Browser:
         return self.clean("\n".join(lines))
 
     async def screenshot(self, full_page: bool = False) -> str:
+        """Photograph the page into this run's directory, as *this* process.
+
+        Worth being explicit about, because it decides a permission question:
+        Playwright's Python client is what writes the file — the browser hands
+        back the bytes and never touches the filesystem here. So the run's
+        screenshot directory is written by the agent's uid and read by the
+        agent's uid, and the browser user needs no access to it at all. It has
+        none.
+        """
         page = await self.page()
         if self.shots >= MAX_SHOTS:
             raise ValueError(
@@ -805,8 +903,16 @@ def _launch_hint(exc: Exception) -> str:
             "user namespace is what it needs, and Docker's default seccomp profile blocks "
             "the syscall. Either run this container with seccomp=unconfined, or set "
             "AIOPS_BROWSER_SANDBOX=off to run Chromium without its internal sandbox — it "
-            "still runs as the unprivileged agent user inside the container either way. "
+            "runs as its own unprivileged user inside the container either way, which is "
+            "what keeps a bad page away from this run's credentials. "
             f"Chromium said: {text[:400]}"
+        )
+    if "Permission denied" in text or "EACCES" in text:
+        return (
+            "the browser could not be started, and the error is a permission one. The "
+            "browser runs as its own user through AIOPS_BROWSER_RUNAS; if that shim or the "
+            "setuid helper behind it is missing, wrong or not executable, this is what it "
+            f"looks like. Chromium said: {text[:400]}"
         )
     return f"the browser could not be started: {text[:600]}"
 
