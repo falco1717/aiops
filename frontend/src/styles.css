@@ -438,10 +438,13 @@ label.check span { margin: 0; color: var(--text); font-size: 13px; }
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
   cursor: zoom-in;
 }
-/* Cropped from the top left rather than scaled to fit: the top of a page is
-   what identifies it, and a whole 1280x900 render at 84px high is a smudge. */
+/* A fixed box, cropped from the top left rather than scaled to fit. Two
+   reasons, and the second is the one that matters: the top of a page is what
+   identifies it at this size, and `width: auto` would size the tile by the
+   capture's aspect ratio — so a `full_page` screenshot of a long page, which is
+   1280 wide by several thousand tall, would come out as an 18px sliver. */
 .shot-tile img {
-  display: block; height: 84px; width: auto; max-width: 260px;
+  display: block; width: 132px; height: 84px;
   object-fit: cover; object-position: top left;
 }
 .shot-gone {
@@ -753,7 +756,7 @@ button.big { font-size: 15px; padding: 11px 18px; }
 
   /* Screenshots: shorter tiles, and a caption that wraps onto a second line
      rather than being the one thing on the overlay that will not fit. */
-  .shot-tile img { height: 68px; max-width: 200px; }
+  .shot-tile img { width: 108px; height: 68px; }
   .shot-lightbox { padding: 10px; }
   .shot-lightbox img { max-height: calc(100% - 60px); }
   .shot-caption { flex-wrap: wrap; justify-content: center; row-gap: 6px; }
