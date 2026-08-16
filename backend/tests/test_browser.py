@@ -780,7 +780,7 @@ async def live_checks():
         skip("the real browser", f"Chromium would not start: {str(exc)[:200]}")
         return
 
-    page = await (await browser.new_context()).new_page()
+    context = await browser.new_context()
 
     # Every byte the browser sends has to arrive at the routing decision. These
     # two navigations fail on purpose; what is being measured is *where*.
@@ -788,9 +788,14 @@ async def live_checks():
     # application's own API listens on, which is the thing a browser on the
     # loopback must not be able to reach. (Chromium refuses a handful of ports
     # outright — 9 among them — and a navigation it never makes proves nothing.)
+    #
+    # On a page of its own, closed afterwards: a navigation that failed is
+    # still unwinding when goto() returns, and it destroys the execution
+    # context of whatever is put on that page next.
+    probe = await context.new_page()
     for url in ("http://probe.invalid:8989/", "http://127.0.0.1:8000/api/health"):
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            await probe.goto(url, wait_until="domcontentloaded", timeout=15000)
         except Exception:  # noqa: BLE001 - the failure is the point
             pass
     check("a real Chromium reaches the proxy, so the resolver lock has not shut it out",
@@ -804,6 +809,9 @@ async def live_checks():
               for action, kw in seen), str(seen))
     check("BYPASS: nothing was opened to either of them",
           not any(action == "opened" for action, _kw in seen), str(seen))
+    await probe.close()
+
+    page = await context.new_page()
     await page.set_content(
         "<h1>Sign in</h1><form>"
         "<input id=user type=text><input id=password type=password>"
