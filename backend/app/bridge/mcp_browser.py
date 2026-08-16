@@ -1009,8 +1009,15 @@ async def serve() -> None:
             in_flight.add(task)
             task.add_done_callback(in_flight.discard)
     finally:
-        for task in list(in_flight):
-            task.cancel()
+        # A call still running when stdin closes is a call somebody is waiting
+        # on — most often an approval a human has not answered yet. Cancelling
+        # it here would drop the reply on the floor, so it is given the same
+        # bounded wait the approval bridge gives its threads, and only then
+        # abandoned.
+        if in_flight:
+            await asyncio.wait(in_flight, timeout=HTTP_TIMEOUT + 5)
+            for task in list(in_flight):
+                task.cancel()
         await server.browser.close()
 
 
