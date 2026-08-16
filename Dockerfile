@@ -3,8 +3,18 @@
 # ---------- stage 1: build the web UI ----------
 FROM node:22-bookworm-slim AS web
 WORKDIR /build
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+COPY frontend/package.json frontend/package-lock.json ./
+# `ci`, not `install`: the tree is pinned by the lockfile, so what gets built
+# here is decided by a file in the repository rather than by what the registry
+# happened to be serving on the day of the deploy. It also refuses to run when
+# package.json and the lockfile disagree, which is the failure worth having —
+# the alternative is a build that quietly resolves something else and a bundle
+# nobody can reproduce afterwards.
+#
+# The lockfile is no longer optional (it used to be `package-lock.json*`): a
+# missing one now fails at COPY rather than silently going back to resolving
+# fresh, which is exactly the state this replaced.
+RUN npm ci
 COPY frontend/ ./
 # Types, then behaviour, then the bundle — cheapest signal first, and any of the
 # three failing fails the build.

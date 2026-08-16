@@ -503,7 +503,9 @@ export AIOPS_WORKSPACE_ROOT="$PWD/workspaces" AIOPS_COOKIE_SECURE=false
 cd backend && uvicorn app.main:app --reload
 
 # frontend (separate shell) — proxies /api and the websocket to :8000
-cd frontend && npm install && npm run dev
+# `npm ci` installs exactly the tree in package-lock.json, which is what the
+# image is built from. Use `npm install` only when you mean to change it.
+cd frontend && npm ci && npm run dev
 ```
 
 SQLite is fine for development; the JSON columns and concurrent writes are why
