@@ -580,16 +580,16 @@ check("the agent is told the browser exists and what to call it",
 check("and which networks it can browse", "198.51.100.0/24" in briefing, briefing[:400])
 check("and on which ports", "80, 8989" in briefing, briefing[:400])
 check("and that a refusal is a policy limit rather than a broken network",
-      "policy limit" in briefing, briefing)
+      "policy limit" in briefing, briefing[:200])
 check("and that reads are silent while clicks are approved",
-      "approval" in briefing and "silently" in briefing, briefing)
+      "approval" in briefing and "silently" in briefing, briefing[:200])
 check("and which systems it may ask AIOps to sign in as",
-      "`sonarr`" in briefing, briefing)
+      "`sonarr`" in briefing, briefing[:200])
 check("and that it will never be given the password",
-      "never given to you" in briefing, briefing)
+      "never given to you" in briefing, briefing[:200])
 check("a run with no node is told the browser reaches public sites only",
       "public sites only" in browsing.describe(browsing.reach_document()),
-      browsing.describe(browsing.reach_document()))
+      browsing.describe(browsing.reach_document())[:200])
 
 spec = ClaudeProvider().build_run(
     prompt="hi", model=None, provider_session_id=None, permission_mode=None,
