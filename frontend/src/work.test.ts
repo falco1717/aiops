@@ -116,6 +116,40 @@ describe("summarizeRun", () => {
     ]);
   });
 
+  it("counts one interleaved task once, not once per fragment", () => {
+    // A subagent's steps arrive between the main loop's, so one task comes back
+    // from buildRows as several consecutive-run groups. In a transcript each
+    // fragment belongs where it happened; here five fragments are one task, and
+    // listing it five times says five things are running.
+    const run = active({
+      recent: [
+        ev(1, { kind: "tool_use", tool_name: "Bash", text: "step one" }),
+        ev(2, { parent_tool_use_id: "t1", agent_name: "Explore", text: "reading a" }),
+        ev(3, { kind: "tool_use", tool_name: "Bash", text: "step two" }),
+        ev(4, { parent_tool_use_id: "t1", agent_name: "Explore", text: "reading b" }),
+        ev(5, { kind: "tool_use", tool_name: "Bash", text: "step three" }),
+        ev(6, { parent_tool_use_id: "t1", agent_name: "Explore", text: "reading c" }),
+      ],
+    });
+    // And the line carries the latest thing it said, not the first.
+    expect(summarizeRun(run, T0, 1).tasks).toEqual([
+      { name: "Explore", activity: "reading c" },
+    ]);
+  });
+
+  it("keeps two genuinely different tasks apart", () => {
+    const run = active({
+      recent: [
+        ev(1, { parent_tool_use_id: "t1", agent_name: "Explore", text: "reading" }),
+        ev(2, { parent_tool_use_id: "t2", agent_name: "Plan", text: "sketching" }),
+      ],
+    });
+    expect(summarizeRun(run, T0, 1).tasks).toEqual([
+      { name: "Explore", activity: "reading" },
+      { name: "Plan", activity: "sketching" },
+    ]);
+  });
+
   it("drops a task the main loop has moved on from", () => {
     const run = active({
       recent: [

@@ -101,17 +101,30 @@ export function summarizeRun(run: ActiveRun, nowMs: number, myId: number): RunSu
  * it shows the main loop resumed — and it is given the tail of the run, which
  * is exactly the window that question is about. A task that finished a hundred
  * steps ago is not in the tail and is not meant to be.
+ *
+ * Then folded by the tool call each group belongs to, which the transcript does
+ * not do. A subagent's steps arrive *interleaved* with the main loop's, so one
+ * task that has taken five steps in the visible tail comes back as five
+ * consecutive-run groups. In a transcript that is right — each fragment sits
+ * where it happened, in order. Here it is one task, and printing it five times
+ * says there are five.
  */
 function openTasks(run: ActiveRun): TaskLine[] {
-  return buildRows(run.recent, { live: true })
-    .filter((row) => row.type === "subagent" && row.running)
-    .map((row) => {
-      const sub = row as Extract<typeof row, { type: "subagent" }>;
+  const byParent = new Map<string, TaskLine>();
+  for (const row of buildRows(run.recent, { live: true })) {
+    if (row.type !== "subagent" || !row.running) continue;
+    const existing = byParent.get(row.parentId);
+    byParent.set(row.parentId, {
       // The same fallback the transcript prints. The CLI names a subagent it
       // spawned and does not name the task it narrates around an ordinary tool
       // call, and calling the second one a subagent claims something untrue.
-      return { name: sub.name || "background task", activity: sub.activity };
+      // A later fragment may be the one that carries the name.
+      name: row.name || existing?.name || "background task",
+      // The most recent thing it said, which is what "doing" means.
+      activity: row.activity || existing?.activity || "",
     });
+  }
+  return [...byParent.values()];
 }
 
 export type WorkView = {
