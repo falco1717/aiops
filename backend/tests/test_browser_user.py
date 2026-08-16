@@ -142,8 +142,8 @@ source = open(CSOURCE, encoding="utf-8").read() if os.path.exists(CSOURCE) else 
 check("the helper's source is where this expects it", bool(source), CSOURCE)
 
 if source:
-    prefixes = re.search(r"const \*const prefixes\[\] = \{([^}]*)\}", source)
-    names = re.search(r"const \*const names\[\] = \{([^}]*)\}", source)
+    prefixes = re.search(r"prefixes\[\] = \{([^}]*)\}", source)
+    names = re.search(r"names\[\] = \{([^}]*)\}", source)
     c_prefixes = tuple(re.findall(r'"([^"]+)"', prefixes.group(1))) if prefixes else ()
     c_names = frozenset(re.findall(r'"([^"]+)"', names.group(1))) if names else frozenset()
 

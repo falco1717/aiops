@@ -384,7 +384,12 @@ for label, needle in (
     ("the helper drops all three uids, not just the effective one", "setresuid"),
     ("the helper proves it cannot get back to root", "setuid(0) == 0"),
     ("the helper serves only the application's uid", "getuid() != (uid_t)AIOPS_APP_UID"),
-    ("the helper will only signal agent processes", "owned_by_agent"),
+    # Agent *or* browser, never the app: the browser runs as a third user and
+    # Playwright's driver sits in the agent's process group, so a cancelled run
+    # has to be able to reach it. What is refused is unchanged — anything
+    # running as the application.
+    ("the helper will only signal processes on the far side of the boundary",
+     "owned_by_isolated_user"),
 ):
     check(label, needle in helper_source)
 
