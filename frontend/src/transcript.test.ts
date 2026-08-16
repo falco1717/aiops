@@ -38,7 +38,7 @@ const bodies = (rows: ReturnType<typeof buildRows>) =>
   );
 
 describe("the duplicated final message", () => {
-  it("drops a result that repeats the assistant text it follows (43 of 46 recorded runs)", () => {
+  it("drops a result that repeats the assistant text it follows (42 of 46 recorded)", () => {
     const reply = "Found it — and this one's conclusive.\n\n## Root cause\n\nBoth databases…";
     const rows = buildRows([ev("assistant", reply), ev("result", reply)]);
     expect(bodies(rows)).toEqual([`assistant:${reply}`]);

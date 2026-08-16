@@ -11,14 +11,16 @@
  * Three of those decisions, and the evidence:
  *
  *  1. The CLI ends a turn with a `result` event whose `result` field is a
- *     verbatim copy of the final assistant message. Across every recorded run
- *     that had both, the two texts were byte-identical — never a summary, never
- *     an addition. So the second copy is dropped and the assistant message is
- *     the one kept: it arrives first, so nothing on screen has to move.
+ *     verbatim copy of the final assistant message. Of the 46 recorded, 42
+ *     carried that field, and all 42 were byte-identical to the reply before
+ *     them — never a summary, never an addition. So the second copy is dropped
+ *     and the assistant message is the one kept: it arrives first, so nothing
+ *     on screen has to move.
  *
  *  2. When the CLI has no final text to report — an interrupted turn, a turn
- *     that hit a limit — it sends no `result` field at all, and the provider
- *     falls back to the event's `subtype`. That produces a "message" whose
+ *     that hit a limit — it sends no `result` field at all (the other 4), and
+ *     the provider falls back to the event's `subtype`. That produces a
+ *     "message" whose
  *     entire body is the token `success` or `error_during_execution`. Those are
  *     not prose and must not be drawn as if they were; but an error one is the
  *     CLI's own account of how the turn ended, so it is kept as a status line
