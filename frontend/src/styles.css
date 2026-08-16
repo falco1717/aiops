@@ -705,7 +705,10 @@ button.big { font-size: 15px; padding: 11px 18px; }
   /* Subagent groups: name and count on separate lines rather than three wrapped
      ones, and the nested bubbles get their width back. */
   .subagent-head { flex-wrap: wrap; padding: 8px 10px; min-height: 44px; row-gap: 0; }
-  .subagent-name { flex: 1 1 auto; min-width: 0; }
+  /* `0 1 auto`, not `1 1 auto`: a growing name pushed the running dot to the far
+     right of the row, where it read as a separate control rather than as
+     punctuation on the name it belongs to. */
+  .subagent-name { flex: 0 1 auto; min-width: 0; }
   .subagent-meta { flex-basis: 100%; padding-left: 18px; font-size: 11.5px; }
   /* It has a whole row to itself down here, so it reads in full rather than
      being cut off at one line. */

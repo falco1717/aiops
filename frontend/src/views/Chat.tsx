@@ -2012,8 +2012,11 @@ function Sharing({
  */
 function SubagentGroup({ row }: { row: SubagentRow }) {
   const [open, setOpen] = useState<boolean | null>(null);
-  const shown = open ?? row.running;
   const steps = row.steps.length;
+  // A running one opens itself so you can watch it — unless its only step is
+  // the description already printed in the header, which is the shape most of
+  // them have and which would otherwise print itself twice.
+  const shown = open ?? (row.running && steps > 1);
   return (
     <div className={`subagent${row.running ? " running" : ""}`}>
       <button
