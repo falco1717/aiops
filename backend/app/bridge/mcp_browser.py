@@ -152,6 +152,11 @@ def decide_route(host: str, port: int, reach: dict, resolver=None) -> Route:
     network interface, and "the browser could not reach it" must mean "no node
     would carry it", not "the app's own subnet answered instead".
 
+    A rule marked `all_ports` skips the port comparison and nothing else — the
+    address still has to be inside that rule's network, exactly as the gate
+    requires. There is no shape of this document that makes an out-of-range
+    address routable.
+
     Nothing here authorises anything on its own: a relay route is re-checked by
     the gate in the app when the stream is opened. This decides which of the two
     doors to knock on, and closes both for anything else.
@@ -172,7 +177,14 @@ def decide_route(host: str, port: int, reach: dict, resolver=None) -> Route:
         except ValueError:
             continue
         ports = tuple(int(p) for p in (entry.get("ports") or []))
-        rules.append((str(entry.get("node") or ""), network, ports))
+        # `is True`, not `bool(...)`. This document arrives over a loopback
+        # call and is parsed on the agent's side of the boundary, so the
+        # question is not "is this value truthy" but "did the app say the word
+        # true" — a stray string, a 1, or a missing key are all read as no.
+        # Widening here would only earn a refusal at the gate anyway; reading
+        # it strictly is what keeps the refusal from being a surprise.
+        all_ports = entry.get("all_ports") is True
+        rules.append((str(entry.get("node") or ""), network, ports, all_ports))
 
     literal: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
     try:
@@ -181,12 +193,15 @@ def decide_route(host: str, port: int, reach: dict, resolver=None) -> Route:
         literal = None
 
     if literal is not None:
-        in_range = [(slug, net, ports) for slug, net, ports in rules if literal in net]
-        for slug, _net, ports in in_range:
-            if port in ports:
+        in_range = [rule for rule in rules if literal in rule[1]]
+        for slug, _net, ports, all_ports in in_range:
+            if all_ports or port in ports:
                 return Route("relay", node=slug, address=host)
         if in_range:
-            slug, net, ports = in_range[0]
+            # Only reachable for a node that is *not* all-ports — one that is
+            # returned above on any port — so the sentence still describes the
+            # situation it is written for.
+            slug, net, ports, _all = in_range[0]
             allowed = ", ".join(str(p) for p in ports) or "none"
             return Route(
                 "refuse",
@@ -194,7 +209,7 @@ def decide_route(host: str, port: int, reach: dict, resolver=None) -> Route:
                     f"{host} is inside {net}, which relay node {slug!r} carries, but port "
                     f"{port} is not one of that node's allowed ports ({allowed}). AIOps will "
                     f"not widen a node's ports by itself: add {port} to node {slug!r} on the "
-                    "Nodes page and start a new turn."
+                    "Nodes page — or switch that node to every port — and start a new turn."
                 ),
             )
         if not _is_public(literal):
@@ -244,9 +259,11 @@ def _no_range(host: str, rules) -> str:
             "it. Ask the operator for access to a node covering that network."
         )
     listed = ", ".join(
-        f"{net} on port{'' if len(ports) == 1 else 's'} "
-        f"{', '.join(str(p) for p in ports)} via node {slug!r}"
-        for slug, net, ports in rules
+        f"{net} on "
+        + ("every port" if all_ports
+           else f"port{'' if len(ports) == 1 else 's'} {', '.join(str(p) for p in ports)}")
+        + f" via node {slug!r}"
+        for slug, net, ports, all_ports in rules
     )
     return (
         f"{host} is not inside any network this run may reach through a relay node. "

@@ -31,6 +31,10 @@ export default function Nodes({ me }: { me: User }) {
   const [grants, setGrants] = useState<NodeGrant[]>([]);
   const [cidrs, setCidrs] = useState("");
   const [ports, setPorts] = useState("");
+  //: Every port on the networks above. Off unless the node already has it on
+  //: and the operator opened this form on that node — never a default, and
+  //: never carried over from whichever node was edited last.
+  const [allPorts, setAllPorts] = useState(false);
   //: True while the network box holds a guess nobody has agreed to yet.
   const [suggested, setSuggested] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -76,6 +80,7 @@ export default function Nodes({ me }: { me: User }) {
     setGrants([]);
     setCidrs("");
     setPorts("");
+    setAllPorts(false);
     setSuggested(false);
     setEditingId(null);
   };
@@ -109,6 +114,12 @@ export default function Nodes({ me }: { me: User }) {
           // which JSON writes as null, and the operator would get a complaint
           // about a null instead of being told "ssh" is not a port.
           allowed_ports: splitList(ports),
+          // A real boolean, from a control that has only two states. It is
+          // sent on every save so that switching it off is a save like any
+          // other, and it is the checkbox's own value rather than anything
+          // derived from the boxes above — nothing about the port list can
+          // turn this on.
+          allow_all_ports: allPorts,
         });
       } else {
         setIssued(await api.createNode({ name, description: description || null, grants }));
@@ -131,6 +142,11 @@ export default function Nodes({ me }: { me: User }) {
     setCidrs(guess ?? node.allowed_cidrs.join(", "));
     setSuggested(guess !== null);
     setPorts(node.allowed_ports.join(", "));
+    // Whatever this node actually has, and never a suggestion: the networks
+    // box is prefilled with a guess because a guess there is usually right,
+    // and this is the one setting where being usually right is not good
+    // enough to put in front of a save button.
+    setAllPorts(node.allow_all_ports);
   };
 
   const remove = (node: RelayNode) =>
@@ -276,13 +292,41 @@ export default function Nodes({ me }: { me: User }) {
                 value={ports}
                 onChange={(e) => setPorts(e.target.value)}
                 placeholder="22"
+                disabled={allPorts}
               />
             </label>
             <p className="hint">
-              Comma separated. Empty means 22 alone. Anything outside these ranges and
-              ports is refused when the connection is opened, not merely left out of the
-              agent's config.
+              Comma separated. Empty means 22 alone — never every port. Anything outside
+              these ranges and ports is refused when the connection is opened, not merely
+              left out of the agent's config.
             </p>
+            {/* Its own block rather than another line in the list above: it is
+                the one control on this page that cannot be undone by a
+                refusal at the gate, so it is worth looking at rather than
+                reading past. Not pre-checked, not the default, and the box is
+                only ticked here by the person who ticks it. */}
+            <div className={`all-ports${allPorts ? " on" : ""}`}>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={allPorts}
+                  onChange={(e) => setAllPorts(e.target.checked)}
+                />
+                <span>Allow every port on these networks</span>
+              </label>
+              <p className="hint" style={{ margin: "8px 0 0" }}>
+                Every one of the 65,535 ports on the networks named above, not only the
+                listed ones — remote administration, file shares, databases, hypervisors
+                and anything else listening there. The networks themselves are unchanged:
+                an address outside them is still refused. Use it when enumerating a port
+                per service is the only thing in the way; leave it off otherwise.
+              </p>
+              {allPorts && (
+                <p className="hint" style={{ margin: "8px 0 0", color: "var(--warn)" }}>
+                  The port list is kept and comes back if you switch this off.
+                </p>
+              )}
+            </div>
           </fieldset>
         )}
 
@@ -356,11 +400,28 @@ export default function Nodes({ me }: { me: User }) {
                 <span
                   className="pill ok"
                   key={`allowed-${cidr}`}
-                  title={`Agents may reach any address in ${cidr} on port ${node.allowed_ports.join(", ")}`}
+                  title={
+                    node.allow_all_ports
+                      ? `Agents may reach any address in ${cidr} on any port`
+                      : `Agents may reach any address in ${cidr} on port ${node.allowed_ports.join(", ")}`
+                  }
                 >
                   ↔ {cidr}
                 </span>
               ))}
+              {/* Only alongside a network, because that is the only case in
+                  which it means anything: every port of nothing is nothing.
+                  Drawn in the warning colour rather than the same green as the
+                  ranges beside it — coming back to this node in a month, the
+                  thing to notice first is that the ports were opened up. */}
+              {node.allow_all_ports && node.allowed_cidrs.length > 0 && (
+                <span
+                  className="pill warn"
+                  title="Every port on the networks above, not only the listed ones"
+                >
+                  every port
+                </span>
+              )}
               {node.target_count > 0 && (
                 <span className="pill">
                   {node.target_count} system{node.target_count === 1 ? "" : "s"} behind it

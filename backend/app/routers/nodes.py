@@ -86,6 +86,10 @@ def _out(node: RelayNode, level: str, counts: dict[int, int]) -> NodeOut:
         # Null on a row that predates the column, and empty means the default
         # rather than "every port" — shown as what it actually resolves to.
         allowed_ports=list(node.allowed_ports or relay.DEFAULT_ALLOWED_PORTS),
+        # Read straight off its own column. Null on a row that predates it, and
+        # never derived from the list above — the two answer different
+        # questions and an empty list has always meant 22, not everything.
+        allow_all_ports=bool(node.allow_all_ports),
         owner_id=node.owner_id,
         grants=[NodeGrant(user_id=g.user_id, level=g.level) for g in node.grants],
         my_level=level,
@@ -334,6 +338,10 @@ async def create_node(
         # that is a separate, deliberate edit — never part of registering one.
         allowed_cidrs=[],
         allowed_ports=list(relay.DEFAULT_ALLOWED_PORTS),
+        # Spelled out rather than left to the column default, for the same
+        # reason the two lines above are: what a freshly registered node can
+        # reach should be readable here, not looked up in models.py.
+        allow_all_ports=False,
         created_by_id=user.id,
         owner_id=user.id,
     )
@@ -423,23 +431,32 @@ async def update_node(
         node.description = data["description"]
 
     # Subnet reach. Only from here, only with manage — `_require` above has
-    # already settled that — and never from anything the node itself said.
-    if "allowed_cidrs" in data or "allowed_ports" in data:
+    # already settled that, for all-ports exactly as for the CIDRs — and never
+    # from anything the node itself said.
+    if "allowed_cidrs" in data or "allowed_ports" in data or "allow_all_ports" in data:
         try:
             if "allowed_cidrs" in data:
                 node.allowed_cidrs = relay.normalise_cidrs(data["allowed_cidrs"])
             if "allowed_ports" in data:
                 node.allowed_ports = relay.normalise_ports(data["allowed_ports"])
+            if data.get("allow_all_ports") is not None:
+                # `is not None` rather than `in data`: a PATCH that mentions
+                # the key with a null is a client that did not decide, and the
+                # one direction this must never move by itself is on.
+                node.allow_all_ports = bool(data["allow_all_ports"])
         except relay.SubnetRuleError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
         # Loud, like approval and revocation: this widens what can be reached
         # through somebody's network, and it is the sort of change that has to
         # be findable afterwards in a log rather than only in a database row.
         log.warning(
-            "relay node %r subnet reach set to %s on port(s) %s by %r",
+            "relay node %r subnet reach set to %s on %s by %r",
             node.slug,
             node.allowed_cidrs or "nothing",
-            node.allowed_ports or list(relay.DEFAULT_ALLOWED_PORTS),
+            relay.ports_phrase(
+                node.allowed_ports or list(relay.DEFAULT_ALLOWED_PORTS),
+                bool(node.allow_all_ports),
+            ),
             user.username,
         )
 

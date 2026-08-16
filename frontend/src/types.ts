@@ -471,6 +471,10 @@ export type RelayNode = {
   /** What it is allowed to be used for. Set only here, by a person. */
   allowed_cidrs: string[];
   allowed_ports: number[];
+  /** Those networks are open on every port, rather than on allowed_ports.
+   *  Its own field, never inferred from an empty port list — empty has always
+   *  meant 22. */
+  allow_all_ports: boolean;
   owner_id: number | null;
   grants: NodeGrant[];
   /** owner | manage | use, or "" for an admin seeing one only to approve it. */

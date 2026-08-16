@@ -282,15 +282,21 @@ def prepare(
     # Subnets, after every stored system: ssh takes the first value it is given
     # for a keyword, so a host that is both stored and inside an allowed range
     # keeps the credential and port its operator saved for it.
-    subnets: list[tuple[str, ipaddress.IPv4Network, tuple[int, ...]]] = []
+    subnets: list[relay.SubnetRule] = []
     for node in subnet_nodes:
         rules = relay.subnet_rules(node)
         subnets += rules
-        for _, network, ports in rules:
+        for rule in rules:
+            network, ports = rule.network, rule.ports
             patterns = subnet_patterns(network)
             lines += [
+                # The Host globs are built from the CIDR and have never
+                # mentioned a port — ssh will try any port against a matching
+                # pattern either way, and the gate is what decides. So all-ports
+                # changes nothing here but this comment, which is the only place
+                # the config says what the node was actually opened to.
                 f"# {network} reached through relay node {node.slug}"
-                + (f" (ports {', '.join(str(p) for p in ports)})" if ports else ""),
+                + (f" ({relay.ports_phrase(ports, rule.all_ports)})" if ports else ""),
                 "# No credential is stored for these hosts — supply a user and a key.",
                 # The patterns can be wider than the range; the relay refuses
                 # anything outside it. See subnet_patterns().
@@ -437,15 +443,13 @@ def describe(
         )
 
     ranges = [
-        (network, ports, node)
-        for node in subnet_nodes
-        for _, network, ports in relay.subnet_rules(node)
+        (rule, node) for node in subnet_nodes for rule in relay.subnet_rules(node)
     ]
     if ranges:
         listed = "\n".join(
-            f"- {network} on port{'' if len(ports) == 1 else 's'} "
-            f"{', '.join(str(p) for p in ports)} — via relay node {node.name}"
-            for network, ports, node in ranges
+            f"- {rule.network} on {relay.ports_phrase(rule.ports, rule.all_ports)}"
+            f" — via relay node {node.name}"
+            for rule, node in ranges
         )
         blocks.append(
             "Networks reachable through a relay node. Any address in these ranges can be "

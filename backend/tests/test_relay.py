@@ -456,8 +456,64 @@ with TestClient(app) as c:
     r = c.patch(f"/api/nodes/{subnet_id}", json={"allowed_cidrs": ["10.10.0.0/16"]})
     check("someone with 'use' cannot widen what the node reaches",
           r.status_code == 403, f"{r.status_code} {r.text[:160]}")
+    r = c.patch(f"/api/nodes/{subnet_id}", json={"allow_all_ports": True})
+    check("nor can they open it to every port — the same manage rule, not a looser one",
+          r.status_code == 403, f"{r.status_code} {r.text[:160]}")
     c.post("/api/auth/logout")
     c.post("/api/auth/login", json={"username": "admin", "password": "devpassword123"})
+    row = next(n for n in c.get("/api/nodes").json() if n["id"] == subnet_id)
+    check("and the refusal really left the node alone",
+          row["allow_all_ports"] is False, str(row["allow_all_ports"]))
+
+    # --- all ports, through the API ---------------------------------------
+    # The round trip an operator actually makes: it is off, they turn it on,
+    # and what they read back is what the gate is then asked.
+    r = c.post("/api/nodes", json={"name": "Fresh Net"})
+    check("a node is registered with every port switched off",
+          r.json()["node"]["allow_all_ports"] is False, str(r.json()["node"]))
+    c.delete(f"/api/nodes/{r.json()['node']['id']}")
+
+    r = c.patch(f"/api/nodes/{subnet_id}", json={"allow_all_ports": True})
+    check("the owner can open a node to every port", r.status_code == 200,
+          f"{r.status_code} {r.text[:200]}")
+    check("and the node says so when read back",
+          r.status_code == 200 and r.json()["allow_all_ports"] is True, r.text[:250])
+    check("without the port list being thrown away, so switching it off restores it",
+          r.status_code == 200 and r.json()["allowed_ports"] == [22, 8006], r.text[:250])
+    check("and without the networks moving, which is the half it does not touch",
+          r.status_code == 200 and r.json()["allowed_cidrs"] == ["198.51.100.0/24"],
+          r.text[:250])
+
+    # Every way of *not* saying anything must leave it exactly as it was.
+    r = c.patch(f"/api/nodes/{subnet_id}", json={"allowed_ports": [22, 8006]})
+    check("a patch that does not mention it leaves it alone",
+          r.json()["allow_all_ports"] is True, r.text[:200])
+    r = c.patch(f"/api/nodes/{subnet_id}", json={"allow_all_ports": False})
+    check("and it can be switched off again", r.json()["allow_all_ports"] is False, r.text[:200])
+    for quiet in ({"description": "still off"}, {"allow_all_ports": None},
+                  {"allowed_ports": []}, {"allowed_cidrs": ["198.51.100.0/24"]}):
+        r = c.patch(f"/api/nodes/{subnet_id}", json=quiet)
+        check(f"and {str(quiet)[:40]} does not turn it back on",
+              r.status_code == 200 and r.json()["allow_all_ports"] is False,
+              f"{r.status_code} {r.text[:160]}")
+    # The one in that list that is a clearing rather than a silence: emptying
+    # the port box has always meant 22, and it must not have quietly acquired
+    # a second meaning now that "everything" is a thing a node can be.
+    row = next(n for n in c.get("/api/nodes").json() if n["id"] == subnet_id)
+    check("clearing the port list still means 22 alone, and never everything",
+          row["allowed_ports"] == [22] and row["allow_all_ports"] is False, str(row)[:250])
+
+    for nonsense in ("yes please", 2, [], {}):
+        r = c.patch(f"/api/nodes/{subnet_id}", json={"allow_all_ports": nonsense})
+        check(f"and a value that is not a boolean ({nonsense!r}) is refused rather than read",
+              r.status_code == 422, f"{r.status_code} {r.text[:120]}")
+    row = next(n for n in c.get("/api/nodes").json() if n["id"] == subnet_id)
+    check("none of which moved it", row["allow_all_ports"] is False, str(row)[:250])
+
+    # Left ON, deliberately: the scope checks further down read this row out of
+    # the database and hand it to the gate.
+    c.patch(f"/api/nodes/{subnet_id}", json={"allowed_ports": [22, 8006],
+                                             "allow_all_ports": True})
     # A revoked node with a range set must still be worth nothing.
     c.patch(f"/api/nodes/{node_id}", json={"allowed_cidrs": ["10.10.20.0/24"]})
 
@@ -529,6 +585,152 @@ with TestClient(app) as c:
     check("a /24 is a glob exactly, and is written as one", exact_line == "Host 10.20.30.*",
           exact_line)
     exact_ctx.cleanup()
+
+    # --- every port ------------------------------------------------------
+    # The owner's case: a node carrying three office ranges where the services
+    # worth reaching are on 8989, 7878, 8006 and whatever gets installed next
+    # week. Enumerating them is the friction; this removes it, and removes
+    # nothing else.
+    every = RelayNode(id=14, name="Media Net", slug="media-net", status="approved", grants=[],
+                      networks=["192.0.2.0/24", "10.99.4.0/23", "0.0.0.0/0"],
+                      allowed_cidrs=["192.0.2.0/24", "10.99.4.0/23"],
+                      allowed_ports=[22], allow_all_ports=True)
+    every_ctx = ssh_targets.prepare([], {}, [every], who="tester (run 4, session s-4)")
+    every_tok = every_ctx.env["AIOPS_RELAY_TOKEN"]
+
+    for port in (22, 445, 3389, 7878, 8006, 8989, 1, 65535):
+        check(f"an all-ports node reaches an in-range address on {port}",
+              relay.tokens.allows(every_tok, "media-net", "192.0.2.40", port))
+    check("on every one of its networks, not only the first",
+          relay.tokens.allows(every_tok, "media-net", "10.99.5.200", 8989))
+    check("and the port it was nominally listed for still works too",
+          relay.tokens.allows(every_tok, "media-net", "10.99.4.9", 22))
+
+    # THE ONE THAT MATTERS. All-ports relaxes the port comparison; the CIDR is
+    # untouched and is still the whole of which machines exist.
+    for port in (22, 445, 3389, 8989, 65535):
+        check(f"AND STILL REFUSES an address outside its networks, on {port}",
+              not relay.tokens.allows(every_tok, "media-net", "172.19.23.40", port))
+    for outside in ("10.0.6.1", "198.51.100.42", "8.8.8.8", "127.0.0.1", "172.31.4.4"):
+        check(f"nor {outside}, which no CIDR on this node covers",
+              not relay.tokens.allows(every_tok, "media-net", outside, 8989))
+    check("what the node claims about itself still authorises nothing — 172.31/16",
+          not relay.tokens.allows(every_tok, "media-net", "172.31.9.9", 8989))
+    check("nor does it claiming the entire internet, all-ports or not",
+          not relay.tokens.allows(every_tok, "media-net", "1.1.1.1", 443))
+    check("a name is still never matched against a range, even an all-ports one",
+          not relay.tokens.allows(every_tok, "media-net", "sonarr.lan", 8989))
+    check("and all-ports on one node is not all-ports on another",
+          not relay.tokens.allows(every_tok, "salt-net", "192.0.2.40", 8989))
+
+    check("the log can tell an all-ports connection from a listed one",
+          relay.tokens.via_all_ports(every_tok, "media-net", "192.0.2.40", 3389))
+    check("while a port that really was on the node's list is not blamed on all-ports",
+          not relay.tokens.via_all_ports(every_tok, "media-net", "192.0.2.40", 22))
+    check("and nothing the gate refuses is reported as an all-ports connection",
+          not relay.tokens.via_all_ports(every_tok, "media-net", "172.19.23.40", 3389))
+
+    briefing = ssh_targets.describe([], {}, [every])
+    check("the agent is told the node is open on every port, in those words",
+          "every port" in briefing, briefing[:400])
+    check("and is not handed a port list that would read as a limit",
+          "on ports 22" not in briefing, briefing[:400])
+    every_ctx.cleanup()
+    check("and an all-ports grant dies with the run like every other",
+          not relay.tokens.allows(every_tok, "media-net", "192.0.2.40", 8989))
+
+    # The bypass construction again, with every port switched on. A /25 has no
+    # glob, so the config is written as the /24 around it and ssh really will
+    # try .200 — on any port at all now. The gate holds the CIDR.
+    half_open = RelayNode(id=15, name="Half Open", slug="half-open", status="approved",
+                          grants=[], networks=[], allowed_cidrs=["192.168.90.0/25"],
+                          allowed_ports=[22], allow_all_ports=True)
+    open_ctx = ssh_targets.prepare([], {}, [half_open], who="tester (run 5, session s-5)")
+    with open(os.path.join(open_ctx.root, "config")) as fh:
+        open_config = fh.read()
+    open_host_line = next(
+        (ln.strip() for ln in open_config.splitlines() if ln.startswith("Host ")), ""
+    )
+    check("an all-ports /25 is still written as the whole /24 around it",
+          open_host_line == "Host 192.168.90.*", open_host_line)
+    check("so ssh would route .200 through the node, on whatever port it is asked for",
+          fnmatch.fnmatch("192.168.90.200", open_host_line.split(" ", 1)[1]), open_host_line)
+    check("and the config says which ports the node is open on, so it is not a surprise",
+          "(every port)" in open_config,
+          next((ln for ln in open_config.splitlines() if ln.startswith("# 192.168.90")), ""))
+    open_tok = open_ctx.env["AIOPS_RELAY_TOKEN"]
+    for port in (22, 445, 3389, 8989, 65535):
+        check(f"BYPASS: the gate refuses .200 on {port} — all-ports did not touch the CIDR",
+              not relay.tokens.allows(open_tok, "half-open", "192.168.90.200", port))
+    check("BYPASS: and .128, the first address past the /25 boundary, is refused too",
+          not relay.tokens.allows(open_tok, "half-open", "192.168.90.128", 8989))
+    check("while .100, genuinely inside the /25, is reachable on an arbitrary port",
+          relay.tokens.allows(open_tok, "half-open", "192.168.90.100", 8989))
+    check("and .127, the last address genuinely inside it, is too",
+          relay.tokens.allows(open_tok, "half-open", "192.168.90.127", 445))
+    open_ctx.cleanup()
+
+    # --- what all-ports is not -------------------------------------------
+    # Off, the node is exactly the node it always was. This is the regression:
+    # the port list must still be a list and not a formality.
+    listed_only = RelayNode(id=16, name="Listed", slug="listed-net", status="approved",
+                            grants=[], networks=[], allowed_cidrs=["192.168.91.0/24"],
+                            allowed_ports=[22, 8006], allow_all_ports=False)
+    listed_ctx = ssh_targets.prepare([], {}, [listed_only])
+    listed_tok = listed_ctx.env["AIOPS_RELAY_TOKEN"]
+    check("a node without all-ports still allows exactly what it lists",
+          relay.tokens.allows(listed_tok, "listed-net", "192.168.91.5", 22)
+          and relay.tokens.allows(listed_tok, "listed-net", "192.168.91.5", 8006))
+    for port in (23, 445, 3389, 8989):
+        check(f"and still refuses {port}, which it does not list",
+              not relay.tokens.allows(listed_tok, "listed-net", "192.168.91.5", port))
+    check("and none of its connections are recorded as all-ports ones",
+          not relay.tokens.via_all_ports(listed_tok, "listed-net", "192.168.91.5", 22))
+    listed_ctx.cleanup()
+
+    # Empty has meant 22 since the column existed. Adding a way to say
+    # "everything" must not have made blank a second way to say it.
+    blank = RelayNode(id=17, name="Blank", slug="blank-net", status="approved", grants=[],
+                      networks=[], allowed_cidrs=["192.168.92.0/24"], allowed_ports=[],
+                      allow_all_ports=False)
+    blank_ctx = ssh_targets.prepare([], {}, [blank])
+    blank_tok = blank_ctx.env["AIOPS_RELAY_TOKEN"]
+    check("an empty port list still means 22",
+          relay.tokens.allows(blank_tok, "blank-net", "192.168.92.5", 22))
+    for port in (80, 445, 3389, 8989):
+        check(f"and still means only 22 — not {port}",
+              not relay.tokens.allows(blank_tok, "blank-net", "192.168.92.5", port))
+    blank_ctx.cleanup()
+
+    # A null in the column, which is what a row written before the migration
+    # would hold if the default were ever left off. False, not truthy.
+    unset = RelayNode(id=18, name="Unset", slug="unset-net", status="approved", grants=[],
+                      networks=[], allowed_cidrs=["192.168.93.0/24"], allowed_ports=[22])
+    unset.allow_all_ports = None
+    unset_rules = relay.subnet_rules(unset)
+    check("a node whose all-ports column is null reads as off, not as everything",
+          unset_rules and unset_rules[0].all_ports is False, str(unset_rules))
+
+    # And every port of nothing is still nothing.
+    nowhere = RelayNode(id=19, name="Nowhere", slug="nowhere-net", status="approved",
+                        grants=[], networks=["10.99.4.0/23"], allowed_cidrs=[],
+                        allowed_ports=[22], allow_all_ports=True)
+    check("all-ports on a node with no networks grants nothing at all",
+          relay.subnet_rules(nowhere) == [], str(relay.subnet_rules(nowhere)))
+    nowhere_ctx = ssh_targets.prepare([], {}, [nowhere])
+    check("so a run set up around it is issued no relay token to use it with",
+          nowhere_ctx is not None and not nowhere_ctx.env.get("AIOPS_RELAY_TOKEN"),
+          str(nowhere_ctx.env.keys() if nowhere_ctx else None))
+    if nowhere_ctx is not None:
+        nowhere_ctx.cleanup()
+
+    # A rule that no longer validates loses the node its reach; it must never
+    # be the thing that buys it everything.
+    broken = RelayNode(id=20, name="Broken", slug="broken-net", status="approved", grants=[],
+                       networks=[], allowed_cidrs=["192.168.94.0/24"],
+                       allowed_ports=[70000], allow_all_ports=True)
+    check("an unusable port list costs an all-ports node its reach rather than widening it",
+          relay.subnet_rules(broken) == [], str(relay.subnet_rules(broken)))
 
     # --- what the agent is told -----------------------------------------
     briefing = ssh_targets.describe([], {}, [reach])
@@ -606,6 +808,59 @@ async def subnet_scope_checks():
         check("the revoked node really does hold a CIDR, so the exclusion is the status",
               node is not None and node.allowed_cidrs == ["10.10.20.0/24"],
               str(node.allowed_cidrs if node else None))
+
+        # --- all ports, round trip ---------------------------------------
+        # Set through the API a long way above, read back out of the database
+        # here, and handed to the gate. The three have to agree or the switch
+        # is decorative.
+        from app import ssh_targets as ssh_mod  # noqa: E402
+
+        stored = await db.scalar(sql_select(relay_mod.RelayNode).where(
+            relay_mod.RelayNode.slug == "insurance-net"))
+        check("what the API was told is what the column holds",
+              stored is not None and stored.allow_all_ports is True,
+              str(stored.allow_all_ports if stored else None))
+        rules = relay_mod.subnet_rules(stored)
+        check("and the rule the gate is built from carries it",
+              len(rules) == 1 and rules[0].all_ports is True, str(rules))
+        check("with the node's own networks untouched",
+              rules and str(rules[0].network) == "198.51.100.0/24", str(rules))
+
+        owner_ctx = ssh_mod.prepare([], {}, await relay_mod.subnet_nodes_for(db, people["admin"]),
+                                    who="admin (round trip)")
+        owner_tok = owner_ctx.env["AIOPS_RELAY_TOKEN"]
+        check("the owner's run reaches an in-range address on a port nobody listed",
+              relay_mod.tokens.allows(owner_tok, "insurance-net", "198.51.100.42", 8989))
+        check("and on another one",
+              relay_mod.tokens.allows(owner_tok, "insurance-net", "198.51.100.42", 3389))
+        check("but an address outside the node's network is refused, all-ports or not",
+              not relay_mod.tokens.allows(owner_tok, "insurance-net", "192.168.89.42", 8989))
+        check("and so is the range the node claims for itself and was never given",
+              not relay_mod.tokens.allows(owner_tok, "insurance-net", "10.4.4.4", 8989))
+        owner_ctx.cleanup()
+
+        # 'use' is enough to route through it, so walt gets the same reach — he
+        # was given the node, he just cannot change it.
+        granted_ctx = ssh_mod.prepare([], {}, await relay_mod.subnet_nodes_for(db, people["walt"]),
+                                      who="walt (round trip)")
+        granted_tok = granted_ctx.env["AIOPS_RELAY_TOKEN"]
+        check("someone granted 'use' on an all-ports node gets its every-port reach",
+              relay_mod.tokens.allows(granted_tok, "insurance-net", "198.51.100.42", 8989))
+        check("and is refused outside its networks exactly as its owner is",
+              not relay_mod.tokens.allows(granted_tok, "insurance-net", "192.168.89.42", 8989))
+        granted_ctx.cleanup()
+
+        # The administrator who was never given the node. All-ports is not a
+        # way around who the node belongs to.
+        stranger_nodes = await relay_mod.subnet_nodes_for(db, people["otheradmin"])
+        check("an all-ports node is materialised for nobody it was not shared with",
+              stranger_nodes == [], str([n.slug for n in stranger_nodes]))
+        stranger_ctx = ssh_mod.prepare([], {}, stranger_nodes, who="otheradmin (round trip)")
+        check("so their run gets no relay token at all, and nothing to ask the gate with",
+              stranger_ctx is None, str(stranger_ctx))
+        check("and a token they do not hold authorises nothing on that node",
+              not relay_mod.tokens.allows("a-token-they-never-got",
+                                          "insurance-net", "198.51.100.42", 8989))
 
 
 asyncio.run(subnet_scope_checks())
@@ -1467,6 +1722,64 @@ try:
           outside.returncode == 1 and b"not permitted" in outside.stderr,
           outside.stderr.decode()[:200])
     relay.tokens.revoke(subnet_env["AIOPS_RELAY_TOKEN"])
+
+    # --- the same subnet again, opened to every port ---------------------
+    # The echo server is deliberately not on this node's port list, so nothing
+    # but all-ports can carry it. Over the real forwarder, so the widened gate
+    # is exercised where the bytes are rather than only against its function.
+    relay_log = []
+
+    class RelayCapture(logging.Handler):
+        def emit(self, record):
+            relay_log.append(record.getMessage())
+
+    relay_handler = RelayCapture()
+    relay_logger = logging.getLogger("aiops.relay")
+    relay_logger.addHandler(relay_handler)
+    # The line being asserted is an info one and uvicorn is running at warning.
+    previous_level = relay_logger.level
+    relay_logger.setLevel(logging.INFO)
+
+    everything = NodeRow(
+        name="Live Net", slug=live_slug, status="approved", grants=[], networks=[],
+        allowed_cidrs=["127.0.0.0/24"], allowed_ports=[22], allow_all_ports=True,
+    )
+    every_env = {
+        **os.environ,
+        "AIOPS_RELAY_TOKEN": relay.tokens.issue(
+            set(), relay.subnet_rules(everything), "tester (run 4, session s-4)"
+        ),
+        "AIOPS_RELAY_ADDR": f"127.0.0.1:{relay.hub.forwarder_port}",
+    }
+    every_proxy = subprocess.Popen(
+        [sys.executable, helper, live_slug, "127.0.0.1", str(ECHO_PORT)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=every_env,
+    )
+    banner = every_proxy.stdout.read(16)
+    check("an all-ports node carries a port that is nowhere on its list",
+          banner == b"FAR-HOST-BANNER\n", repr(banner))
+    every_proxy.stdin.close()
+    every_proxy.wait(timeout=15)
+    check("and the log says the port was allowed because the node is all-ports",
+          any(f"127.0.0.1:{ECHO_PORT} opened" in line and "open on every port" in line
+              for line in relay_log),
+          str([ln for ln in relay_log if "opened" in ln][-3:]))
+
+    relay_log.clear()
+    every_outside = subprocess.run(
+        [sys.executable, helper, live_slug, "127.1.0.1", str(ECHO_PORT)],
+        input=b"", capture_output=True, env=every_env, timeout=30,
+    )
+    check("while an address outside the /24 is still refused at the socket, on that same port",
+          every_outside.returncode == 1 and b"not permitted" in every_outside.stderr,
+          every_outside.stderr.decode()[:200])
+    check("and the refusal is written down as one, not as an all-ports connection",
+          any("refused" in line and "outside this run's reach" in line for line in relay_log)
+          and not any("open on every port" in line for line in relay_log),
+          str(relay_log[-3:]))
+    relay_logger.removeHandler(relay_handler)
+    relay_logger.setLevel(previous_level)
+    relay.tokens.revoke(every_env["AIOPS_RELAY_TOKEN"])
 
     # --- revocation, against a live connection ---------------------------
     api.post(f"/api/nodes/{live_id}/revoke")

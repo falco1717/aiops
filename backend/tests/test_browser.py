@@ -68,6 +68,16 @@ REACH = {
                  "has_password": True}],
 }
 NOTHING = {"routes": [], "subnets": [], "systems": []}
+#: The same office network on a node its owner has opened to every port, which
+#: is the answer to having to name 8989 and then 7878 and then the next one.
+#: Deliberately keeps a `ports` list, because the column does: the flag is what
+#: decides, not the absence of anything.
+EVERY_PORT = {
+    "routes": [],
+    "subnets": [{"node": "office", "cidr": "198.51.100.0/24", "ports": [22],
+                 "all_ports": True}],
+    "systems": [],
+}
 
 
 def resolves_to(*addresses):
@@ -147,6 +157,58 @@ check("with no reach at all, an internal address is refused",
       r.kind == "refuse", repr(r))
 check("and the refusal says access has to come from the operator",
       "relay node" in r.reason, r.reason)
+
+# --- a node opened to every port -------------------------------------
+# What the owner asked for: Sonarr on 8989 and Radarr on 7878 without naming
+# either. The port comparison is the only thing that moves.
+for port in (8989, 7878, 3389, 445, 1, 65535, 22):
+    r = mb.decide_route("198.51.100.42", port, EVERY_PORT)
+    check(f"an all-ports node routes an in-range address on {port}",
+          r.kind == "relay" and r.node == "office", repr(r))
+
+for host in ("192.168.89.42", "203.0.113.10", "172.18.0.2", "127.0.0.1", "169.254.169.254"):
+    r = mb.decide_route(host, 8989, EVERY_PORT)
+    check(f"and STILL refuses {host}, which is outside the network it carries",
+          r.kind == "refuse", repr(r))
+    check("and does not dial it from this container instead",
+          "not inside any network" in r.reason or "refuses to dial" in r.reason, r.reason)
+r = mb.decide_route("192.168.89.42", 3389, EVERY_PORT)
+check("on an arbitrary port as much as on a listed one", r.kind == "refuse", repr(r))
+r = mb.decide_route("printer.lan", 8989, EVERY_PORT, resolver=resolves_to("198.51.100.7"))
+check("a NAME is still never matched against an all-ports node's range",
+      r.kind == "refuse", repr(r))
+r = mb.decide_route("example.com", 8989, EVERY_PORT, resolver=resolves_to("93.184.216.34"))
+check("and a public site is still held to the two browsing ports",
+      r.kind == "refuse", repr(r))
+
+# The flag has to be the word true. Everything else is a document this side of
+# the boundary said something the app did not.
+for pretend in (None, "true", 1, "yes", [], {}, "all"):
+    forged_flag = {"routes": [],
+                   "subnets": [{"node": "office", "cidr": "198.51.100.0/24",
+                                "ports": [22], "all_ports": pretend}],
+                   "systems": []}
+    r = mb.decide_route("198.51.100.42", 8989, forged_flag)
+    check(f"all_ports={pretend!r} is not all-ports — only the boolean is",
+          r.kind == "refuse", repr(r))
+missing = {"routes": [],
+           "subnets": [{"node": "office", "cidr": "198.51.100.0/24", "ports": [22]}],
+           "systems": []}
+r = mb.decide_route("198.51.100.42", 8989, missing)
+check("and a subnet entry with no all_ports key at all is an ordinary one",
+      r.kind == "refuse", repr(r))
+empty_ports = {"routes": [],
+               "subnets": [{"node": "office", "cidr": "198.51.100.0/24", "ports": [],
+                            "all_ports": False}],
+               "systems": []}
+for port in (22, 8989):
+    r = mb.decide_route("198.51.100.42", port, empty_ports)
+    check(f"an empty port list is not everything either — {port} is refused",
+          r.kind == "refuse", repr(r))
+
+r = mb.decide_route("198.51.100.42", 3389, REACH)
+check("and the refusal for a node that is NOT all-ports still says how to fix it",
+      "3389" in r.reason and "office" in r.reason and "every port" in r.reason, r.reason)
 
 check("every private range the container can see is non-public to the gate",
       all(not mb._is_public(ipaddress.ip_address(a))
@@ -278,6 +340,99 @@ async def bypass_checks():
 
 
 asyncio.run(bypass_checks())
+
+
+async def all_ports_bypass_checks():
+    """The same test again for a node opened to every port.
+
+    All-ports is the one setting that could have turned the gate's port check
+    into the whole of the gate. It did not, and this is where that is measured:
+    a node given a /25 and every port on it, a document claiming the /24, and a
+    real CONNECT for an address outside the grant on a port nothing lists.
+    """
+    await relay.hub.start_forwarder()
+    node = RelayNode(id=62, name="Office", slug="office", status="approved", grants=[],
+                     networks=[], allowed_cidrs=["198.51.100.0/25"], allowed_ports=[22],
+                     allow_all_ports=True)
+    ctx = ssh_targets.prepare([], {}, [node], who="tester (run 62, session s-62)")
+
+    honest = browsing.reach_document([], {}, [node])
+    check("the honest document says every port, as its own key beside the list",
+          honest["subnets"] == [{"node": "office", "cidr": "198.51.100.0/25",
+                                 "ports": [22], "all_ports": True}], str(honest["subnets"]))
+    check("and the browser reads it as routing an unlisted port",
+          mb.decide_route("198.51.100.100", 8989, honest).kind == "relay")
+    check("while the address half of it is unchanged — .200 is outside the /25",
+          mb.decide_route("198.51.100.200", 8989, honest).kind == "refuse")
+
+    forged = {
+        "routes": [],
+        # Wider on the axis all-ports does not touch: the /24 instead of the /25.
+        "subnets": [{"node": "office", "cidr": "198.51.100.0/24", "ports": [22],
+                     "all_ports": True}],
+        "systems": [],
+    }
+    check("the forged document does route .200, so the proxy really would try it",
+          mb.decide_route("198.51.100.200", 8989, forged).kind == "relay")
+
+    mb.RELAY_TOKEN = ctx.env["AIOPS_RELAY_TOKEN"]
+    mb.RELAY_ADDR = ctx.env["AIOPS_RELAY_ADDR"]
+    check("the gate refuses .200 on an unlisted port, which is what actually decides",
+          not relay.tokens.allows(mb.RELAY_TOKEN, "office", "198.51.100.200", 8989))
+    check("and on the listed one too — being outside the CIDR is the whole answer",
+          not relay.tokens.allows(mb.RELAY_TOKEN, "office", "198.51.100.200", 22))
+    check("while .100, genuinely inside the /25, passes it on a port nobody listed",
+          relay.tokens.allows(mb.RELAY_TOKEN, "office", "198.51.100.100", 8989))
+
+    lines = []
+    proxy = mb.Socks5Proxy(forged, lambda action, **kw: lines.append((action, kw)))
+    port = await proxy.start()
+
+    async def ask(host, dest_port):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"\x05\x01\x00")
+        await writer.drain()
+        await reader.readexactly(2)
+        payload = host.encode()
+        writer.write(b"\x05\x01\x00\x03" + bytes([len(payload)]) + payload
+                     + dest_port.to_bytes(2, "big"))
+        await writer.drain()
+        reply = await reader.readexactly(10)
+        writer.close()
+        return reply[1]
+
+    code = await ask("198.51.100.200", 8989)
+    check("BYPASS: an all-ports node still refuses an out-of-range host at the gate",
+          code != 0, f"socks reply {code}")
+    refusals = [kw for action, kw in lines if action == "failed"]
+    check("BYPASS: and it is the gate that refused it, not something incidental",
+          any("not permitted to reach that host" in (kw.get("detail") or "")
+              for kw in refusals), str(refusals))
+    check("BYPASS: nothing was dialled from this container to reach it",
+          not any(action == "opened" for action, _ in lines), str(lines))
+
+    lines.clear()
+    code = await ask("198.51.100.100", 8989)
+    passed = [kw.get("detail") or "" for action, kw in lines if action == "failed"]
+    check("an in-range address on an unlisted port gets past the gate",
+          any("not connected" in text for text in passed), str(passed))
+    check("which is a different failure from the refusal above, so all-ports did move",
+          not any("not permitted" in text for text in passed), str(passed))
+
+    lines.clear()
+    code = await ask("203.0.113.10", 8000)
+    check("BYPASS: the AIOps server's own address is refused for an all-ports node too",
+          code != 0 and any(action == "refused" for action, _ in lines), str(lines))
+    code = await ask("127.0.0.1", 8000)
+    check("BYPASS: and so is loopback, where this application's API is listening",
+          code != 0 and all(action != "opened" for action, _ in lines), str(lines))
+
+    await proxy.stop()
+    ctx.cleanup()
+    await relay.hub.stop_forwarder()
+
+
+asyncio.run(all_ports_bypass_checks())
 
 
 # =====================================================================
@@ -571,8 +726,11 @@ doc = browsing.reach_document([pw_target, key_target], {61: node}, [node])
 check("a stored system bound to a node becomes an exact triple, as it does for ssh",
       {"node": "office", "host": "backup.lan", "port": 22} in doc["routes"], str(doc["routes"]))
 check("a node's subnet becomes a rule with its ports",
-      doc["subnets"] == [{"node": "office", "cidr": "198.51.100.0/24", "ports": [80, 8989]}],
+      doc["subnets"] == [{"node": "office", "cidr": "198.51.100.0/24", "ports": [80, 8989],
+                          "all_ports": False}],
       str(doc["subnets"]))
+check("and every entry says so either way, so the browser never has to guess",
+      all("all_ports" in entry for entry in doc["subnets"]), str(doc["subnets"]))
 check("only systems with a stored password are offered for sign-in",
       [s["slug"] for s in doc["systems"]] == ["sonarr"], str(doc["systems"]))
 check("and the document carries no secret of any kind",
@@ -594,6 +752,21 @@ check("and that it will never be given the password",
 check("a run with no node is told the browser reaches public sites only",
       "public sites only" in browsing.describe(browsing.reach_document()),
       browsing.describe(browsing.reach_document())[:200])
+
+open_node = RelayNode(id=62, name="Office", slug="office", status="approved", grants=[],
+                      networks=[], allowed_cidrs=["198.51.100.0/24"], allowed_ports=[22],
+                      allow_all_ports=True)
+open_doc = browsing.reach_document([], {}, [open_node])
+check("an all-ports node's rule carries the flag rather than a made-up port list",
+      open_doc["subnets"] == [{"node": "office", "cidr": "198.51.100.0/24", "ports": [22],
+                               "all_ports": True}], str(open_doc["subnets"]))
+open_briefing = browsing.describe(open_doc)
+check("and the agent is told the network is browsable on every port",
+      "198.51.100.0/24 on every port" in open_briefing, open_briefing[:500])
+check("without a port list beside it that would read as the limit",
+      "on port 22" not in open_briefing, open_briefing[:500])
+check("while it is still told an address outside the range is a policy refusal",
+      "policy limit" in open_briefing, open_briefing[:600])
 
 spec = ClaudeProvider().build_run(
     prompt="hi", model=None, provider_session_id=None, permission_mode=None,
