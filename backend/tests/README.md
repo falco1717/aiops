@@ -32,6 +32,35 @@ than letting three suites fail with a traceback about something else.
 Nothing else is needed: no Playwright browsers (the browser suites exercise the
 pure logic and stub the driver), and deliberately **neither agent CLI on PATH**.
 
+### Running a suite inside the built image
+
+`test_browser` and `test_browser_user` have checks that only run where a real
+Chromium and the privilege-dropping helper exist, so they are worth running
+against `aiops:local` as well — 135 and 59 checks there, against 122 and 23 in
+a bare Python image.
+
+The image does **not** carry `httpx` either (it is a test dependency, and the
+runtime has no business with one), and its virtualenv is not writable by the
+`node` user the container runs as, so `pip install` into it fails. Install
+beside it instead, and do not pass `--user`: pip refuses that inside a venv.
+
+```bash
+docker run --rm -v /opt/aiops:/src --entrypoint /bin/sh aiops:local -c '
+  cd /src/backend
+  pip install -q --target /tmp/pylibs httpx==0.28.1
+  export PYTHONPATH=/tmp/pylibs HOME=/tmp/h
+  export AIOPS_JWT_SECRET=test AIOPS_ADMIN_PASSWORD=devpassword123
+  export AIOPS_COOKIE_SECURE=false
+  export AIOPS_WORKSPACE_ROOT=$(mktemp -d) AIOPS_ATTACHMENTS_ROOT=$(mktemp -d)
+  export AIOPS_DATABASE_URL="sqlite+aiosqlite:///$(mktemp -d)/b.db"
+  python tests/test_browser.py && python tests/test_browser_user.py'
+```
+
+Mount the **repository root**, not `backend/`: `test_browser_user` reads the
+helper's source out of `deploy/runas/`. And do not add `--user 0` to get around
+the venv permissions — the setuid helper refuses uid 0 outright, and eleven
+checks fail in a way that looks like a real regression and is not.
+
 Run them **from the `backend/` directory** with a throwaway SQLite database:
 
 ```bash
