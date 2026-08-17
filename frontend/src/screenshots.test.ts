@@ -40,6 +40,20 @@ describe("shotsIn", () => {
     ).toEqual([]);
   });
 
+  // Captures are kept with the session, but not unconditionally: one that
+  // exceeded the session's storage budget was never filed, and AIOps says so in
+  // words that deliberately are not the ones above. Drawing a tile for it would
+  // put a thumbnail in the transcript that can only ever fail to load.
+  it("draws nothing for a capture AIOps declined to keep", () => {
+    const declined =
+      "Saved /tmp/aiops-browser-42-9zk/screenshot-001.png (https://example.com/a). " +
+      "The image has password fields masked in it. AIOps did not keep a copy for the " +
+      "conversation — this conversation has reached the 100.0 MB it may keep in " +
+      "screenshots — so the operator cannot see this one; read the file to look at it " +
+      "yourself.";
+    expect(shotsIn("tool_result", declined)).toEqual([]);
+  });
+
   it("ignores a name that is not one AIOps generates", () => {
     expect(
       shotsIn("tool_result", saved("screenshot-1.png", "https://e.com")).length +

@@ -18,10 +18,13 @@ where it can.
 """
 
 import asyncio
+import io
 import ipaddress
+import json
 import logging
 import os
 import sys
+import urllib.error
 
 sys.path.insert(0, os.getcwd())
 
@@ -484,8 +487,13 @@ class FakePage:
 
     async def screenshot(self, path=None, full_page=False, mask=None):
         self.shots.append({"path": path, "full_page": full_page, "mask": mask})
+        # Playwright writes the path *and* returns the bytes from one capture.
+        # The production code relies on that being one capture and not two, so
+        # the fake has to behave the same way.
+        data = b"\x89PNG\r\n\x1a\n" + b"fake-capture"
         with open(path, "wb") as fh:
-            fh.write(b"\x89PNG-fake")
+            fh.write(data)
+        return data
 
 
 class Calls:
@@ -506,11 +514,34 @@ class Calls:
         return {"ok": True}
 
 
-def fresh(text="", allow=True, mode="ask"):
+class Keeps:
+    """Stands in for the raw-bytes call that files a capture with the session.
+
+    Records the bytes rather than a path, which is the property being tested:
+    what AIOps stores is what `page.screenshot` returned, so there is nothing on
+    disk in between for the agent to have swapped.
+    """
+
+    def __init__(self, refuse=None):
+        self.refuse = refuse
+        self.posts = []
+
+    def __call__(self, path, name, data, timeout=60):
+        self.posts.append((path, name, bytes(data)))
+        if self.refuse:
+            body = json.dumps({"detail": self.refuse}).encode()
+            raise urllib.error.HTTPError(path, 409, "Conflict", {}, io.BytesIO(body))
+        return {"stored": True, "size": len(data)}
+
+
+def fresh(text="", allow=True, mode="ask", refuse_keep=None):
     mb.APPROVAL_MODE = mode
     mb.TOKEN = "run-token"
     calls = Calls(allow=allow)
     mb._post = calls
+    # Hung off `calls` so every existing caller of `fresh` keeps its two-tuple.
+    calls.keeps = Keeps(refuse=refuse_keep)
+    mb._post_bytes = calls.keeps
     browser = mb.Browser(mb.Aiops())
     browser._page = FakePage(text)
     return browser, calls
@@ -688,19 +719,55 @@ async def screenshot_checks():
           shot["mask"] == [f"locator:{mb.PASSWORD_SELECTOR}"], str(shot))
     check("which is what stops a filled login form being a credential in the transcript",
           mb.PASSWORD_SELECTOR == "input[type=password]")
+    check("there is one capture, not one per reader",
+          len(browser._page.shots) == 1, str(len(browser._page.shots)))
     check("it lands in this run's own directory",
           shot["path"].startswith(mb.SHOT_DIR), shot["path"])
     check("and the agent is told where to read it", mb.SHOT_DIR in out, out)
     check("and that the masking happened", "masked" in out, out)
 
+    # The operator's copy. It is the *return value* of the masked call above,
+    # handed straight to AIOps — never a path for the app to open, because the
+    # run directory is group-writable by the agent and a name in it is not a
+    # thing to trust.
+    on_disk = open(shot["path"], "rb").read()
+    check("the capture is filed with AIOps as bytes, under its generated name",
+          [(p, n) for p, n, _ in calls.keeps.posts]
+          == [("/api/internal/browser/screenshot", "screenshot-001.png")],
+          str(calls.keeps.posts)[:200])
+    check("and the bytes filed are the ones the masked call produced",
+          calls.keeps.posts[0][2] == on_disk, str(len(calls.keeps.posts[0][2])))
+
+    # The sentence the client keys a thumbnail off. It says the mask was applied
+    # and it is written by the same function that applied it.
+    check("a kept capture reports itself in the words the transcript draws on",
+          ". Password fields are masked." in out, out)
+
+    # A capture AIOps declines is not a failed turn — but it must not claim a
+    # picture the operator can open either, so it is phrased differently on
+    # purpose and the client's pattern does not match it.
+    declined, refused_calls = fresh(refuse_keep="this conversation has reached the 100.0 MB "
+                                                "it may keep in screenshots")
+    text = await declined.screenshot()
+    check("a declined capture still tells the agent where its own copy is",
+          mb.SHOT_DIR in text and "screenshot-001.png" in text, text)
+    check("and says why the operator will not see it",
+          "100.0 MB" in text and "did not keep" in text, text)
+    check("without writing the sentence that puts a picture in the transcript",
+          ". Password fields are masked." not in text, text)
+    check("the refusal was the app's answer, not a crash in the tool",
+          len(refused_calls.keeps.posts) == 1, str(refused_calls.keeps.posts)[:120])
+
     mb.MAX_SHOTS = 2
+    browser, calls = fresh()
+    await browser.screenshot()
     await browser.screenshot()
     try:
         await browser.screenshot()
         bounded = False
     except ValueError:
         bounded = True
-    check("screenshots are bounded, so a loop cannot fill the disk", bounded)
+    check("screenshots are bounded per turn, so a loop cannot fill the disk", bounded)
     mb.MAX_SHOTS = 40
 
 
@@ -1028,6 +1095,9 @@ async def live_checks():
 
     import tempfile
     mb.SHOT_DIR = tempfile.mkdtemp(prefix="aiops-browser-live-")
+    mb.TOKEN = "run-token"
+    filed = Keeps()
+    mb._post_bytes = filed
     await page.fill(mb.PASSWORD_SELECTOR, SECRET)
     saved = await driver.screenshot()
     written = open(os.path.join(mb.SHOT_DIR, "screenshot-001.png"), "rb").read()
@@ -1035,6 +1105,15 @@ async def live_checks():
           written[:8] == b"\x89PNG\r\n\x1a\n" and mb.SHOT_DIR in saved, saved)
     check("and a screenshot taken with the secret in the field does not contain it",
           SECRET.encode() not in written)
+    # The copy the operator will still be able to open tomorrow. Same bytes,
+    # same mask, one capture — proved here against a real Chromium rather than
+    # against the stand-in page.
+    check("the bytes filed for the session are byte-identical to the agent's copy",
+          [n for _p, n, _d in filed.posts] == ["screenshot-001.png"]
+          and filed.posts[0][2] == written,
+          str([(n, len(d)) for _p, n, d in filed.posts]))
+    check("so the operator's lasting copy carries the mask too",
+          SECRET.encode() not in filed.posts[0][2])
 
     await page.fill("#password", SECRET)
     after = await driver.read()

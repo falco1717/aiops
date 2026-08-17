@@ -1,18 +1,22 @@
 /**
  * Finding the screenshots an agent took, in the tool result that reports them.
  *
- * There is no separate list to fetch. A screenshot exists for the length of the
- * turn that took it — the run's directory is removed in the same `finally` that
- * removes its decrypted ssh materials — so a listing endpoint would answer
- * "nothing" for every turn that has ended, which is most of them, and would say
- * nothing about *where* in the conversation each one belongs. The tool result
- * already carries both facts: which files were written, and the point in the
- * transcript the agent wrote them at.
+ * There is no separate list to fetch. Screenshots are kept with the session now
+ * — the same lifetime as a message attachment — so one could be listed, but a
+ * list is the wrong shape: it says which captures exist and nothing about
+ * *where* in the conversation each one belongs. The tool result already carries
+ * both facts, and it carries them at the point in the transcript the agent took
+ * the picture at, which is where it wants drawing.
  *
  * The sentence matched below is written by AIOps, not by the model: it is the
  * return value of `Browser.screenshot` in `backend/app/bridge/mcp_browser.py`,
  * and the filename in it is generated there (`screenshot-NNN.png`) rather than
  * chosen by anything on the agent's side. Keep the two in step.
+ *
+ * It is also written *only when a copy was kept*. A capture the app declined —
+ * over the session's storage budget, say — comes back phrased differently on
+ * purpose, so the words that draw a thumbnail are never emitted for a picture
+ * that is not there to draw.
  *
  * Nothing here is a security boundary. The name is sent back to the API, which
  * matches it against the same generated shape and resolves it inside that one

@@ -126,6 +126,11 @@ services:
       AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS: ${AIOPS_BROWSER_PAGE_TIMEOUT_SECONDS:-30}
       AIOPS_BROWSER_SESSION_SECONDS: ${AIOPS_BROWSER_SESSION_SECONDS:-900}
       AIOPS_BROWSER_MAX_SCREENSHOTS: ${AIOPS_BROWSER_MAX_SCREENSHOTS:-40}
+      # Screenshots are kept with the session, in the attachments volume below,
+      # so what bounds the disk is no longer "the run ended". One capture, and
+      # everything one conversation may keep across all of its turns.
+      AIOPS_BROWSER_SCREENSHOT_MAX_BYTES: ${AIOPS_BROWSER_SCREENSHOT_MAX_BYTES:-8388608}
+      AIOPS_BROWSER_SESSION_SCREENSHOT_BYTES: ${AIOPS_BROWSER_SESSION_SCREENSHOT_BYTES:-104857600}
       # Relay nodes. The forwarder is loopback-only inside this container and
       # takes an ephemeral port by default, so none of this is published; it is
       # here because a setting absent from this block cannot be changed at all.

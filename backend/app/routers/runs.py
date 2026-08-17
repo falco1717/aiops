@@ -188,27 +188,33 @@ async def run_screenshot(
     Session content, so it is visible to exactly the people the transcript it
     sits in is visible to — `_get` above is the same `can_see_session` rule the
     prompt and the events go through, and administrators get nothing extra by
-    being administrators, which is deliberate.
+    being administrators, which is deliberate. That check runs first, so who may
+    ask is settled before anything on disk is looked for: an outsider gets the
+    same 404 whether the capture exists or not.
 
-    Addressed by run rather than by session because that is what it belongs to:
-    a screenshot exists for the length of one turn and is deleted with it, in
-    the same `finally` that removes the run's decrypted ssh materials. There is
-    no second copy anywhere with a longer life, which is why a finished turn
-    answers 404 here — the record that a screenshot was taken stays in the
-    transcript, the pixels do not outlive the turn that needed them.
+    Addressed by run because that is where it sits in the transcript, but stored
+    with the *session* and living exactly as long as one — the same volume, and
+    the same deletion, as a file the operator attached to a message. Reopening a
+    finished conversation shows what its browser saw, which is the whole reason
+    anybody wants these.
+
+    A 404 is therefore an ordinary answer rather than a fault: a turn that ran
+    before AIOps kept them has none, and a capture too large for the session's
+    budget was declined at the time. The client draws a caption, not a broken
+    image.
 
     Served under exactly the rules an attachment is: a content type off the list
     of things a browser will not execute, `nosniff` so it cannot guess past
     that, and a download disposition. The bytes came off a page the agent chose,
     and they arrive on the same origin as the session cookie.
     """
-    await _get(db, run_id, user)
-    path = browsing.screenshot_path(run_id, name)
+    run = await _get(db, run_id, user)
+    path = browsing.stored_shot(run.session_id, run_id, name)
     if path is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            "That screenshot is not available. Screenshots live for the length of "
-            "the turn that took them and are deleted with it.",
+            "That screenshot is not available. Captures are kept with the conversation "
+            "and deleted with it; a turn that ran before AIOps kept them has none.",
         )
     return FileResponse(
         path,

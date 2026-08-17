@@ -38,6 +38,7 @@ os.environ.setdefault(
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app import browsing  # noqa: E402
 from app.main import app  # noqa: E402
 
 failures = []
@@ -179,6 +180,16 @@ with TestClient(app) as c:
     check("the owner can attach a file", upload.status_code == 201, upload.text[:200])
     attachment_id = upload.json()["id"]
 
+    # A screenshot too, stored the way the agent's browser stores one. Planted
+    # rather than photographed — there is no Chromium here — but through the
+    # same call, so the checks below are about a capture that really exists.
+    # Without one, "an outsider gets 404" would pass on a session that had no
+    # screenshot to leak in the first place.
+    browsing.keep_shot(sid, run_id, "screenshot-001.png", b"\x89PNG\r\n\x1a\n" + os.urandom(512))
+    r = c.get(f"/api/runs/{run_id}/screenshots/screenshot-001.png")
+    check("and see what its browser photographed", r.status_code == 200,
+          f"{r.status_code} {r.text[:160]}")
+
     # --- another user sees nothing of it ----------------------------------
     login(c, "nina", "ninapassword1")
     r = c.get("/api/sessions")
@@ -217,7 +228,10 @@ with TestClient(app) as c:
     r = c.post(f"/api/runs/{run_id}/cancel")
     check("nor cancel it", r.status_code == 404, str(r.status_code))
     # A screenshot is a photograph of a page the agent was signed in to, so it
-    # is as private as the transcript it sits in and follows the same rule.
+    # is as private as the transcript it sits in and follows the same rule. It
+    # is kept for the life of the session now rather than for the length of the
+    # turn, so this check has something real behind it: the capture is on disk
+    # and readable by the owner at this moment.
     r = c.get(f"/api/runs/{run_id}/screenshots/screenshot-001.png")
     check("nor look at what its browser photographed", r.status_code == 404, str(r.status_code))
     r = c.get("/api/runs")
@@ -378,6 +392,8 @@ with TestClient(app) as c:
           r.status_code == 404, f"{r.status_code} {r.text[:160]}")
     r = c.get(f"/api/runs/{run_id}")
     check("nor read the run carrying the prompt", r.status_code == 404, str(r.status_code))
+    # Still on disk, still 404: being an administrator is not a way to look at
+    # a page somebody else's agent was signed in to.
     r = c.get(f"/api/runs/{run_id}/screenshots/screenshot-001.png")
     check("nor look at what its browser photographed", r.status_code == 404, str(r.status_code))
     r = c.get("/api/runs")

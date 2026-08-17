@@ -2370,8 +2370,8 @@ function Bubble({ event }: { event: ChatEvent }) {
   const foldable = event.kind === "tool_use" || event.kind === "tool_result" || event.kind === "user";
   const long = foldable && (event.text?.length ?? 0) > 1200;
   // What the agent's browser photographed, drawn where it took it. The result
-  // line stays as well: it is what the agent was told, and a picture that has
-  // since expired with its turn would otherwise leave nothing behind.
+  // line stays as well: it is what the agent was told, and a capture that was
+  // never kept would otherwise leave nothing behind.
   const shots = shotsIn(event.kind, event.text);
   return (
     <div className={`msg ${event.kind}${event.is_error ? " error" : ""}`}>

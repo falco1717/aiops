@@ -18,11 +18,13 @@
  * showing it. The overlay is portalled to `<body>`: it is rendered from inside
  * a message bubble, and `.chat-body` scrolls, which would otherwise clip it.
  *
- * **A missing one is expected, not an error.** Screenshots are deleted with the
- * turn that took them, in the same `finally` that removes the run's decrypted
- * ssh materials. Reopening a finished conversation therefore finds the record
- * of the screenshot and not the pixels, and that is the design rather than a
- * fault — so the tile says so in words instead of showing a broken image.
+ * **A missing one is expected, not an error.** Captures are kept with the
+ * session and are there when the conversation is reopened — but not always:
+ * a turn that ran before AIOps kept them has none, and one too large for the
+ * session's storage budget was declined at the time. Neither is a fault, so the
+ * tile says so in words instead of showing a broken image. The wording is
+ * deliberately about the picture and not about a cause: the client cannot tell
+ * those two apart, and guessing wrong in either direction reads as a bug.
  */
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
@@ -57,8 +59,8 @@ function ShotTile({
 
   if (gone) {
     return (
-      <span className="shot-gone" title={shot.url}>
-        {shot.name} · expired with the turn
+      <span className="shot-gone" title={`${shot.url} — this capture was not kept`}>
+        {shot.name} · not available
       </span>
     );
   }

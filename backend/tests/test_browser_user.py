@@ -470,6 +470,14 @@ async def live_checks():
 
         shot_dir = browsing.make_run_dir(9002)
         mb.SHOT_DIR = shot_dir
+        # The operator's copy goes to AIOps over loopback, which is not running
+        # here; stand in for it so the handover can be measured rather than
+        # merely surviving a connection refusal.
+        filed = []
+        mb.TOKEN = "run-token"
+        mb._post_bytes = lambda path, name, data, timeout=60: (
+            filed.append((name, bytes(data))) or {"stored": True, "size": len(data)}
+        )
         try:
             saved = await driver.screenshot()
             shot = os.path.join(shot_dir, "screenshot-001.png")
@@ -483,6 +491,14 @@ async def live_checks():
             check("and the agent can read it back to look at it",
                   readable.returncode == 0 and readable.stdout[:8] == b"\x89PNG\r\n\x1a\n",
                   text(readable)[:120] or f"exit {readable.returncode}")
+            # And the copy that outlives the run: the same bytes, from the same
+            # masked capture, handed over rather than read back off this
+            # directory — which the agent can write to and the app must not
+            # open a name in.
+            check("the same bytes are handed to AIOps to keep with the session",
+                  [n for n, _d in filed] == ["screenshot-001.png"]
+                  and filed[0][1] == open(shot, "rb").read(),
+                  str([(n, len(d)) for n, d in filed]))
         finally:
             browsing.grants.issue(9002, {}, None, "test", shot_dir)
             browsing.grants.revoke(9002)

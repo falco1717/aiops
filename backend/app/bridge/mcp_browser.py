@@ -30,7 +30,9 @@ they follow the session's approval mode exactly as a Bash call does.
 The `login` tool asks AIOps for it over the loopback API, types it into the
 page, and adds it to a redaction set that every string leaving this process is
 run through. Screenshots are taken with password fields masked, so a photograph
-of a filled login form carries no credential into the transcript.
+of a filled login form carries no credential into the transcript — which
+matters more than it used to, because the operator's copy of a capture is now
+kept with the session rather than deleted at the end of the turn.
 
 **Who it runs as.** This process is the agent's: a child of the CLI, holding
 the run's relay token and the loopback token, at the agent's uid. The *browser*
@@ -536,6 +538,47 @@ def _post(path: str, payload: dict, timeout: int = 30) -> dict:
         return json.loads(response.read().decode() or "{}")
 
 
+def _post_bytes(path: str, name: str, data: bytes, timeout: int = 60) -> dict:
+    """The same call, carrying an image instead of a document.
+
+    Raw rather than base64 inside the JSON body: a capture is up to a few
+    megabytes and there is no reason to inflate it by a third and copy it twice
+    to move it across loopback. The name travels in a header because it is a
+    label, not content — the app checks it against the shape it generates and
+    resolves it inside that turn's directory regardless.
+    """
+    request = urllib.request.Request(
+        f"{API_URL}{path}",
+        data=data,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "X-AIOps-Token": TOKEN,
+            "X-AIOps-Screenshot": name,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode() or "{}")
+
+
+def _keep_reason(exc: Exception) -> str:
+    """Why a capture was not filed, in words the agent can act on.
+
+    A refusal is a 409 whose body carries the sentence the app wrote — "this
+    conversation has reached the 100.0 MB it may keep in screenshots", say —
+    and that is far more use in the transcript than "HTTP Error 409".
+    """
+    body = getattr(exc, "read", None)
+    if callable(body):
+        try:
+            detail = json.loads(body().decode() or "{}").get("detail")
+            if detail:
+                return str(detail)[:300]
+        except Exception:  # noqa: BLE001 - fall through to the exception itself
+            pass
+    return str(exc)[:300]
+
+
 class Aiops:
     """The app, as this process sees it: a reach, an approver, a credential store."""
 
@@ -584,6 +627,28 @@ class Aiops:
         except Exception as exc:  # noqa: BLE001 - a denial is the safe outcome
             return False, f"AIOps could not be reached for approval: {exc}"
         return bool(answer.get("allowed")), str(answer.get("note") or "")
+
+    def keep(self, name: str, data: bytes) -> str | None:
+        """Hand a capture to AIOps to store with the session. None means kept.
+
+        What goes over the wire is the bytes Playwright returned from the masked
+        screenshot call, not the path they were also written to — so the copy
+        the operator ends up looking at cannot be some other file that appeared
+        under that name in a directory this process can write.
+
+        A failure is reported back rather than raised. The agent's own copy is
+        on disk either way, and a turn should not fall over because the picture
+        could not also be filed.
+        """
+        if not TOKEN:
+            return "this run has no AIOps token"
+        if not data:
+            return "the capture produced no bytes"
+        try:
+            _post_bytes("/api/internal/browser/screenshot", name, data, timeout=60)
+        except Exception as exc:  # noqa: BLE001 - the reason is for the transcript
+            return _keep_reason(exc)
+        return None
 
     def credential(self, system: str) -> dict:
         """A stored system's login, fetched for injection and never returned.
@@ -781,7 +846,7 @@ class Browser:
         return self.clean("\n".join(lines))
 
     async def screenshot(self, full_page: bool = False) -> str:
-        """Photograph the page into this run's directory, as *this* process.
+        """Photograph the page once, for two readers.
 
         Worth being explicit about, because it decides a permission question:
         Playwright's Python client is what writes the file — the browser hands
@@ -789,6 +854,20 @@ class Browser:
         screenshot directory is written by the agent's uid and read by the
         agent's uid, and the browser user needs no access to it at all. It has
         none.
+
+        One capture, two copies, and the second is the point of this paragraph.
+        `page.screenshot` both writes the path and returns the bytes, so the
+        file the agent opens and the image the operator is shown come out of the
+        same masked call — not out of two captures that could differ, and not
+        out of the app reading back a path in a directory the agent can write.
+        The agent's copy dies with the run; the operator's is kept with the
+        session and is there when the conversation is reopened.
+
+        The sentence returned when it is kept is matched by the client
+        (`frontend/src/screenshots.ts`) and is what draws a thumbnail. It is
+        deliberately *not* used when the copy was declined: the words that put a
+        picture in the transcript are only ever written when there is a picture
+        to put there.
         """
         page = await self.page()
         if self.shots >= MAX_SHOTS:
@@ -798,7 +877,7 @@ class Browser:
         self.shots += 1
         name = f"screenshot-{self.shots:03d}.png"
         target = os.path.join(SHOT_DIR, name) if SHOT_DIR else name
-        await page.screenshot(
+        data = await page.screenshot(
             path=target,
             full_page=bool(full_page),
             # The reason a screenshot is safe to put in a transcript. Playwright
@@ -807,6 +886,13 @@ class Browser:
             mask=[page.locator(PASSWORD_SELECTOR)],
         )
         self.aiops.note("screenshot", url=page.url, detail=name)
+        problem = self.aiops.keep(name, data or b"")
+        if problem:
+            return (
+                f"Saved {target} ({page.url}). The image has password fields masked in it. "
+                f"AIOps did not keep a copy for the conversation — {problem} — so the "
+                "operator cannot see this one; read the file to look at it yourself."
+            )
         return (
             f"Saved {target} ({page.url}). Password fields are masked. "
             "Read the file to look at it."
@@ -965,7 +1051,9 @@ TOOLS = [
         "name": "screenshot",
         "description": (
             "Photograph the current page to a PNG in this run's directory and return the "
-            "path; read that file to look at it. Password fields are masked."
+            "path; read that file to look at it. Password fields are masked. AIOps also "
+            "keeps a copy in the conversation, so the operator can see what you saw when "
+            "they read the transcript later."
         ),
         "inputSchema": {
             "type": "object",

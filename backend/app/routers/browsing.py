@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from .. import browsing, ssh_targets
 from ..approvals import run_tokens
+from ..config import settings
 from ..crypto import SecretUnavailable, decrypt
 from ..db import SessionLocal
 from ..models import Run, User
@@ -94,6 +95,60 @@ async def record(request: Request):
         f" — {detail}" if detail else "",
     )
     return {"ok": True}
+
+
+@internal.post("/screenshot")
+async def screenshot(request: Request):
+    """One capture, as bytes, for AIOps to keep with the session.
+
+    Bytes rather than a path, and that is the security decision in this
+    endpoint. The run's screenshot directory is group-writable by the agent —
+    it has to be, because opening a capture by path is how the agent looks at
+    one — so harvesting files out of it would mean the app opening a name the
+    agent controls, with symlinks and hardlinks under it to worry about. What
+    arrives here instead is the return value of the same masked
+    `page.screenshot(...)` call that wrote the agent's own copy: there is no
+    filesystem object in between for anything to be substituted for, and the
+    mask travels with the bytes by construction.
+
+    Which session it lands in is read off the run token, never off the request.
+    The agent's side names only the file, and that name is checked against the
+    generated shape and resolved inside this turn's directory before anything is
+    opened (see `browsing.keep_shot`).
+
+    A refusal is a 409 and is not an error the agent has to handle — its own
+    copy is untouched. The tool result says the operator will not see that one.
+    """
+    run_id, session_id = _resolve({}, request)
+    grant = _grant(run_id)
+    name = str(request.headers.get("x-aiops-screenshot") or "")
+
+    # Read with the cap applied as it streams, in the same shape as an upload:
+    # checking a declared Content-Type or Content-Length would trust a header,
+    # and checking afterwards would mean the memory had already been taken.
+    limit = settings.browser_screenshot_max_bytes
+    data = bytearray()
+    async for chunk in request.stream():
+        data += chunk
+        if len(data) > limit:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                f"A screenshot may be at most {limit} bytes.",
+            )
+
+    try:
+        size = browsing.keep_shot(session_id, run_id, name, bytes(data))
+    except browsing.ShotRefused as exc:
+        log.info(
+            "browser: screenshot %s not kept for %s (session %s) — %s",
+            name or "<unnamed>", grant.who, session_id, exc,
+        )
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    log.info(
+        "browser: screenshot %s (%d bytes) kept with session %s for %s",
+        name, size, session_id, grant.who,
+    )
+    return {"stored": True, "size": size}
 
 
 @internal.post("/credential")

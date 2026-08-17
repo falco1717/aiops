@@ -124,9 +124,23 @@ class Settings(BaseSettings):
     # the easiest thing in this container to leave running.
     browser_page_timeout_seconds: int = 30
     browser_session_seconds: int = 900
-    # Screenshots are per-run and deleted with it; this bounds a loop that
-    # photographs every scroll position of something large.
+    # How many captures one turn may take, and therefore how many it may store.
+    # Bounds a loop that photographs every scroll position of something large.
     browser_max_screenshots: int = 40
+    # Screenshots are kept with the session now, not deleted at the end of the
+    # run, so the per-turn count above is no longer the whole bound. These two
+    # are: what one capture may weigh, and what one conversation may keep in
+    # total across every turn in it.
+    #
+    # A 1280x900 viewport PNG is a few hundred KB; only a `full_page` capture of
+    # a very long page comes near the per-capture figure, and something bigger
+    # than that is not a screenshot worth keeping. The session figure is roughly
+    # four times what a single uploaded attachment may be, and comfortably more
+    # than a heavy browsing session takes (40 captures a turn, several turns) —
+    # while still putting a hard ceiling on what one conversation can cost the
+    # disk. Over it, new captures are refused rather than old ones evicted.
+    browser_screenshot_max_bytes: int = 8 * 1024 * 1024
+    browser_session_screenshot_bytes: int = 100 * 1024 * 1024
 
     # --- relay nodes ---------------------------------------------------
     # Where a run's ProxyCommand helper hands its bytes to the app. Loopback
