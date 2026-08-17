@@ -158,20 +158,31 @@ export default function Workspaces({ me }: { me: User }) {
           </label>
           <label>
             <span>Folder (absolute, or relative to the workspace root)</span>
-            <input
-              value={draft.path}
-              onChange={(e) => set("path", e.target.value)}
-              placeholder="my-project"
-              required
-              disabled={editingId !== null}
-            />
-            <span className="field-hint">
-              {editingId !== null
-                ? "The folder cannot be moved once registered — sessions already point at it. " +
-                  "Unregister this workspace and add it again to change where it looks."
-                : "Created if it does not exist. A git repo here is worth it: the Changes column " +
-                  "and Diff button below then show what the agent did before you keep it."}
-            </span>
+            {/* Shown rather than disabled while editing: a greyed-out box still
+                reads as a box you could type in once it were enabled, and this
+                one never can be. */}
+            {editingId !== null ? (
+              <>
+                <div className="mono">{draft.path}</div>
+                <span className="field-hint">
+                  The folder cannot be moved once registered — sessions already point at it.
+                  Unregister this workspace and add it again to change where it looks.
+                </span>
+              </>
+            ) : (
+              <>
+                <input
+                  value={draft.path}
+                  onChange={(e) => set("path", e.target.value)}
+                  placeholder="my-project"
+                  required
+                />
+                <span className="field-hint">
+                  Created if it does not exist. A git repo here is worth it: the Changes column
+                  and Diff button below then show what the agent did before you keep it.
+                </span>
+              </>
+            )}
           </label>
         </div>
         <label>
