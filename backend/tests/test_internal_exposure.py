@@ -65,6 +65,26 @@ def check(label, condition, detail=""):
         failures.append(label)
 
 
+class AsPeer:
+    """Presents a chosen transport peer, the way a real socket would.
+
+    Starlette 0.41's TestClient has no way to say who is connecting — every
+    request claims to come from `("testclient", 50000)` — and the peer is the
+    entire subject of this suite. It has to be set *outside* `build_asgi`,
+    because that is where a real peer comes from: the layer that records the
+    raw client has to see this value, not one written underneath it.
+    """
+
+    def __init__(self, app, peer):
+        self.app = app
+        self.peer = peer
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            scope = {**scope, "client": self.peer}
+        return await self.app(scope, receive, send)
+
+
 #: Every route on the internal prefix, with a body that would be valid if the
 #: caller were entitled to be here. The token is nonsense on purpose: what is
 #: being measured is whether the *route* answers, and a route that is reachable
@@ -122,7 +142,7 @@ async def whoami(request: Request):
 
 
 probe_stack = build_asgi(probe)
-proxied = TestClient(probe_stack, client=FROM_THE_PROXY)
+proxied = TestClient(AsPeer(probe_stack, FROM_THE_PROXY))
 
 plain = proxied.get("/whoami").json()
 check("with no forwarded header, request.client is the real peer",
@@ -138,7 +158,7 @@ check("the raw transport peer is untouched by the header",
 check("and that is what the gate reads, so it still says not-loopback",
       forged["loopback"] is False, str(forged))
 
-real = TestClient(probe_stack, client=FROM_A_BRIDGE).get("/whoami").json()
+real = TestClient(AsPeer(probe_stack, FROM_A_BRIDGE)).get("/whoami").json()
 check("a genuine loopback peer is recognised", real["loopback"] is True, str(real))
 
 
@@ -149,7 +169,7 @@ print("\n--- /api/internal from off-box ---")
 
 stack = build_asgi(app)
 
-with TestClient(stack, client=FROM_THE_PROXY) as outside:
+with TestClient(AsPeer(stack, FROM_THE_PROXY)) as outside:
     for path, body in INTERNAL:
         r = outside.post(path, json=body)
         check(f"{path} is not reachable from the docker network",
@@ -221,7 +241,7 @@ with TestClient(stack, client=FROM_THE_PROXY) as outside:
     # else.
     print("\n--- /api/internal from inside the container ---")
 
-    inside = TestClient(stack, client=FROM_A_BRIDGE)
+    inside = TestClient(AsPeer(stack, FROM_A_BRIDGE))
     for path, body in INTERNAL:
         r = inside.post(path, json=body)
         check(f"{path} still answers a loopback caller",
@@ -236,7 +256,7 @@ with TestClient(stack, client=FROM_THE_PROXY) as outside:
     check("a loopback caller's own forwarded header changes nothing",
           r.status_code == 401, f"{r.status_code} {r.text[:120]}")
 
-    r = TestClient(stack, client=("::1", 45678)).post(
+    r = TestClient(AsPeer(stack, ("::1", 45678))).post(
         "/api/internal/browser/reach", json={"token": "nonsense"})
     check("IPv6 loopback counts as loopback too",
           r.status_code == 401, f"{r.status_code} {r.text[:120]}")
