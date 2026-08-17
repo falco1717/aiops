@@ -11,6 +11,7 @@ from ..access import can_see_session, sessions_visible_to
 from ..approvals import broker, run_tokens
 from ..config import settings
 from ..db import get_db
+from ..loopback import require_loopback
 from ..models import Approval, Session, User
 from ..names import display_name
 from ..questions import (
@@ -31,7 +32,20 @@ router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 
 # The bridge that agents call back on. Separate from the user-facing router
 # because it authenticates with a per-run token rather than a session cookie.
-internal = APIRouter(prefix="/api/internal", tags=["internal"], include_in_schema=False)
+#
+# A run token names a run; it is not a network boundary, and for a long time
+# nothing else was one either — this router was mounted on the public app and
+# was answering the internet. `require_loopback` is what makes the "internal"
+# in the prefix true: the only callers are in this container, talking to
+# 127.0.0.1:8000, so anything arriving from Traefik is told the route does not
+# exist. See `app/loopback.py`, and note that the peer it checks is the raw
+# transport peer, not `request.client`.
+internal = APIRouter(
+    prefix="/api/internal",
+    tags=["internal"],
+    include_in_schema=False,
+    dependencies=[Depends(require_loopback)],
+)
 
 
 @router.get("", response_model=list[ApprovalOut])

@@ -152,6 +152,14 @@ Adjust the chain to match your own Traefik. Two things to keep:
   login page is the second lock, not the only one.
 - **Both routers get it.** Protecting only `websecure` leaves the plain-HTTP
   router as an unauthenticated path to the same service.
+- **Keep `&& !PathPrefix(`/api/internal`)` on both rules.** Those routes are the
+  callback surface for the approval bridge and the browser bridge, which run
+  inside the app container and reach the API on `127.0.0.1:8000`; one of them
+  returns a stored system password in plaintext to a caller holding a run
+  token. Excluding the prefix means no router matches such a request, so
+  Traefik answers 404 and never opens a connection to the app. The app refuses
+  them on its own too (`backend/app/loopback.py`) — this is the second line,
+  and it was added after the routes were found answering the public internet.
 
 You still sign in twice — once to the SSO, once to AIOps. That is deliberate:
 the SSO decides who may reach the box, AIOps decides who may drive an agent.
@@ -500,6 +508,10 @@ pip install -r backend/requirements.txt
 export AIOPS_DATABASE_URL="sqlite+aiosqlite:///./aiops.db"
 export AIOPS_JWT_SECRET=dev AIOPS_ADMIN_PASSWORD=devpassword
 export AIOPS_WORKSPACE_ROOT="$PWD/workspaces" AIOPS_COOKIE_SECURE=false
+# `:app` for development, with nothing in front. The container serves
+# `app.main:asgi` instead — the same app wrapped so the real transport peer is
+# recorded before proxy headers can rewrite it, which is what keeps
+# /api/internal loopback-only. See backend/app/loopback.py.
 cd backend && uvicorn app.main:app --reload
 
 # frontend (separate shell) — proxies /api and the websocket to :8000
@@ -512,7 +524,12 @@ SQLite is fine for development; the JSON columns and concurrent writes are why
 production uses Postgres. `npm run build` writes straight into
 `backend/app/static/`, which FastAPI serves as the SPA.
 
-API docs are at `/docs` once you're signed in.
+API docs are at `/docs`. They are FastAPI's own and, as shipped, answer anyone
+who asks — signing in is not required, so treat the schema as public. The
+internal bridge routes are excluded from it (`include_in_schema=False`), and
+they are unreachable from off-box regardless; pass `docs_url=None,
+redoc_url=None, openapi_url=None` to `FastAPI(...)` if you would rather not
+publish the shape of the rest.
 
 ### Tests
 

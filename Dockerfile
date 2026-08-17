@@ -257,4 +257,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# `app.main:asgi`, not `app.main:app`, and no `--proxy-headers` flag: the same
+# ProxyHeadersMiddleware is applied inside `build_asgi` instead, underneath one
+# layer that records the real transport peer first. Passing the flag here would
+# put the rewrite outside everything, which is where `/api/internal/*` loses
+# the only fact that tells an in-container caller from the internet. See
+# backend/app/loopback.py.
+CMD ["uvicorn", "app.main:asgi", "--host", "0.0.0.0", "--port", "8000"]

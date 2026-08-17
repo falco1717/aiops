@@ -274,6 +274,31 @@ The model list is pinned against `codex debug models` on codex-cli 0.147.0.
 Before this, the hardcoded list named three models that catalog has never heard
 of; the UI offered them and every run using one failed.
 
+## `test_internal_exposure.py`
+
+Who can reach `/api/internal/*`. The other suite here whose bug was invisible
+to all the rest, and for a structural reason: every suite drives the app
+in-process, where there is no network for a route to be exposed on. The two
+internal routers said in their docstrings that they were unreachable from
+outside the container; they were mounted on the public app, and
+`POST /api/internal/browser/credential` — which returns a stored system
+password in plaintext — was answering `401 Unknown or expired run token` to the
+open internet, turning a leaked run token into a remotely usable one.
+
+So this suite builds the **production ASGI stack** (`loopback.build_asgi`,
+which is what `uvicorn app.main:asgi` serves) and presents peer addresses:
+a docker-network address for "arrived via Traefik", `127.0.0.1` for "is one of
+the bridges". Off-box gets a 404 on all five internal routes and the same body
+a genuinely missing route gives; loopback still gets the route.
+
+The forged-header half is the point. Uvicorn's `ProxyHeadersMiddleware`
+rewrites `scope["client"]` from `X-Forwarded-For`, left-most entry, so
+`request.client.host` reads `127.0.0.1` for anybody who says so — the suite
+demonstrates that on a probe app first, so nobody later "simplifies" the gate
+into the attribute that does not work. It also asserts the check fails closed
+when the stack is assembled without the raw-peer layer, and sweeps the whole
+route table for anything else answering an anonymous caller.
+
 ## `test_static.py`
 
 Cache headers on the built frontend — the one bug class in here that was

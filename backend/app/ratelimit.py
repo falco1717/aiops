@@ -81,10 +81,17 @@ class LoginThrottle:
 
 
 def client_address(request) -> str | None:
-    """Real client IP, honouring the proxy's forwarded header.
+    """Best guess at the browser's IP, honouring the proxy's forwarded header.
 
-    Uvicorn runs with --proxy-headers, but read X-Forwarded-For explicitly so
-    the throttle still sees distinct clients if that ever changes.
+    Proxy headers are applied to this application (see `loopback.build_asgi`),
+    but read X-Forwarded-For explicitly so the throttle still sees distinct
+    clients if that ever changes.
+
+    Never use this to decide whether a caller is allowed to do something. The
+    value is taken from a header the caller writes, so anyone can make it say
+    anything; it is fit for spreading a rate limit across clients and for
+    nothing else. `loopback.peer_is_loopback` is the one that reads the real
+    transport peer.
     """
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:

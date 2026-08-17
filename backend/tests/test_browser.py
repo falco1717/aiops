@@ -916,7 +916,12 @@ def endpoint_checks():
 
     mine, theirs, session_id, stranger_is_admin = asyncio.run(seed())
 
-    with TestClient(app) as client:
+    # `client=` matters: /api/internal is refused to any peer that is not the
+    # loopback, and TestClient otherwise presents itself as "testclient", which
+    # is not an address at all. The bridges this router exists for reach it on
+    # 127.0.0.1, so that is what is imitated here. The refusal itself is tested
+    # in test_internal_exposure.py.
+    with TestClient(app, client=("127.0.0.1", 45678)) as client:
 
         r = client.post("/api/internal/browser/reach", json={"token": "nonsense"})
         check("an unknown run token gets nothing from the browser API",

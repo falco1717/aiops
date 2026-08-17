@@ -19,6 +19,7 @@ from .approvals import reap_pending_approvals
 from .config import settings
 from .credentials import credential_loop
 from .db import SessionLocal, init_db
+from .loopback import LoopbackOnlyMiddleware, build_asgi
 from .models import Run, Session, User
 from .migrate import run_migrations
 from .relay import hub as relay_hub
@@ -158,6 +159,12 @@ if settings.cors_origin_list:
         allow_headers=["*"],
     )
 
+# Added last, which in Starlette means outermost: an `/api/internal` request
+# from off-box is refused before CORS, before routing, and before any of this
+# application's own code sees it. See loopback.py for why the transport peer,
+# and never a header, is what decides.
+app.add_middleware(LoopbackOnlyMiddleware)
+
 for module in (
     auth,
     users,
@@ -177,7 +184,9 @@ for module in (
 ):
     app.include_router(module.router)
 
-# Token-authenticated callback used by the in-container approval bridge.
+# Token-authenticated callback used by the in-container approval bridge. Both
+# of these are refused to anything that did not arrive over loopback — the run
+# token identifies a run, it is not a network boundary.
 app.include_router(approvals.internal)
 # And by the browser bridge, for the three things it is not allowed to decide
 # for itself: where it may go, what it must write down, and a credential it is
@@ -264,3 +273,14 @@ def mount_spa(app: FastAPI, static_dir: Path) -> None:
 
 if STATIC_DIR.is_dir():
     mount_spa(app, STATIC_DIR)
+
+
+#: What the container actually serves — `uvicorn app.main:asgi`, not `:app`.
+#:
+#: The proxy-header handling that used to be a uvicorn command-line flag is
+#: applied here instead, with one layer above it that records the untouched
+#: transport peer first. That ordering is the only way the loopback gate can
+#: see who really connected, because `--proxy-headers` would otherwise rewrite
+#: it from a header the caller controls. `app` itself stays a plain FastAPI
+#: instance so tests can drive it directly.
+asgi = build_asgi(app)

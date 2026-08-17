@@ -11,12 +11,21 @@
 # Note on middleware names: inside a file-provider config, middlewares defined
 # in the file provider are referenced bare (globalHeaders), NOT globalHeaders@file.
 # Only middlewares defined on docker labels keep the @docker suffix.
+#
+# Note on `!PathPrefix(/api/internal)`: those routes are the callback surface
+# for the approval bridge and the browser bridge, both of which run inside the
+# app container and talk to 127.0.0.1:8000. Nothing on a public entrypoint has
+# any business reaching them — one of them hands back a stored system password
+# in plaintext to a caller holding a run token. Excluding the prefix from the
+# router rule means no router matches such a request at all, so Traefik answers
+# 404 and never opens a connection to the app. The app refuses them on its own
+# as well (backend/app/loopback.py); this is the second line, not the only one.
 http:
   routers:
     aiops-http:
       entryPoints:
         - "web"
-      rule: "Host(`aiops.example.com`)"
+      rule: "Host(`aiops.example.com`) && !PathPrefix(`/api/internal`)"
       middlewares:
         - globalHeaders
         - redirect-to-https@docker
@@ -26,7 +35,7 @@ http:
     aiops:
       entryPoints:
         - "websecure"
-      rule: "Host(`aiops.example.com`)"
+      rule: "Host(`aiops.example.com`) && !PathPrefix(`/api/internal`)"
       middlewares:
         - globalHeaders
         - secureHeaders

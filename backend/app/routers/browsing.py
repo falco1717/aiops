@@ -6,26 +6,41 @@ the approval bridge uses: it identifies a run and nothing else, and every answer
 below is scoped by that run to the person who asked for the turn.
 
 Mounted separately from every other router for the same reason
-`approvals.internal` is — nothing here takes a session cookie, and nothing here
-should ever be reachable from outside this container.
+`approvals.internal` is — nothing here takes a session cookie.
+
+Nothing here is reachable from outside this container either, and that is now
+enforced rather than asserted: `require_loopback` (plus the same check as
+middleware in `main.py`) refuses anything whose transport peer is not the
+loopback, with the 404 this application gives for everything a caller may not
+reach. It was an assertion only until the credential endpoint below was found
+answering `401 Unknown or expired run token` to the public internet, which
+turned a leaked run token — a value that lives in an agent's environment — into
+a remotely usable one. The check deliberately does not look at `request.client`;
+see `app/loopback.py` for why that attribute is forgeable here.
 """
 
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from .. import browsing, ssh_targets
 from ..approvals import run_tokens
 from ..config import settings
 from ..crypto import SecretUnavailable, decrypt
 from ..db import SessionLocal
+from ..loopback import require_loopback
 from ..models import Run, User
 
 log = logging.getLogger("aiops.browser")
 
-internal = APIRouter(prefix="/api/internal/browser", tags=["internal"], include_in_schema=False)
+internal = APIRouter(
+    prefix="/api/internal/browser",
+    tags=["internal"],
+    include_in_schema=False,
+    dependencies=[Depends(require_loopback)],
+)
 
 #: Actions worth a line each. Anything else the browser reports is recorded
 #: under its own name too — the list is here so the log reads consistently, not

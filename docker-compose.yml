@@ -167,7 +167,17 @@ services:
       # HTTPS router. AIOps authenticates on its own (session cookie + login
       # lockout), so the default chain is headers and real-client-IP only.
       # Add a forward-auth entry to TRAEFIK_MIDDLEWARES to put SSO in front.
-      traefik.http.routers.aiops.rule: "Host(`${PUBLIC_HOSTNAME}`)"
+      #
+      # `!PathPrefix(/api/internal)` on both rules: those routes are the
+      # callback surface for the approval bridge and the browser bridge, which
+      # run inside this container and reach the API over 127.0.0.1 — one of
+      # them returns a stored system password in plaintext to a caller holding
+      # a run token. Excluding the prefix means no router matches such a
+      # request, so Traefik answers 404 without ever connecting to the app. The
+      # app refuses them itself too (backend/app/loopback.py); this is the
+      # second line. Keep it on the file-provider config in
+      # deploy/traefik/aiops.yml as well, whichever provider is in use.
+      traefik.http.routers.aiops.rule: "Host(`${PUBLIC_HOSTNAME}`) && !PathPrefix(`/api/internal`)"
       traefik.http.routers.aiops.entrypoints: "websecure"
       traefik.http.routers.aiops.middlewares: "${TRAEFIK_MIDDLEWARES:-globalHeaders@file,secureHeaders@file,cloudflarewarp@docker}"
       traefik.http.routers.aiops.service: "aiops"
@@ -178,7 +188,7 @@ services:
       # Plain HTTP only redirects to HTTPS. Whatever chain you set above, set
       # the matching one here — protecting one entrypoint and not the other
       # leaves an open path to the same service.
-      traefik.http.routers.aiops-http.rule: "Host(`${PUBLIC_HOSTNAME}`)"
+      traefik.http.routers.aiops-http.rule: "Host(`${PUBLIC_HOSTNAME}`) && !PathPrefix(`/api/internal`)"
       traefik.http.routers.aiops-http.entrypoints: "web"
       traefik.http.routers.aiops-http.middlewares: "${TRAEFIK_MIDDLEWARES_HTTP:-globalHeaders@file,redirect-to-https@docker,cloudflarewarp@docker}"
       traefik.http.routers.aiops-http.service: "aiops"
