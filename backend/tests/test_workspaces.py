@@ -281,8 +281,11 @@ with TestClient(app) as c:
           r.status_code == 400, str(r.status_code))
 
     # --- at run time: the turn's requester, not the session's owner -------
-    # walt owns the workspace and shares the *session* with the admin. The
-    # session being shared must not hand the workspace over with it.
+    # walt owns the workspace and shares the *session* with the other admin.
+    # The session being shared must not hand the workspace over with it.
+    r = c.patch(f"/api/workspaces/{walt_ws['id']}", json={"grants": []})
+    check("(setup) the workspace is walt's alone again",
+          r.status_code == 200 and r.json()["grants"] == [], r.text[:200])
     sess = c.post("/api/sessions", json={
         "provider": "claude", "workspace_id": walt_ws["id"], "approval_mode": "bypass",
     }).json()
@@ -296,8 +299,7 @@ with TestClient(app) as c:
     # it has to fail for that reason and not for a workspace one, which is what
     # proves the check let the owner through.
     check("and it is not refused for a workspace reason",
-          "workspace" not in (owner_row.get("error") or "").lower()
-          or "missing" in (owner_row.get("error") or "").lower(),
+          "not have access to the workspace" not in (owner_row.get("error") or ""),
           str(owner_row.get("error"))[:200])
 
     login(c, "admin", "devpassword123")

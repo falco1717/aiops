@@ -154,6 +154,12 @@ with TestClient(app) as c:
     r = c.patch(f"/api/accounts/{backup['id']}", json={"allowed_user_ids": [alice["id"]]})
     check("access can be restricted to named users",
           r.json().get("allowed_user_ids") == [alice["id"]], r.text[:200])
+    # The workspace these sessions run in belongs to the admin, and a workspace
+    # is private to its owner (see test_workspaces.py). What is being measured
+    # below is account access, so give alice the workspace outright rather than
+    # having her sessions refused for an unrelated reason.
+    c.patch(f"/api/workspaces/{ws['id']}",
+            json={"grants": [{"user_id": alice["id"], "level": "use"}]})
 
     c.post("/api/auth/logout")
     c.post("/api/auth/login", json={"username": "alice", "password": "alicepassword"})
