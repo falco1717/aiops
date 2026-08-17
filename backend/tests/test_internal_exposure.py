@@ -347,9 +347,13 @@ for route in app.routes:
 check("no route answers an anonymous caller that is not meant to",
       unauthenticated <= EXPECTED_PUBLIC,
       f"unexpected: {sorted(unauthenticated - EXPECTED_PUBLIC)}")
+# The SPA route is left out of this half: `mount_spa` only runs where
+# `app/static` exists, and a clean clone has no frontend build in it. Its
+# presence in the allow-list above is what matters.
+must_exist = EXPECTED_PUBLIC - {"/{full_path:path}"}
 check("and every route on the expected list still exists",
-      not EXPECTED_PUBLIC - unauthenticated,
-      f"gone: {sorted(EXPECTED_PUBLIC - unauthenticated)}")
+      not must_exist - unauthenticated,
+      f"gone: {sorted(must_exist - unauthenticated)}")
 
 # Not a check, because either answer is a defensible choice and a test that
 # pinned one would fight whoever made the other: FastAPI's own documentation
