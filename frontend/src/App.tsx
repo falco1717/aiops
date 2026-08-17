@@ -195,7 +195,7 @@ export default function App() {
         <Route path="/presets" element={<Presets />} />
         <Route path="/accounts" element={<Accounts me={user} />} />
         <Route path="/usage" element={<Usage />} />
-        <Route path="/workspaces" element={<Workspaces />} />
+        <Route path="/workspaces" element={<Workspaces me={user} />} />
         <Route path="/targets" element={<Targets me={user} />} />
         <Route path="/nodes" element={<Nodes me={user} />} />
         <Route path="/teams" element={<Teams me={user} />} />

@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import RelayNode, Session, SessionShare, Target, TeamMember, User
+from .models import RelayNode, Session, SessionShare, Target, TeamMember, User, Workspace
 
 #: use  — agents in this user's sessions may connect through the system.
 #: manage — additionally edit it, replace the credential, and grant others.
@@ -50,6 +50,38 @@ def node_level_for(node: RelayNode, user: User | None) -> str | None:
     if node.owner_id is not None and node.owner_id == user.id:
         return "owner"
     for grant in node.grants:
+        if grant.user_id == user.id:
+            return grant.level if grant.level in LEVELS else "use"
+    return None
+
+
+def workspace_level_for(workspace: Workspace, user: User | None) -> str | None:
+    """The same rule a third time, for a workspace.
+
+    A workspace is a directory an agent runs *inside*: it reads the files there,
+    edits them, and runs its commands from them. So a workspace is its contents,
+    and lending one out is lending out a checkout — often a private repository
+    with its own history and its own secrets in it. That is the same kind of
+    thing as a stored credential, and it is owned the same way: by whoever
+    registered it, private until they name someone, and **not** reachable by an
+    administrator who was not named. Administering AIOps is not entitlement to
+    read somebody's code.
+
+    Written out rather than sharing a generic helper with the two above, for
+    exactly the reason given there: the three happen to agree today, and if the
+    rule for one ever changes it must be possible to change it without silently
+    moving the others.
+
+    Used at run time as well as at the API, and against the turn's *requester*
+    rather than the session's owner — see runner.py. A shared session must not
+    lend its owner's workspace to everyone who can type into it, for the same
+    reason it does not lend out their stored keys.
+    """
+    if user is None:
+        return None
+    if workspace.owner_id is not None and workspace.owner_id == user.id:
+        return "owner"
+    for grant in workspace.grants:
         if grant.user_id == user.id:
             return grant.level if grant.level in LEVELS else "use"
     return None

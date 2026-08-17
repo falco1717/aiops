@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .access import workspace_level_for
 from .events import hub
 from .models import AgentPreset, Attachment, ProviderAccount, Run, Session, User, Workspace
 from .providers import PROVIDERS
@@ -151,8 +152,23 @@ async def validate_session_targets(
                 f"Preset {preset.name!r} is for provider {preset.provider!r}, not {provider!r}"
             )
 
-    if workspace_id is not None and await db.get(Workspace, workspace_id) is None:
-        raise ValidationError("Workspace not found")
+    if workspace_id is not None:
+        workspace = await db.get(Workspace, workspace_id)
+        # One message for "there is no such workspace" and for "that one is not
+        # yours", deliberately. The workspaces endpoints answer 404 rather than
+        # 403 for a workspace the caller may not see, and a distinct message
+        # here would hand back exactly what that is withholding.
+        #
+        # Skipped when there is no user, which is the scheduler creating a
+        # session at fire time on behalf of whoever wrote the job: the schedule's
+        # workspace was checked against its author when the schedule was saved
+        # (routers/schedules.py), and there is nobody to ask now.
+        if workspace is None or (
+            user is not None and workspace_level_for(workspace, user) is None
+        ):
+            raise ValidationError(
+                "That workspace does not exist, or has not been shared with you"
+            )
 
     return preset
 

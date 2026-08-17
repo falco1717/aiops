@@ -109,17 +109,37 @@ class TeamOut(BaseModel):
 
 
 # --- workspaces --------------------------------------------------------
+class WorkspaceGrant(BaseModel):
+    user_id: int
+    level: str = "use"  # use | manage
+
+
 class WorkspaceIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     path: str
     description: str | None = None
+    grants: list[WorkspaceGrant] | None = None
 
 
-class WorkspaceOut(ORM):
+class WorkspacePatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    grants: list[WorkspaceGrant] | None = None
+    owner_id: int | None = None
+    # `path` is deliberately absent. Re-pointing a registered workspace would
+    # silently change what every session already using it is looking at, and the
+    # directory on disk would not move with it. Unregister and add it again.
+
+
+class WorkspaceOut(BaseModel):
     id: int
     name: str
     path: str
     description: str | None
+    owner_id: int | None
+    grants: list[WorkspaceGrant]
+    #: owner | manage | use — what the caller may do with it.
+    my_level: str
     created_at: datetime
 
 

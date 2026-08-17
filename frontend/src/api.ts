@@ -24,6 +24,7 @@ import type {
   User,
   UserSummary,
   Workspace,
+  WorkspaceGrant,
   WorkspaceStatus,
 } from "./types";
 
@@ -155,8 +156,21 @@ export const api = {
 
   // workspaces
   workspaces: () => request<Workspace[]>("/api/workspaces"),
-  createWorkspace: (data: { name: string; path: string; description?: string }) =>
-    request<Workspace>("/api/workspaces", { method: "POST", body: body(data) }),
+  createWorkspace: (data: {
+    name: string;
+    path: string;
+    description?: string;
+    grants?: WorkspaceGrant[];
+  }) => request<Workspace>("/api/workspaces", { method: "POST", body: body(data) }),
+  updateWorkspace: (
+    id: number,
+    data: {
+      name?: string;
+      description?: string | null;
+      grants?: WorkspaceGrant[];
+      owner_id?: number;
+    },
+  ) => request<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: body(data) }),
   deleteWorkspace: (id: number) =>
     request<void>(`/api/workspaces/${id}`, { method: "DELETE" }),
   workspaceStatus: (id: number) => request<WorkspaceStatus>(`/api/workspaces/${id}/status`),

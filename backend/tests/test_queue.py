@@ -386,6 +386,13 @@ with TestClient(app) as c:
     bob = make_user(c, "bob")
     carol = make_user(c, "carol")
     sid_shared = new_session()
+    # A turn runs as whoever sent it, so both of them need access to the
+    # workspace these sessions run in — sharing the session does not lend it
+    # out (see test_workspaces.py). Without this their turns are refused
+    # before they start, and what this block is measuring is the queue.
+    c.patch(f"/api/workspaces/{ws['id']}", json={
+        "grants": [{"user_id": bob, "level": "use"}, {"user_id": carol, "level": "use"}],
+    })
     r = c.patch(f"/api/sessions/{sid_shared}", json={"shared_user_ids": [bob, carol]})
     check("the session can be shared", r.status_code == 200, r.text[:200])
     admin_run = c.post(f"/api/sessions/{sid_shared}/prompt", json={"prompt": "owner's turn"}).json()

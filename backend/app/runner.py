@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 
 from . import agent_env, browsing, exposure, handoff
+from .access import workspace_level_for
 from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
@@ -404,7 +405,34 @@ class Runner:
 
             provider = get_provider(sess.provider)
             preset = sess.preset
+
+            # Whoever asked for this turn, not whoever owns the session: a
+            # shared session must not lend its owner's stored credentials — or
+            # its workspace — to everyone able to type into it. Resolved here
+            # because the workspace check immediately below needs it; the
+            # systems further down are scoped to the same person.
+            asker = (
+                await db.get(User, run.requested_by_id) if run.requested_by_id else None
+            )
+
             workspace = sess.workspace
+            if workspace is not None and workspace_level_for(workspace, asker) is None:
+                # Failed, not quietly relocated. Running this turn in the
+                # workspace root instead would answer a question about a
+                # repository with a directory that does not contain it, and the
+                # transcript would read as though the agent had looked.
+                await self._finalize(
+                    run_id,
+                    "failed",
+                    None,
+                    f"{asker.username if asker else 'Whoever sent this turn'} does not "
+                    f"have access to the workspace {workspace.name!r}, which this session "
+                    "runs in. A turn runs as the person who sent it rather than as the "
+                    "session's owner, so a shared session does not hand out its "
+                    "workspace. Ask that workspace's owner for access, or point this "
+                    "session at one you can use.",
+                )
+                return None
             cwd = workspace.path if workspace else settings.workspace_root
             if not os.path.isdir(cwd):
                 await self._finalize(run_id, "failed", None, f"Workspace directory missing: {cwd}")
@@ -471,15 +499,9 @@ class Runner:
             # into a private per-run directory and removed in the finally
             # below, so `ssh <name>` works for this turn and nothing is left
             # on disk afterwards.
-            # Scoped to whoever owns the session: stored credentials belong to
-            # the person who saved them, so a turn only reaches systems that
-            # person may reach.
-            # Whoever asked for this turn, not whoever owns the session: a
-            # shared session must not lend its owner's stored credentials to
-            # everyone able to type into it.
-            asker = (
-                await db.get(User, run.requested_by_id) if run.requested_by_id else None
-            )
+            # Scoped to `asker`, resolved at the top of this method: stored
+            # credentials belong to the person who saved them, so a turn only
+            # reaches systems the person who *sent* it may reach.
             targets = await ssh_targets.visible_targets(db, asker)
             # Systems bound to a relay node are reached through it. The nodes
             # are looked up here so the generated config can name them, and so

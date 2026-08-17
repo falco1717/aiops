@@ -318,6 +318,9 @@ function NewSession({
           </label>
           <label>
             <span>Workspace — the directory the agent works in</span>
+            {/* Only the workspaces this user may use: the list comes from
+                /api/workspaces, which is scoped to what they own or were
+                granted, so the form cannot offer somebody else's checkout. */}
             <select value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
               <option value="">None — no project</option>
               {workspaces.map((w) => (

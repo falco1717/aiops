@@ -39,6 +39,15 @@ COLUMNS: dict[str, dict[str, str]] = {
         "owner_id": "INTEGER",
         "relay_node_id": "INTEGER",
     },
+    # INTEGER, keyed to what the model declares — `ForeignKey("users.id")` over
+    # the users table's `Integer` primary key, exactly like targets.owner_id and
+    # sessions.owner_id above. Nullable with no DDL default: the backfill below
+    # is what fills it, because "who should own this" is a question about the
+    # data rather than a constant the database can supply. The `workspace_access`
+    # table needs nothing here — create_all makes a missing table whole.
+    "workspaces": {
+        "owner_id": "INTEGER",
+    },
     "target_access": {
         "level": "VARCHAR(16) NOT NULL DEFAULT 'use'",
     },
@@ -166,11 +175,18 @@ async def _adopt_existing_logins() -> None:
 async def _backfill_owners() -> None:
     """Give pre-ownership rows an owner.
 
-    Sessions and stored systems used to be visible to everyone, so nothing
-    recorded who made them. Anything without an owner would be invisible to
-    every user once visibility starts depending on one, so it is assigned to
+    Sessions, stored systems and workspaces used to be visible to everyone, so
+    nothing recorded who made them. Anything without an owner would be invisible
+    to every user once visibility starts depending on one, so it is assigned to
     an administrator, who can hand it on. This is logged loudly because it is
     a visibility change to existing data, not a schema detail.
+
+    A workspace never recorded a creator — there was no column for one and no
+    other trace of who registered it — so there is nothing to prefer over the
+    first administrator by id, which on this instance is user 1, `admin`. That
+    is also the account that owns every existing session, so the workspaces land
+    with the person already working in them rather than with a stranger, and the
+    owner is not locked out of directories they use every day.
 
     A session is only claimed if it is genuinely unreachable — no team and no
     named sharee. Without that qualification this would fight the other half of
@@ -195,6 +211,7 @@ async def _backfill_owners() -> None:
             (unreachable, "session"),
             ("UPDATE targets SET owner_id = :owner WHERE owner_id IS NULL", "stored system"),
             ("UPDATE schedules SET owner_id = :owner WHERE owner_id IS NULL", "schedule"),
+            ("UPDATE workspaces SET owner_id = :owner WHERE owner_id IS NULL", "workspace"),
         ):
             result = await db.execute(text(statement), {"owner": admin.id})
             if result.rowcount:

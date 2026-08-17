@@ -79,7 +79,15 @@ class TeamMember(Base):
 
 
 class Workspace(Base):
-    """A directory on the server that agents are allowed to run inside."""
+    """A directory on the server that agents are allowed to run inside.
+
+    Owned and shared on the same terms as a stored system or a relay node. A
+    workspace is not a folder name: it is whatever is checked out in it, and an
+    agent pointed at one reads it, edits it and runs commands from it. Handing
+    somebody a workspace is therefore handing them its contents, so it is
+    private to whoever registered it until they say otherwise — administrators
+    included.
+    """
 
     __tablename__ = "workspaces"
 
@@ -88,6 +96,38 @@ class Workspace(Base):
     path: Mapped[str] = mapped_column(String(1024))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Who controls it. Deleting this user is refused unless the workspace is
+    # first handed to someone with manage rights, so a directory agents work in
+    # can never end up owned by nobody and usable by no one.
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    grants: Mapped[list[WorkspaceAccess]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class WorkspaceAccess(Base):
+    """Who may work in a workspace besides its owner.
+
+    Deliberately the same shape and meaning as TargetAccess and
+    RelayNodeAccess: an empty grant list means *nobody* but the owner, and an
+    administrator who was not named here sees nothing.
+    """
+
+    __tablename__ = "workspace_access"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # use: this user's sessions and turns may run in it.
+    # manage: additionally rename it, edit its description, and grant others.
+    level: Mapped[str] = mapped_column(String(16), default="use")
+
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_user"),)
 
 
 class AccountAccess(Base):

@@ -34,7 +34,16 @@ export type Workspace = {
   name: string;
   path: string;
   description: string | null;
+  owner_id: number | null;
+  grants: WorkspaceGrant[];
+  /** owner | manage | use — what you may do with it. */
+  my_level: string;
   created_at: string;
+};
+
+export type WorkspaceGrant = {
+  user_id: number;
+  level: "use" | "manage";
 };
 
 export type WorkspaceStatus = {
