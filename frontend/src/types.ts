@@ -591,20 +591,34 @@ export type ExposureSystem = {
 };
 
 /**
+ * Your own GitHub account, when this session's workspace links one you may
+ * use. Named the way the exposure warning shows it — no token, no repo list.
+ */
+export type ExposureGithubAccount = {
+  id: number;
+  label: string;
+};
+
+/**
  * What a turn of yours in this session would put in front of whom.
  *
  * Computed by the server from the same visibility rules as everything else, and
  * always from the caller's point of view: `viewers` never includes you, and
- * `systems` is only ever yours. A turn reaches the systems its *requester* can
- * reach, so in a shared session your credentials work inside somebody else's
- * transcript — this is the disclosure of that, not a limit on it.
+ * `systems`/`github_accounts` are only ever yours. A turn reaches the systems
+ * and the linked GitHub account its *requester* can reach, so in a shared
+ * session your credentials work inside somebody else's transcript — this is
+ * the disclosure of that, not a limit on it. One acknowledgement covers both
+ * credential kinds, since a user who confirmed their SSH key is exposed but
+ * was never asked about their GitHub token is not actually informed.
  */
 export type Exposure = {
   session_id: string;
   /** Everyone else who can read this session: owner, sharees, the team. */
   viewers: UserSummary[];
   systems: ExposureSystem[];
-  /** Both lists non-empty — there is actually something to warn about. */
+  /** At most one — a workspace links to a single account. */
+  github_accounts: ExposureGithubAccount[];
+  /** A viewer, and something of yours (a system or a GitHub account) reachable. */
   at_stake: boolean;
   acknowledged: boolean;
   acknowledged_at: string | null;

@@ -381,6 +381,233 @@ with TestClient(app) as c:
               for v in c.get(f"/api/sessions/{shared}/exposure").json()["viewers"]),
           c.get(f"/api/sessions/{shared}/exposure").text[:200])
 
+    # =========================================================================
+    # GitHub accounts: the same disclosure, folded into the same Exposure
+    # =========================================================================
+    #
+    # A stored SSH target and a workspace's linked GitHub account are both
+    # bearer credentials by the same reasoning (see exposure.py's module
+    # docstring), and the design here is one combined `Exposure` rather than a
+    # second warning: a caller who acknowledged their SSH key being exposed but
+    # was never asked about their GitHub token reaching the same audience would
+    # not actually be informed. Fresh users are used throughout so a GitHub
+    # account is provably the *only* thing that can be at stake for them — any
+    # of these checks passing for some other reason (a stray stored system, a
+    # stale acknowledgement) would be a bug this section exists to catch.
+    login(c, "admin")
+    erin = make_user(c, "erin")
+    frank = make_user(c, "frank")
+    george = make_user(c, "george")
+    GH_TOKEN = "ghp_" + "y" * 36
+
+    # --- a session with only a GitHub account at stake, no SSH targets -----
+    as_user(c, "erin")
+    r = c.post("/api/github-accounts", json={"label": "Erin's GitHub", "token": GH_TOKEN})
+    check("erin can store a GitHub account", r.status_code == 201, r.text[:200])
+    erin_gh_id = r.json()["id"] if r.status_code == 201 else None
+
+    r = c.post("/api/workspaces", json={"name": "erin-ws", "path": "erin-ws"})
+    check("(setup) erin's workspace", r.status_code == 201, r.text[:200])
+    erin_ws_id = r.json()["id"] if r.status_code == 201 else None
+
+    r = c.patch(f"/api/workspaces/{erin_ws_id}", json={"github_account_id": erin_gh_id})
+    check("(setup) erin links her workspace to her own account",
+          r.status_code == 200, r.text[:200])
+
+    gh_only = c.post("/api/sessions", json={
+        "provider": "claude", "title": "erin's github-only session",
+        "workspace_id": erin_ws_id, "approval_mode": "bypass",
+    }).json()["id"]
+    r = c.patch(f"/api/sessions/{gh_only}", json={"shared_user_ids": [frank]})
+    check("(setup) erin shares the session with frank", r.status_code == 200, r.text[:200])
+
+    r = c.get(f"/api/sessions/{gh_only}/exposure")
+    view = r.json() if r.status_code == 200 else {}
+    check("erin has no stored systems of her own",
+          view.get("systems") == [], str(view.get("systems")))
+    check("but her linked GitHub account is named",
+          [a["id"] for a in view.get("github_accounts", [])] == [erin_gh_id],
+          str(view.get("github_accounts")))
+    check("no token or repo list rides along with it — just id and label",
+          all(set(a) == {"id", "label"} for a in view.get("github_accounts", [])),
+          str(view.get("github_accounts")))
+    check("a GitHub account alone is enough to put something at stake",
+          view.get("at_stake") is True, str(view)[:200])
+    check("so the gate is armed with zero SSH systems in play",
+          view.get("needs_acknowledgement") is True, str(view)[:200])
+
+    r = c.post(f"/api/sessions/{gh_only}/prompt", json={"prompt": "look at the repo"})
+    check("the first turn is refused for the GitHub account alone",
+          r.status_code == 428, f"{r.status_code} {r.text[:200]}")
+    check("the refusal names it as a GitHub account rather than 'stored systems'",
+          "GitHub account" in r.text and "stored systems" not in r.text, r.text[:300])
+    check("and still names who would read it", "frank" in r.text, r.text[:300])
+
+    r = c.post(f"/api/sessions/{gh_only}/exposure/ack", json={"viewer_ids": [frank]})
+    check("acknowledging the GitHub-only exposure is recorded",
+          r.status_code == 200 and r.json()["acknowledged"] is True,
+          f"{r.status_code} {r.text[:200]}")
+
+    r = c.post(f"/api/sessions/{gh_only}/prompt", json={"prompt": "look at the repo now"})
+    check("and the turn then goes through", r.status_code == 202, f"{r.status_code} {r.text[:200]}")
+    gh_run = r.json()["id"] if r.status_code == 202 else None
+    settle(c, gh_run)
+    notes = exposure_events(c, gh_only)
+    check("the transcript records the GitHub account was used",
+          len(notes) == 1 and notes[0][1].get("github_account", {}).get("id") == erin_gh_id,
+          str(notes)[:300])
+    check("and the note text names it by label",
+          len(notes) == 1 and "Erin's GitHub" in (notes[0][0]["text"] or ""),
+          str(notes[:1])[:300])
+
+    # --- one acknowledgement covers an SSH target and a GitHub account -----
+    # Erin now also stores a system. The gate has already been armed and
+    # cleared once for her GitHub account (above, in a different session) —
+    # this checks that a *fresh* session mixing both credential kinds is
+    # covered by a single acknowledgement, not one per kind.
+    as_user(c, "erin")
+    r = c.post("/api/targets", json={
+        "name": "Erin Box", "hostname": "10.9.9.20", "username": "erin",
+        "auth_type": "key", "private_key": PRIVATE_KEY,
+    })
+    check("erin can also store a system", r.status_code == 201, r.text[:200])
+
+    combo_sess = c.post("/api/sessions", json={
+        "provider": "claude", "title": "erin's combined session",
+        "workspace_id": erin_ws_id, "approval_mode": "bypass",
+    }).json()["id"]
+    r = c.patch(f"/api/sessions/{combo_sess}", json={"shared_user_ids": [frank]})
+    check("(setup) shared with frank", r.status_code == 200, r.text[:200])
+
+    r = c.get(f"/api/sessions/{combo_sess}/exposure")
+    view = r.json() if r.status_code == 200 else {}
+    check("both the SSH system and the GitHub account are named together",
+          [s["slug"] for s in view.get("systems", [])] == ["erin-box"]
+          and [a["id"] for a in view.get("github_accounts", [])] == [erin_gh_id],
+          str(view)[:300])
+    check("one Exposure covers both", view.get("at_stake") is True, str(view)[:200])
+
+    r = c.post(f"/api/sessions/{combo_sess}/prompt", json={"prompt": "combined"})
+    check("the first turn is refused with both credential kinds at stake",
+          r.status_code == 428, f"{r.status_code} {r.text[:200]}")
+    check("and the refusal names both kinds together",
+          "stored systems" in r.text and "GitHub account" in r.text, r.text[:300])
+
+    r = c.post(f"/api/sessions/{combo_sess}/exposure/ack", json={"viewer_ids": [frank]})
+    check("a single acknowledgement is recorded for both",
+          r.status_code == 200 and r.json()["acknowledged"] is True,
+          f"{r.status_code} {r.text[:200]}")
+
+    r = c.post(f"/api/sessions/{combo_sess}/prompt", json={"prompt": "combined now"})
+    check("and it covers both — no second prompt is needed for the GitHub account",
+          r.status_code == 202, f"{r.status_code} {r.text[:200]}")
+    combo_run = r.json()["id"] if r.status_code == 202 else None
+    settle(c, combo_run)
+    notes = exposure_events(c, combo_sess)
+    check("the transcript records both credential kinds used together in one note",
+          len(notes) == 1
+          and [s["slug"] for s in notes[0][1]["systems"]] == ["erin-box"]
+          and notes[0][1].get("github_account", {}).get("id") == erin_gh_id,
+          str(notes)[:300])
+
+    # --- disclosed via the requester's own access, not the workspace's owner -
+    # George owns a GitHub account and a workspace linked to it. Frank is
+    # granted 'use' on *both* the workspace and the account, so a turn of
+    # frank's own would actually reach george's account — and that is what
+    # frank's own exposure has to disclose. Erin can read the very same
+    # session but was never granted anything on george's account (or his
+    # workspace), so nothing is disclosed to her: the check tracks the
+    # caller's own access to the credential, not merely being able to read
+    # the session, and not the workspace's owner's access either.
+    as_user(c, "george")
+    r = c.post("/api/github-accounts", json={"label": "George's GitHub", "token": GH_TOKEN})
+    george_gh_id = r.json()["id"]
+    r = c.post("/api/workspaces", json={"name": "george-ws", "path": "george-ws"})
+    george_ws_id = r.json()["id"]
+    c.patch(f"/api/workspaces/{george_ws_id}", json={"github_account_id": george_gh_id})
+    c.patch(f"/api/workspaces/{george_ws_id}",
+            json={"grants": [{"user_id": frank, "level": "use"}]})
+    c.patch(f"/api/github-accounts/{george_gh_id}",
+            json={"grants": [{"user_id": frank, "level": "use"}]})
+
+    requester_sess = c.post("/api/sessions", json={
+        "provider": "claude", "title": "george's linked-account session",
+        "workspace_id": george_ws_id, "approval_mode": "bypass",
+    }).json()["id"]
+    c.patch(f"/api/sessions/{requester_sess}", json={"shared_user_ids": [frank, erin]})
+
+    as_user(c, "frank")
+    r = c.get(f"/api/sessions/{requester_sess}/exposure")
+    view = r.json() if r.status_code == 200 else {}
+    check("frank, granted use on both the workspace and the account, sees it disclosed",
+          [a["id"] for a in view.get("github_accounts", [])] == [george_gh_id],
+          str(view.get("github_accounts")))
+
+    as_user(c, "erin")
+    r = c.get(f"/api/sessions/{requester_sess}/exposure")
+    view = r.json() if r.status_code == 200 else {}
+    check("erin can read the same session, but was never granted george's "
+          "account, so nothing of george's is disclosed to her",
+          view.get("github_accounts") == [], str(view.get("github_accounts")))
+    check("nothing at all is at stake for her here",
+          view.get("at_stake") is False, str(view)[:200])
+
+    # --- the confused deputy, exactly as the module's docstring describes ---
+    # Frank creates his own room and speaks first, so his message is genuinely
+    # already in the transcript before george — who owns the credential this
+    # scenario is about — is even added, let alone sends his own first prompt.
+    # A fresh workspace/account pair with no grants to frank at all keeps
+    # frank's own first message free of any exposure gate of its own, so the
+    # only thing under test is whether george's gate fires because of frank's
+    # already-present message — not merely because "some other viewer exists"
+    # in the abstract.
+    as_user(c, "george")
+    r = c.post("/api/github-accounts", json={"label": "George's Deputy GitHub", "token": GH_TOKEN})
+    deputy_gh_id = r.json()["id"]
+    r = c.post("/api/workspaces", json={"name": "george-deputy-ws", "path": "george-deputy-ws"})
+    deputy_ws_id = r.json()["id"]
+    c.patch(f"/api/workspaces/{deputy_ws_id}", json={"github_account_id": deputy_gh_id})
+
+    deputy_sess = c.post("/api/sessions", json={
+        "provider": "claude", "title": "george's room",
+        "workspace_id": deputy_ws_id, "approval_mode": "bypass",
+    }).json()["id"]
+    r = c.patch(f"/api/sessions/{deputy_sess}", json={"shared_user_ids": [frank]})
+    check("(setup) george shares the room with frank before anyone has spoken",
+          r.status_code == 200, r.text[:200])
+
+    as_user(c, "frank")
+    r = c.post(f"/api/sessions/{deputy_sess}/prompt",
+               json={"prompt": "can you check the production repo for me?"})
+    check("(setup) frank speaks first — no exposure of george's credential yet, "
+          "so nothing holds frank's own message back",
+          r.status_code == 202, f"{r.status_code} {r.text[:200]}")
+    settle(c, r.json()["id"] if r.status_code == 202 else None)
+
+    as_user(c, "george")
+    transcript_before = c.get(f"/api/sessions/{deputy_sess}/transcript").json()
+    check("frank's message is genuinely already in the transcript george reads",
+          any("check the production repo" in (run.get("prompt") or "")
+              for run in transcript_before.get("runs", [])),
+          str(transcript_before)[:300])
+
+    r = c.get(f"/api/sessions/{deputy_sess}/exposure")
+    view = r.json() if r.status_code == 200 else {}
+    check("george's own GitHub account is what would be exposed here",
+          [a["id"] for a in view.get("github_accounts", [])] == [deputy_gh_id],
+          str(view)[:200])
+    check("the gate is armed before george's own first prompt into this room",
+          view.get("needs_acknowledgement") is True, str(view)[:200])
+
+    r = c.post(f"/api/sessions/{deputy_sess}/prompt",
+               json={"prompt": "sure, here's what the repo has"})
+    check("george's first turn is refused — this is the exact shape the "
+          "module's docstring names: an earlier viewer's message sits in the "
+          "transcript his credential-bearing turn would now run in front of",
+          r.status_code == 428, f"{r.status_code} {r.text[:200]}")
+    check("the refusal names frank, the earlier viewer, specifically",
+          "frank" in r.text, r.text[:300])
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {failures}")

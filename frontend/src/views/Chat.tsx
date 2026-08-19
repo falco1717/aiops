@@ -1588,7 +1588,20 @@ function ExposureNotice({
 }) {
   const readers = names(exposure.viewers);
   const added = names(exposure.new_viewers);
-  const systems = exposure.systems.map((s) => s.slug).join(", ");
+  const hasSystems = exposure.systems.length > 0;
+  const hasGithub = exposure.github_accounts.length > 0;
+  const credentialCount = exposure.systems.length + exposure.github_accounts.length;
+  // Named together, one clause per kind actually at stake, so somebody with
+  // only a linked GitHub account is not shown a sentence written for a stored
+  // system they do not have.
+  const namedCredentials = [
+    hasSystems ? `stored systems: ${exposure.systems.map((s) => s.slug).join(", ")}` : null,
+    hasGithub
+      ? `GitHub: ${exposure.github_accounts.map((a) => a.label).join(", ")}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("; ");
   const plural = exposure.new_viewers.length === 1 ? "was" : "were";
   // Whether one person or five, they are "they" — the alternative is guessing at
   // a stranger's pronoun in a security warning.
@@ -1647,7 +1660,7 @@ function ExposureNotice({
         title="What this exposes, and to whom"
       >
         <span className="pill warn">shared</span>
-        {readers} can read anything your systems produce here.
+        {readers} can read anything your credentials produce here.
         <span className="exposure-more">Details</span>
       </button>
     );
@@ -1661,8 +1674,8 @@ function ExposureNotice({
             it occurs in — so the ✕ ended up beside the last line. */}
         <span>
           {confirming
-            ? `Use your stored systems in a session ${readers} can read?`
-            : `${readers} can read this session, and your stored systems are reachable from it.`}
+            ? `Use your credentials in a session ${readers} can read?`
+            : `${readers} can read this session, and your credentials are reachable from it.`}
         </span>
         {/* Only when collapsing would actually do something. While a re-arm is
             pending the guard below re-expands regardless, so offering the
@@ -1681,36 +1694,39 @@ function ExposureNotice({
         )}
       </strong>
       <p>
-        Any turn you send here runs with your systems available to the agent:{" "}
-        <span className="mono">{systems}</span>. {readers} cannot reach{" "}
-        {exposure.systems.length === 1 ? "it" : "them"} directly, but{" "}
+        Any turn you send here runs with your credentials available to the agent —{" "}
+        <span className="mono">{namedCredentials}</span>. {readers} cannot reach{" "}
+        {credentialCount === 1 ? "it" : "them"} directly, but{" "}
         {confirming ? "by continuing you accept that" : "through this session"}:
       </p>
       <ul>
         <li>
-          everything the agent does on those hosts is written into this transcript —
-          command output, file contents, whatever is on the far end — and they can
+          everything the agent does with them is written into this transcript —
+          command output, file contents, whatever is on the far end
+          {hasGithub ? ", or a pull request opened in your name" : ""} — and they can
           read all of it;
         </li>
         <li>
-          the private key is a real file on disk for the length of each turn, so if
-          the agent is asked to print it, the key itself lands in the transcript
-          where they can read it;
+          the decrypted credential is a real file on disk for the length of each
+          turn, so if the agent is asked to print it, the{" "}
+          {hasSystems && hasGithub ? "key or token" : hasGithub ? "token" : "key"} itself
+          lands in the transcript where they can read it;
         </li>
         <li>
           they can type in here too, and their messages are context for your next
           turn — so an instruction one of them leaves in this conversation can be
-          carried out by the agent <em>using your credentials</em>, without you
-          asking for it.
+          carried out by the agent <em>using your credentials</em>
+          {hasGithub ? ", including pushing code or opening a pull request as you" : ""},
+          without you asking for it.
         </li>
       </ul>
       {confirming ? (
         <>
           <p className="exposure-fine">
             This is recorded against your name and this session, and the transcript
-            notes it whenever a turn actually uses those systems. You will be asked
-            again if anyone else is given access. Saying no sends nothing and changes
-            nothing else — your systems stay yours either way.
+            notes it whenever a turn actually uses those credentials. You will be
+            asked again if anyone else is given access. Saying no sends nothing and
+            changes nothing else — your credentials stay yours either way.
           </p>
           <div className="row exposure-actions">
             <button className="primary" type="button" disabled={busy} onClick={onAgree}>

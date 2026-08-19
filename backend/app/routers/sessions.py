@@ -19,6 +19,7 @@ from ..schemas import (
     CapabilityOut,
     EventOut,
     ExposureAckIn,
+    ExposureGithubAccount,
     ExposureOut,
     ExposureSystem,
     PromptIn,
@@ -509,6 +510,9 @@ def _rendered(exposure: exposure_facts.Exposure) -> ExposureOut:
         systems=[
             ExposureSystem(id=t.id, name=t.name, slug=t.slug) for t in exposure.systems
         ],
+        github_accounts=[
+            ExposureGithubAccount(id=a.id, label=a.label) for a in exposure.github_accounts
+        ],
         at_stake=exposure.at_stake,
         acknowledged=exposure.acknowledged,
         acknowledged_at=exposure.acknowledged_at,
@@ -566,12 +570,13 @@ async def acknowledge_exposure(
 
 
 async def _require_exposure_ack(db: AsyncSession, sess: Session, user: User) -> None:
-    """Refuse a first turn that would expose this user's systems undisclosed.
+    """Refuse a first turn that would expose this user's credentials undisclosed.
 
     The only gate in this feature, and it gates being *told*, not being allowed:
     it clears the moment the person says they understand, it never looks at which
-    systems the turn may reach, and it removes nothing — a turn in a shared
-    session still gets every system its requester can reach, exactly as before.
+    systems or GitHub account the turn may reach, and it removes nothing — a
+    turn in a shared session still gets every system and every GitHub account
+    its requester can reach, exactly as before.
 
     Deliberately not applied to scheduled turns, which arrive through the
     scheduler with nobody watching: there is no one to ask, and failing them

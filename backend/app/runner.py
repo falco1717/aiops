@@ -604,8 +604,12 @@ class Runner:
                 # decision, rather than at the API — the API knows what was
                 # asked for, this knows what the turn actually got. Silent when
                 # the session has no other readers, which is most of them.
+                # `github_account` is only passed when `git_ctx` actually
+                # materialised — the same "only what was usable" rule `usable`
+                # already applies to the ssh targets above.
                 exposure_note = await exposure.record_use(
-                    db, run, sess, usable, asker=asker
+                    db, run, sess, usable, asker=asker,
+                    github_account=github_account if git_ctx else None,
                 )
                 preset_prompt = preset.system_prompt if preset else None
                 system_prompt = (

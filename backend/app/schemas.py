@@ -411,12 +411,26 @@ class ExposureSystem(BaseModel):
     slug: str
 
 
+class ExposureGithubAccount(BaseModel):
+    """The caller's own GitHub account, when this session's workspace names one
+    they may use.
+
+    No token, no repo list, nothing about who else can use the account: the
+    same restraint `ExposureSystem` observes, for the same reason — this is a
+    screen about audiences, not a second copy of the GitHub accounts page.
+    """
+
+    id: int
+    label: str
+
+
 class ExposureOut(BaseModel):
     """What a turn of the caller's would expose here, and to whom.
 
-    Always from the caller's point of view. `viewers` excludes them, `systems` is
-    only theirs, and nothing in here is information they could not already get
-    from /api/users/directory and /api/targets.
+    Always from the caller's point of view. `viewers` excludes them, `systems`
+    and `github_accounts` are only theirs, and nothing in here is information
+    they could not already get from /api/users/directory, /api/targets, and
+    /api/github-accounts.
     """
 
     session_id: str
@@ -424,7 +438,11 @@ class ExposureOut(BaseModel):
     viewers: list[UserSummary]
     #: The caller's systems a turn of theirs in this session would reach.
     systems: list[ExposureSystem]
-    #: True when both lists are non-empty, i.e. when there is anything to say.
+    #: The caller's GitHub account, when this session's workspace links one
+    #: they may use — at most one, but a list to match `systems`.
+    github_accounts: list[ExposureGithubAccount]
+    #: True when there is a viewer *and* something of the caller's (a system, a
+    #: GitHub account, or both) reachable — i.e. when there is anything to say.
     at_stake: bool
     acknowledged: bool
     acknowledged_at: datetime | None
