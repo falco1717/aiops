@@ -3,7 +3,16 @@ from __future__ import annotations
 from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import RelayNode, Session, SessionShare, Target, TeamMember, User, Workspace
+from .models import (
+    GithubAccount,
+    RelayNode,
+    Session,
+    SessionShare,
+    Target,
+    TeamMember,
+    User,
+    Workspace,
+)
 
 #: use  — agents in this user's sessions may connect through the system.
 #: manage — additionally edit it, replace the credential, and grant others.
@@ -82,6 +91,33 @@ def workspace_level_for(workspace: Workspace, user: User | None) -> str | None:
     if workspace.owner_id is not None and workspace.owner_id == user.id:
         return "owner"
     for grant in workspace.grants:
+        if grant.user_id == user.id:
+            return grant.level if grant.level in LEVELS else "use"
+    return None
+
+
+def github_account_level_for(account: GithubAccount, user: User | None) -> str | None:
+    """The same rule a fourth time, for a stored GitHub personal access token.
+
+    A GitHub account here *is* a bearer credential — whoever can use it can
+    clone, push to, pull from and open pull requests against anything the
+    token can reach on the owner's behalf. That is at least as sensitive as a
+    stored system's password, so it is owned and shared the same way:
+    private to whoever added it, and **administrators get nothing they were
+    not given**. That has been true of `Target`, `RelayNode` and `Workspace`
+    at every turn this project has taken, and this is not the turn it stops
+    being true.
+
+    Written out rather than sharing a generic helper with the three functions
+    above, for exactly the reason given in theirs: they happen to agree today,
+    and if the rule for one is ever changed it must be possible to change it
+    without silently moving the others.
+    """
+    if user is None:
+        return None
+    if account.owner_id is not None and account.owner_id == user.id:
+        return "owner"
+    for grant in account.grants:
         if grant.user_id == user.id:
             return grant.level if grant.level in LEVELS else "use"
     return None

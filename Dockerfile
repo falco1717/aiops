@@ -186,13 +186,15 @@ COPY deploy/relay/aiops_relay_node.py \
      deploy/relay/README.md \
      ./relay/
 
-# Three scripts in the package are run from the agent's side of the boundary:
-# the MCP approval bridge and the MCP browser, both spawned by the Claude CLI,
-# and the relay ProxyCommand, spawned by ssh. /app is not readable by the agent
-# user, so they are installed where it can reach them. Same files, copied at
-# build time, so they cannot drift from the ones the tests exercise.
+# Four scripts in the package are run from the agent's side of the boundary:
+# the MCP approval bridge, the MCP browser and the MCP GitHub bridge, all
+# spawned by the Claude CLI, and the relay ProxyCommand, spawned by ssh. /app
+# is not readable by the agent user, so they are installed where it can reach
+# them. Same files, copied at build time, so they cannot drift from the ones
+# the tests exercise.
 RUN install -D -m 0755 /app/app/bridge/mcp_approver.py /opt/aiops-agent/mcp_approver.py \
     && install -D -m 0755 /app/app/bridge/mcp_browser.py /opt/aiops-agent/mcp_browser.py \
+    && install -D -m 0755 /app/app/bridge/mcp_github.py /opt/aiops-agent/mcp_github.py \
     && install -D -m 0755 /app/app/relay_connect.py /opt/aiops-agent/relay_connect.py
 
 # The shim that puts the browser on the other side of the uid boundary.

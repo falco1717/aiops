@@ -38,6 +38,9 @@ export type Workspace = {
   grants: WorkspaceGrant[];
   /** owner | manage | use — what you may do with it. */
   my_level: string;
+  /** The GitHub account push/pull and pull-request tools use inside this
+   *  workspace, or null when none is linked. */
+  github_account_id: number | null;
   created_at: string;
 };
 
@@ -488,6 +491,24 @@ export type Target = {
 };
 
 export type TargetGrant = {
+  user_id: number;
+  level: "use" | "manage";
+};
+
+/** A user's GitHub personal access token. Secrets are write-only, exactly
+ *  like a Target's — the API only ever reports whether one is stored. */
+export type GithubAccount = {
+  id: number;
+  label: string;
+  has_token: boolean;
+  owner_id: number | null;
+  grants: GithubAccountGrant[];
+  /** owner | manage | use — what you may do with it. */
+  my_level: string;
+  created_at: string;
+};
+
+export type GithubAccountGrant = {
   user_id: number;
   level: "use" | "manage";
 };

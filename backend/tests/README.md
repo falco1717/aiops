@@ -6,13 +6,13 @@ are all real.
 
 ## What they need installed
 
-Two things beyond the application's own requirements, and both of them have
+Three things beyond the application's own requirements, and each of them has
 cost somebody an afternoon by failing halfway through a suite rather than at
 the start:
 
 ```bash
 # from the repository root, in a clean python:3.11-slim
-apt-get update && apt-get install -y --no-install-recommends openssh-client
+apt-get update && apt-get install -y --no-install-recommends openssh-client git
 pip install -r backend/requirements-dev.txt
 ```
 
@@ -21,6 +21,13 @@ pip install -r backend/requirements-dev.txt
   pasting a fixture, and `test_isolation` and `test_relay` want an `ssh` on
   PATH to shim. The runtime image installs it already (see the `Dockerfile`),
   so this only bites in a bare Python image.
+* **`git`** is likewise a system package. `test_github` clones a local bare
+  repository through a real `git clone` — with the workspace-from-github
+  endpoint's actual credential-helper plumbing wired in — to prove no token
+  ever lands in `.git/config`, rather than trusting that claim without
+  checking it. The runtime image already installs it (`_git` in
+  `routers/workspaces.py` needs it too), so this also only bites in a bare
+  Python image.
 * **`httpx`** comes from `backend/requirements-dev.txt`, which pulls in
   `requirements.txt` as well. `test_relay` runs the app under a real uvicorn on
   a real port and needs a client that speaks to a socket rather than to an ASGI

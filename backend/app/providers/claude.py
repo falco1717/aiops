@@ -39,6 +39,23 @@ BROWSER_SCRIPT = helper_script(
 #: CLI's prompt would instead ask about every navigation and nothing else.
 BROWSER_TOOLS = ("navigate", "read_page", "screenshot", "click", "fill", "login", "close")
 
+#: The pull-request bridge. Its own MCP server, not folded into the browser
+#: one: it needs no Chromium and no proxy, and mixing an HTTP-API client into
+#: the browser process would blur exactly the boundary that process exists to
+#: keep — "what Chromium may reach" and "what the GitHub API client may reach"
+#: are different questions with different answers.
+GITHUB_SERVER_NAME = "aiops_github"
+GITHUB_SCRIPT = helper_script(
+    "mcp_github.py",
+    str(Path(__file__).resolve().parent.parent / "bridge" / "mcp_github.py"),
+)
+#: Pre-allowed at the CLI for the same reason the browser tools are: two of the
+#: three approval modes give the CLI no prompt tool at all, and opening a pull
+#: request should not simply be unavailable outside "ask". The bridge asks the
+#: approval broker itself before calling GitHub, exactly as a browser click
+#: does — see mcp_github.py.
+GITHUB_TOOLS = ("create_pull_request",)
+
 
 class ClaudeProvider(Provider):
     """Drives the Claude Code CLI in headless streaming mode.
@@ -93,6 +110,7 @@ class ClaudeProvider(Provider):
         approval_token: str | None = None,
         effort: str | None = None,
         browser: bool = False,
+        github: bool = False,
     ) -> RunSpec:
         argv = [
             settings.claude_bin,
@@ -151,6 +169,18 @@ class ClaudeProvider(Provider):
             # about a Bash call, so it has to be told which mode it is in — the
             # presence of a token is not the same question.
             env["AIOPS_BROWSER_APPROVALS"] = approval_mode
+
+        if github and approval_token:
+            servers[GITHUB_SERVER_NAME] = {
+                "command": sys.executable,
+                "args": [str(GITHUB_SCRIPT)],
+            }
+            extra_tools += [f"mcp__{GITHUB_SERVER_NAME}__{name}" for name in GITHUB_TOOLS]
+            # Same reason as the browser's line above: opening a pull request
+            # is a write, and the bridge decides whether to ask about it itself
+            # rather than relying on the CLI's own prompt tool, which two of
+            # the three approval modes do not even offer it.
+            env["AIOPS_GITHUB_APPROVALS"] = approval_mode
 
         if servers:
             argv += ["--mcp-config", json.dumps({"mcpServers": servers})]

@@ -2,11 +2,20 @@ import type * as React from "react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { fullName, nameById } from "../names";
-import type { User, UserSummary, Workspace, WorkspaceGrant, WorkspaceStatus } from "../types";
+import type {
+  GithubAccount,
+  User,
+  UserSummary,
+  Workspace,
+  WorkspaceGrant,
+  WorkspaceStatus,
+} from "../types";
 
-const EMPTY = { name: "", path: "", description: "" };
+const EMPTY = { name: "", path: "", description: "", github_account_id: "" };
 
 type Draft = typeof EMPTY;
+
+const CLONE_EMPTY = { github_account_id: "", repo: "", name: "", description: "" };
 
 /**
  * Project folders on the server that agents may run inside.
@@ -19,6 +28,7 @@ export default function Workspaces({ me }: { me: User }) {
   const [items, setItems] = useState<Workspace[]>([]);
   const [statuses, setStatuses] = useState<Record<number, WorkspaceStatus>>({});
   const [users, setUsers] = useState<UserSummary[]>([]);
+  const [githubAccounts, setGithubAccounts] = useState<GithubAccount[]>([]);
   const [diff, setDiff] = useState<{ id: number; text: string } | null>(null);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   // Who this workspace is being shared with, edited alongside the rest of the form.
@@ -27,11 +37,21 @@ export default function Workspaces({ me }: { me: User }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // A separate flow, and a separate bit of state, from the "register an
+  // existing folder" form above: cloning talks to a different endpoint and
+  // fails in different ways (a bad repo spec, a directory collision), and
+  // conflating the two forms would make either kind of error read as though
+  // it belonged to the other operation.
+  const [clone, setClone] = useState(CLONE_EMPTY);
+  const [cloneBusy, setCloneBusy] = useState(false);
+  const [cloneError, setCloneError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     try {
       const rows = await api.workspaces();
       setItems(rows);
       setUsers(await api.userDirectory().catch(() => []));
+      setGithubAccounts(await api.githubAccounts().catch(() => []));
       const entries = await Promise.all(
         rows.map(async (w) => [w.id, await api.workspaceStatus(w.id)] as const),
       );
@@ -62,7 +82,12 @@ export default function Workspaces({ me }: { me: User }) {
     // A grant to the owner is a no-op the sharing list cannot show, since it
     // never lists you against your own workspace. Drop it rather than carry it.
     setGrantDraft(w.grants.filter((g) => g.user_id !== w.owner_id));
-    setDraft({ name: w.name, path: w.path, description: w.description ?? "" });
+    setDraft({
+      name: w.name,
+      path: w.path,
+      description: w.description ?? "",
+      github_account_id: w.github_account_id === null ? "" : String(w.github_account_id),
+    });
   };
 
   const submit = async (event: React.FormEvent) => {
@@ -77,6 +102,9 @@ export default function Workspaces({ me }: { me: User }) {
           name: draft.name,
           description: draft.description || null,
           grants,
+          // Always sent, including as null: clearing it is the meaningful
+          // edit that unlinks the GitHub account.
+          github_account_id: draft.github_account_id ? Number(draft.github_account_id) : null,
         });
       } else {
         await api.createWorkspace({
@@ -92,6 +120,26 @@ export default function Workspaces({ me }: { me: User }) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const cloneSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setCloneError(null);
+    setCloneBusy(true);
+    try {
+      await api.createWorkspaceFromGithub({
+        github_account_id: Number(clone.github_account_id),
+        repo: clone.repo,
+        name: clone.name || undefined,
+        description: clone.description || undefined,
+      });
+      setClone(CLONE_EMPTY);
+      await load();
+    } catch (err) {
+      setCloneError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCloneBusy(false);
     }
   };
 
@@ -190,6 +238,28 @@ export default function Workspaces({ me }: { me: User }) {
           <input value={draft.description} onChange={(e) => set("description", e.target.value)} />
         </label>
 
+        {editingId !== null && (
+          <label>
+            <span>GitHub account — used for push/pull and pull requests in this workspace</span>
+            <select
+              value={draft.github_account_id}
+              onChange={(e) => set("github_account_id", e.target.value)}
+            >
+              <option value="">None linked</option>
+              {githubAccounts.map((a) => (
+                <option key={a.id} value={String(a.id)}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
+            <span className="field-hint">
+              Only accounts you can use are offered here. A turn only authenticates with this
+              account when whoever sent it has also been given access to the account itself, on
+              the GitHub page — linking it here is not the same as sharing it.
+            </span>
+          </label>
+        )}
+
         <fieldset className="sharing">
           <legend>Who else can work in it</legend>
           <p className="hint">
@@ -233,6 +303,75 @@ export default function Workspaces({ me }: { me: User }) {
         </div>
       </form>
 
+      <h2>New workspace from GitHub</h2>
+      <p className="subtitle">
+        Clone a repository straight into a new, registered workspace, using one of your GitHub
+        accounts. The clone runs on the server and the resulting workspace belongs to you, exactly
+        as one you register by hand does.
+      </p>
+      {githubAccounts.length === 0 ? (
+        <div className="empty">
+          No GitHub accounts yet. Add one on the GitHub page first.
+        </div>
+      ) : (
+        <form className="card" onSubmit={cloneSubmit}>
+          {cloneError && <div className="error-banner">{cloneError}</div>}
+          <div className="grid-2">
+            <label>
+              <span>GitHub account</span>
+              <select
+                value={clone.github_account_id}
+                onChange={(e) => setClone((d) => ({ ...d, github_account_id: e.target.value }))}
+                required
+              >
+                <option value="" disabled>
+                  Choose one…
+                </option>
+                {githubAccounts.map((a) => (
+                  <option key={a.id} value={String(a.id)}>
+                    {a.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Repository</span>
+              <input
+                value={clone.repo}
+                onChange={(e) => setClone((d) => ({ ...d, repo: e.target.value }))}
+                placeholder="owner/name or https://github.com/owner/name"
+                required
+              />
+            </label>
+          </div>
+          <div className="grid-2">
+            <label>
+              <span>Workspace name (defaults to the repo's own name)</span>
+              <input
+                value={clone.name}
+                onChange={(e) => setClone((d) => ({ ...d, name: e.target.value }))}
+              />
+            </label>
+            <label>
+              <span>Description</span>
+              <input
+                value={clone.description}
+                onChange={(e) => setClone((d) => ({ ...d, description: e.target.value }))}
+              />
+            </label>
+          </div>
+          <div className="row">
+            <button
+              className="primary"
+              type="submit"
+              disabled={cloneBusy || !clone.github_account_id || !clone.repo.trim()}
+            >
+              {cloneBusy ? "Cloning…" : "Clone into a new workspace"}
+            </button>
+          </div>
+        </form>
+      )}
+
       {items.length === 0 ? (
         <div className="empty">
           No workspaces yet. Until you add one — or somebody shares one with you — every session
@@ -257,6 +396,12 @@ export default function Workspaces({ me }: { me: User }) {
                 <tr key={w.id}>
                   <td data-label="Name">
                     {w.name}
+                    {w.github_account_id !== null && (
+                      <span className="pill" style={{ marginLeft: 6 }}>
+                        {githubAccounts.find((a) => a.id === w.github_account_id)?.label ??
+                          "GitHub"}
+                      </span>
+                    )}
                     {w.description && (
                       <div style={{ color: "var(--text-dim)", fontSize: 12 }}>{w.description}</div>
                     )}

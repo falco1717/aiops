@@ -126,6 +126,9 @@ class WorkspacePatch(BaseModel):
     description: str | None = None
     grants: list[WorkspaceGrant] | None = None
     owner_id: int | None = None
+    #: The GitHub account push/pull and pull-request tools use inside this
+    #: workspace. Omitted leaves it alone; explicit null unlinks it.
+    github_account_id: int | None = None
     # `path` is deliberately absent. Re-pointing a registered workspace would
     # silently change what every session already using it is looking at, and the
     # directory on disk would not move with it. Unregister and add it again.
@@ -140,7 +143,22 @@ class WorkspaceOut(BaseModel):
     grants: list[WorkspaceGrant]
     #: owner | manage | use — what the caller may do with it.
     my_level: str
+    github_account_id: int | None
     created_at: datetime
+
+
+class WorkspaceFromGithubIn(BaseModel):
+    """Clone a repository straight into a new, registered workspace."""
+
+    github_account_id: int
+    #: "owner/name", or a full https://github.com/owner/name(.git) URL.
+    #: Anything else — an ssh:// URL, a git@ shorthand, another host entirely —
+    #: is rejected: this endpoint clones from github.com and nowhere else.
+    repo: str = Field(min_length=1, max_length=512)
+    #: Workspace name; defaults to the repo's own name when omitted.
+    name: str | None = Field(default=None, max_length=128)
+    description: str | None = None
+    grants: list[WorkspaceGrant] | None = None
 
 
 class WorkspaceStatus(BaseModel):
@@ -695,6 +713,40 @@ class TargetOut(BaseModel):
     #: owner | manage | use — what the caller may do with it.
     my_level: str
     relay_node_id: int | None
+    created_at: datetime
+
+
+# --- GitHub accounts ----------------------------------------------------
+class GithubAccountGrant(BaseModel):
+    user_id: int
+    level: str = "use"  # use | manage
+
+
+class GithubAccountIn(BaseModel):
+    label: str = Field(min_length=1, max_length=128)
+    #: Write-only, like a target's private key: sent once, never read back.
+    token: str = Field(min_length=1)
+    grants: list[GithubAccountGrant] | None = None
+
+
+class GithubAccountPatch(BaseModel):
+    label: str | None = None
+    # Absent leaves the stored token alone; sent (including empty) replaces it.
+    token: str | None = None
+    grants: list[GithubAccountGrant] | None = None
+    owner_id: int | None = None
+
+
+class GithubAccountOut(BaseModel):
+    """Never carries the token — only whether one is stored."""
+
+    id: int
+    label: str
+    has_token: bool
+    owner_id: int | None
+    grants: list[GithubAccountGrant]
+    #: owner | manage | use — what the caller may do with it.
+    my_level: str
     created_at: datetime
 
 

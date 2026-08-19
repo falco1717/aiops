@@ -47,6 +47,11 @@ COLUMNS: dict[str, dict[str, str]] = {
     # table needs nothing here — create_all makes a missing table whole.
     "workspaces": {
         "owner_id": "INTEGER",
+        # Which GitHub account (if any) push/pull and pull-request tools use
+        # inside this workspace. Nullable with no backfill: null means "no
+        # GitHub account linked", which is exactly what every existing
+        # workspace is until someone opts one in.
+        "github_account_id": "INTEGER",
     },
     "target_access": {
         "level": "VARCHAR(16) NOT NULL DEFAULT 'use'",

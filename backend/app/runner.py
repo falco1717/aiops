@@ -11,13 +11,13 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 
 from . import agent_env, browsing, exposure, handoff
-from .access import workspace_level_for
+from .access import github_account_level_for, workspace_level_for
 from .approvals import broker, run_tokens
 from .config import settings
 from .db import SessionLocal
 from .events import hub
-from .models import Attachment, Event, ProviderAccount, Run, Session, User
-from . import attachments, relay, ssh_targets
+from .models import Attachment, Event, GithubAccount, ProviderAccount, Run, Session, User
+from . import attachments, github_creds, relay, ssh_targets
 from .providers import get_provider
 from .providers.base import NormalizedEvent
 from .providers.codex_appserver import CodexAppServerAdapter
@@ -438,6 +438,32 @@ class Runner:
                 await self._finalize(run_id, "failed", None, f"Workspace directory missing: {cwd}")
                 return None
 
+            # A workspace can be linked to a GitHub account for push/pull and
+            # pull-request tools. Scoped to `asker`, exactly like the workspace
+            # check just above and for the identical reason: a shared session
+            # must not lend its owner's GitHub token to everyone able to type
+            # into it. Failed clearly rather than silently run with no GitHub
+            # credential — the requirement this exists to satisfy is that a
+            # requester who cannot use the linked account finds out, rather
+            # than getting a `git push` that quietly fails with no
+            # authentication at all and no explanation why.
+            github_account: GithubAccount | None = None
+            if workspace is not None and workspace.github_account_id is not None:
+                github_account = await db.get(GithubAccount, workspace.github_account_id)
+                if github_account is None or github_account_level_for(github_account, asker) is None:
+                    await self._finalize(
+                        run_id,
+                        "failed",
+                        None,
+                        f"{asker.username if asker else 'Whoever sent this turn'} does not "
+                        f"have access to the GitHub account linked to workspace "
+                        f"{workspace.name!r}. A turn runs as the person who sent it, so a "
+                        "shared session does not lend out its workspace's GitHub "
+                        "credential. Ask that account's owner for access, or unlink it on "
+                        "the Workspaces page.",
+                    )
+                    return None
+
             account = await self._pick_account(db, sess, attempted)
             next_account = await self._next_account(db, account, attempted)
             account_env: dict[str, str] = {}
@@ -477,21 +503,32 @@ class Runner:
                 and sess.provider == "claude"
                 and not interactive_codex
             )
+            # The pull-request tool, offered on the same terms as the browser:
+            # CLI path only, and only when this turn actually has a GitHub
+            # account to act as — the access check above already turned "the
+            # requester cannot use it" into a failed run, so reaching here with
+            # `github_account` set means this turn may use it.
+            wants_github = (
+                sess.provider == "claude"
+                and not interactive_codex
+                and github_account is not None
+            )
 
             # Only the CLI path needs a token: it identifies a bridge running as
             # a grandchild process. The adapter is in-process and calls the
             # broker directly, so issuing one for it would be a secret with no
             # holder.
             #
-            # Issued for a browsing turn in every approval mode, not only "ask":
-            # the browser fetches its reach and its stored credentials with it,
-            # and it authorises nothing on its own — it names a run, and every
-            # endpoint that takes it decides for itself what that run may have.
+            # Issued for a browsing or GitHub-enabled turn in every approval
+            # mode, not only "ask": the bridge fetches its reach or its
+            # credential with it, and it authorises nothing on its own — it
+            # names a run, and every endpoint that takes it decides for itself
+            # what that run may have.
             token = (
                 run_tokens.issue(run.id, sess.id)
                 if provider.supports_interactive_approval
                 and not interactive_codex
-                and (approval_mode == "ask" or wants_browser)
+                and (approval_mode == "ask" or wants_browser or wants_github)
                 else None
             )
 
@@ -516,6 +553,13 @@ class Runner:
                 f"(run {run.id}, session {sess.id})"
             )
             ssh_ctx = ssh_targets.prepare(targets, nodes, subnet_nodes, who=who)
+            # Same materialise-per-run, clean-up-in-finally shape as ssh_ctx
+            # above, for the workspace's linked GitHub account: `git push` and
+            # `git pull` inside the workspace authenticate transparently for the
+            # life of this run and nothing is left on disk afterwards. None
+            # when there is no linked account (the ordinary case) or its token
+            # could not be read.
+            git_ctx = github_creds.prepare(github_account) if github_account else None
             # A decrypted private key is on disk from here until cleanup, so
             # everything that follows runs inside this try. It used to be a
             # `finally` that opened ninety lines further down, which left the
@@ -616,6 +660,7 @@ class Runner:
                             "TERM": "dumb",
                             **account_env,
                             **(ssh_ctx.env if ssh_ctx else {}),
+                            **(git_ctx.env if git_ctx else {}),
                         },
                         stream_partials=settings.stream_partial_messages,
                     )
@@ -642,6 +687,7 @@ class Runner:
                         approval_mode=approval_mode,
                         approval_token=token,
                         browser=bool(browser_note),
+                        github=bool(wants_github and token),
                     )
                     argv = spec.argv
                     if spec.assigned_session_id and not sess.provider_session_id:
@@ -710,6 +756,8 @@ class Runner:
                         }
                         if ssh_ctx:
                             env.update(ssh_ctx.env)
+                        if git_ctx:
+                            env.update(git_ctx.env)
                         # After the ssh materials, which is where the relay
                         # token and forwarder address come from: the browser's
                         # proxy speaks the same protocol to the same listener.
@@ -749,6 +797,9 @@ class Runner:
                 # attempt that wrote them — failover makes a fresh set.
                 if ssh_ctx:
                     ssh_ctx.cleanup()
+                # Same rule for the workspace's GitHub credential helper.
+                if git_ctx:
+                    git_ctx.cleanup()
                 # And the browser's reach, and the screenshots it took. A
                 # screenshot of a logged-in internal application is not
                 # something to leave lying in a temp directory after the turn

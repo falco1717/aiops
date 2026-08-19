@@ -81,6 +81,10 @@ class Provider:
         #: Register the browser MCP server for this turn. A provider that has no
         #: way to load one ignores it rather than refusing the run.
         browser: bool = False,
+        #: Register the pull-request MCP server for this turn, when the
+        #: workspace has a GitHub account linked and the requester may use it.
+        #: A provider with no way to load one ignores it.
+        github: bool = False,
     ) -> RunSpec:
         raise NotImplementedError
 

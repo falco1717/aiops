@@ -10,6 +10,8 @@ from ..models import (
     Approval,
     Attachment,
     Event,
+    GithubAccount,
+    GithubAccountAccess,
     RelayNode,
     RelayNodeAccess,
     Run,
@@ -337,38 +339,41 @@ async def _release_schedules(db: AsyncSession, leaving: User) -> None:
 
 
 async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:
-    """Pass this user's stored systems, relay nodes and workspaces to someone
-    who can manage them.
+    """Pass this user's stored systems, relay nodes, workspaces and GitHub
+    accounts to someone who can manage them.
 
     Admins get no implicit access to a stored credential, so a system left
     without an owner would be reachable by nobody and removable by nobody. The
     delete is refused rather than orphaning one — and refusing is also what
     stops deleting a user becoming a way to inherit their credentials.
     """
-    # Grants this user held on other people's systems, nodes and workspaces. The
-    # foreign keys say cascade, and Postgres honours them, but SQLite enforces
-    # neither that nor unique ids over time — so a leftover row is access lying
-    # in wait for whoever is created next, and access to a stored credential, a
-    # route into a network or somebody's checkout is the worst thing to inherit
-    # by accident.
+    # Grants this user held on other people's systems, nodes, workspaces and
+    # GitHub accounts. The foreign keys say cascade, and Postgres honours them,
+    # but SQLite enforces neither that nor unique ids over time — so a leftover
+    # row is access lying in wait for whoever is created next, and access to a
+    # stored credential, a route into a network, somebody's checkout, or a
+    # GitHub token is the worst thing to inherit by accident.
     await db.execute(delete(TargetAccess).where(TargetAccess.user_id == leaving.id))
     await db.execute(delete(RelayNodeAccess).where(RelayNodeAccess.user_id == leaving.id))
     await db.execute(delete(WorkspaceAccess).where(WorkspaceAccess.user_id == leaving.id))
-    # Relay nodes and workspaces are owned and shared on exactly the same terms,
-    # so an ownerless one strands a route into a network, or a directory full of
-    # somebody's work, the same way a stored system would. A stranded workspace
-    # is worse than invisible: sessions still point at it, and every turn in one
-    # would fail with nobody able to grant the access that would fix it.
+    await db.execute(delete(GithubAccountAccess).where(GithubAccountAccess.user_id == leaving.id))
+    # Relay nodes, workspaces and GitHub accounts are owned and shared on
+    # exactly the same terms, so an ownerless one strands a route into a
+    # network, a directory full of somebody's work, or a GitHub token, the same
+    # way a stored system would. A stranded workspace is worse than invisible:
+    # sessions still point at it, and every turn in one would fail with nobody
+    # able to grant the access that would fix it.
     owned = (
         list(await db.scalars(select(Target).where(Target.owner_id == leaving.id)))
         + list(await db.scalars(select(RelayNode).where(RelayNode.owner_id == leaving.id)))
         + list(await db.scalars(select(Workspace).where(Workspace.owner_id == leaving.id)))
+        + list(await db.scalars(select(GithubAccount).where(GithubAccount.owner_id == leaving.id)))
     )
     stranded: list[str] = []
     for target in owned:
         heir = next((g for g in target.grants if g.level == "manage"), None)
         if heir is None:
-            stranded.append(target.name)
+            stranded.append(getattr(target, "name", None) or getattr(target, "label", "?"))
             continue
         target.owner_id = heir.user_id
         await db.delete(heir)
@@ -377,8 +382,8 @@ async def _hand_on_systems(db: AsyncSession, leaving: User) -> None:
     if stranded:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            f"{leaving.username} owns {len(stranded)} system(s), relay node(s) or "
-            f"workspace(s) nobody else can manage: "
+            f"{leaving.username} owns {len(stranded)} system(s), relay node(s), "
+            f"workspace(s) or GitHub account(s) nobody else can manage: "
             f"{', '.join(sorted(stranded)[:5])}"
             + (" …" if len(stranded) > 5 else "")
             + ". Give someone manage access, or delete them, before removing this user.",

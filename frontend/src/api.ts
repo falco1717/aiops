@@ -7,6 +7,8 @@ import type {
   Attachment,
   Capability,
   Exposure,
+  GithubAccount,
+  GithubAccountGrant,
   LoginFlow,
   NodeEnrolment,
   Preset,
@@ -169,6 +171,7 @@ export const api = {
       description?: string | null;
       grants?: WorkspaceGrant[];
       owner_id?: number;
+      github_account_id?: number | null;
     },
   ) => request<Workspace>(`/api/workspaces/${id}`, { method: "PATCH", body: body(data) }),
   deleteWorkspace: (id: number) =>
@@ -176,6 +179,29 @@ export const api = {
   workspaceStatus: (id: number) => request<WorkspaceStatus>(`/api/workspaces/${id}/status`),
   workspaceDiff: (id: number, staged = false) =>
     request<{ diff: string }>(`/api/workspaces/${id}/diff?staged=${staged}`),
+  createWorkspaceFromGithub: (data: {
+    github_account_id: number;
+    repo: string;
+    name?: string;
+    description?: string;
+    grants?: WorkspaceGrant[];
+  }) => request<Workspace>("/api/workspaces/from-github", { method: "POST", body: body(data) }),
+
+  // GitHub accounts
+  githubAccounts: () => request<GithubAccount[]>("/api/github-accounts"),
+  createGithubAccount: (data: { label: string; token: string; grants?: GithubAccountGrant[] }) =>
+    request<GithubAccount>("/api/github-accounts", { method: "POST", body: body(data) }),
+  updateGithubAccount: (
+    id: number,
+    data: {
+      label?: string;
+      token?: string;
+      grants?: GithubAccountGrant[];
+      owner_id?: number;
+    },
+  ) => request<GithubAccount>(`/api/github-accounts/${id}`, { method: "PATCH", body: body(data) }),
+  deleteGithubAccount: (id: number) =>
+    request<void>(`/api/github-accounts/${id}`, { method: "DELETE" }),
 
   // presets
   presets: () => request<Preset[]>("/api/presets"),

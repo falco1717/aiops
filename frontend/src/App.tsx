@@ -8,6 +8,7 @@ import { workView } from "./work";
 import type { ActiveRun, User } from "./types";
 import Account, { ChangePassword } from "./views/Account";
 import Accounts from "./views/Accounts";
+import GithubAccounts from "./views/GithubAccounts";
 import Login from "./views/Login";
 import Nodes from "./views/Nodes";
 import Usage from "./views/Usage";
@@ -26,6 +27,7 @@ const NAV = [
   { to: "/accounts", label: "Accounts" },
   { to: "/workspaces", label: "Workspaces" },
   { to: "/targets", label: "Systems" },
+  { to: "/github-accounts", label: "GitHub" },
   { to: "/nodes", label: "Relay nodes" },
   { to: "/teams", label: "Teams" },
   { to: "/usage", label: "Usage" },
@@ -197,6 +199,7 @@ export default function App() {
         <Route path="/usage" element={<Usage />} />
         <Route path="/workspaces" element={<Workspaces me={user} />} />
         <Route path="/targets" element={<Targets me={user} />} />
+        <Route path="/github-accounts" element={<GithubAccounts me={user} />} />
         <Route path="/nodes" element={<Nodes me={user} />} />
         <Route path="/teams" element={<Teams me={user} />} />
         <Route path="/providers" element={<Providers />} />

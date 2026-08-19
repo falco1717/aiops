@@ -103,6 +103,20 @@ class Workspace(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
+    # Which GitHub account (if any) a turn in this workspace may push, pull and
+    # open pull requests with. Set at clone time by `POST
+    # /api/workspaces/from-github` and editable afterwards by anyone with
+    # `manage` on the workspace — a deliberate per-workspace choice rather than
+    # a per-run one, because "which of my GitHub logins this checkout speaks
+    # as" is a property of the checkout, not of whichever turn happens to run
+    # in it. SET NULL rather than CASCADE: removing the linked account should
+    # leave the workspace registered and usable for everything that is not
+    # GitHub authentication, the same way a target losing its relay node binding
+    # falls back to "direct" instead of disappearing.
+    github_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("github_accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     grants: Mapped[list[WorkspaceAccess]] = relationship(
         cascade="all, delete-orphan", lazy="selectin"
     )
@@ -128,6 +142,66 @@ class WorkspaceAccess(Base):
     level: Mapped[str] = mapped_column(String(16), default="use")
 
     __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_user"),)
+
+
+class GithubAccount(Base):
+    """One user's GitHub personal access token, stored so agents can use it.
+
+    Owned and shared on exactly the same terms as a stored system (`Target`):
+    private to whoever added it until they name someone else, and
+    **administrators get nothing implicit** — this is the fourth time that rule
+    has been written into this file (`Target`, `RelayNode`, `Workspace`, and now
+    this), and it is reaffirmed rather than factored out for the same reason
+    `access.py` keeps four separate functions instead of one generic — see
+    `github_account_level_for`.
+
+    Only a personal access token is supported, pasted by the user — no OAuth
+    App, no client secret, no callback URL to protect. It is encrypted at rest
+    (see crypto.py) and is write-only: no API response ever returns it, exactly
+    as `Target.private_key_enc` behaves.
+    """
+
+    __tablename__ = "github_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: What the owner calls it — "Jordan's GitHub" — shown wherever this
+    #: account is picked from a list. Not globally unique: unlike a stored
+    #: system's name, nothing addresses this by name, only by id.
+    label: Mapped[str] = mapped_column(String(128))
+    token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    grants: Mapped[list[GithubAccountAccess]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class GithubAccountAccess(Base):
+    """Who may use a GitHub account besides its owner.
+
+    Deliberately identical in shape and meaning to TargetAccess: an empty grant
+    list means *nobody* but the owner, and an administrator who was not named
+    here sees nothing.
+    """
+
+    __tablename__ = "github_account_access"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    github_account_id: Mapped[int] = mapped_column(
+        ForeignKey("github_accounts.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # use: this user's turns may clone with it, push/pull with it, and open
+    # pull requests with it.
+    # manage: additionally edit it, replace the token, and grant others.
+    level: Mapped[str] = mapped_column(String(16), default="use")
+
+    __table_args__ = (
+        UniqueConstraint("github_account_id", "user_id", name="uq_github_account_user"),
+    )
 
 
 class AccountAccess(Base):

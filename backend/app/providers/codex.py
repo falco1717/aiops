@@ -77,6 +77,9 @@ class CodexProvider(Provider):
         #: unbuilt rather than half-built: a Codex session gets no browser, and
         #: says so, instead of getting tools that fail on first use.
         browser: bool = False,
+        #: Accepted and ignored, for the same reason as `browser` above: the
+        #: pull-request bridge is wired in via the command line too.
+        github: bool = False,
     ) -> RunSpec:
         argv = [settings.codex_bin, "exec"]
         if provider_session_id:

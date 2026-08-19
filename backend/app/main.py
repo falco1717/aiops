@@ -28,6 +28,7 @@ from .routers import (
     approvals,
     auth,
     browsing,
+    github_accounts,
     nodes,
     presets,
     providers,
@@ -180,6 +181,7 @@ for module in (
     targets,
     nodes,
     teams,
+    github_accounts,
     ws,
 ):
     app.include_router(module.router)
@@ -192,6 +194,9 @@ app.include_router(approvals.internal)
 # for itself: where it may go, what it must write down, and a credential it is
 # given to type but never to keep.
 app.include_router(browsing.internal)
+# And by the pull-request bridge, for the one thing it is not allowed to hold
+# itself: the GitHub token it calls the API with.
+app.include_router(github_accounts.internal)
 # Node-facing relay endpoints. Authenticated by a node's own credential rather
 # than a session cookie, so they are mounted separately from the router above.
 app.include_router(nodes.relay_router)

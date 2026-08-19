@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
+import shutil
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import agent_env
-from ..access import LEVELS, workspace_level_for
+from .. import agent_env, github_creds
+from ..access import LEVELS, github_account_level_for, workspace_level_for
 from ..config import settings
 from ..db import get_db
-from ..models import User, Workspace, WorkspaceAccess
+from ..models import GithubAccount, User, Workspace, WorkspaceAccess
 from ..schemas import (
+    WorkspaceFromGithubIn,
     WorkspaceGrant,
     WorkspaceIn,
     WorkspaceOut,
@@ -20,6 +24,8 @@ from ..schemas import (
     WorkspaceStatus,
 )
 from ..security import current_user
+
+log = logging.getLogger("aiops.workspaces")
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 
@@ -73,8 +79,50 @@ def _out(ws: Workspace, level: str) -> WorkspaceOut:
         owner_id=ws.owner_id,
         grants=[WorkspaceGrant(user_id=g.user_id, level=g.level) for g in ws.grants],
         my_level=level,
+        github_account_id=ws.github_account_id,
         created_at=ws.created_at,
     )
+
+
+async def _check_github_account(db: AsyncSession, account_id: int | None, user: User) -> None:
+    """Linking a workspace to a GitHub account needs `use` on that account.
+
+    Otherwise anyone able to edit a workspace they manage could point it at a
+    GitHub account by guessing an id and borrow somebody else's token.
+    """
+    if account_id is None:
+        return
+    account = await db.get(GithubAccount, account_id)
+    if account is None or github_account_level_for(account, user) is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "That GitHub account does not exist, or has not been shared with you",
+        )
+
+
+#: "owner/name", optionally as a full https://github.com/... URL. Anything
+#: else — ssh://, git@, another host — is rejected below: this endpoint clones
+#: from github.com over https with a token and nowhere else, so accepting an
+#: arbitrary URL here would turn it into a general-purpose SSRF-shaped fetch
+#: primitive wearing a GitHub-shaped name.
+_REPO_SHORTHAND = re.compile(r"^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/?$")
+_REPO_URL = re.compile(
+    r"^https://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+?)(?:\.git)?/?$"
+)
+
+
+def _parse_github_repo(raw: str) -> tuple[str, str]:
+    """`(owner, name)`, or a 400 naming exactly what was rejected and why."""
+    text = raw.strip()
+    match = _REPO_URL.match(text) or _REPO_SHORTHAND.match(text)
+    if match is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"{raw!r} is not a github.com repository. Use 'owner/name' or a "
+            "https://github.com/owner/name URL — an ssh:// URL, a git@ shorthand, or "
+            "any other host is rejected.",
+        )
+    return match.group(1), match.group(2)
 
 
 def _validate(grants: list[WorkspaceGrant] | None) -> None:
@@ -170,6 +218,145 @@ async def create_workspace(
     return _out(ws, "owner")
 
 
+@router.post(
+    "/from-github", response_model=WorkspaceOut, status_code=status.HTTP_201_CREATED
+)
+async def create_workspace_from_github(
+    payload: WorkspaceFromGithubIn,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Clone a github.com repository straight into a new, registered workspace.
+
+    A deliberate, user-initiated action through this endpoint — not something
+    an agent decides to do mid-turn, the same distinction the rest of the
+    workspaces API draws between registering a directory (here) and an agent
+    merely running commands inside one it was already given.
+
+    The clone is owned by the caller, never by anyone else: this is the same
+    rule `runner.py` applies to a turn's stored credentials, applied one layer
+    earlier — whoever's token pays for the clone is whoever ends up owning what
+    it produced.
+    """
+    account = await db.get(GithubAccount, payload.github_account_id)
+    if account is None or github_account_level_for(account, user) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "GitHub account not found")
+
+    owner_name, repo_name = _parse_github_repo(payload.repo)
+    clone_url = f"https://github.com/{owner_name}/{repo_name}.git"
+
+    ws_name = (payload.name or repo_name).strip()
+    if not ws_name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Workspace name must not be empty")
+    if await db.scalar(select(Workspace).where(Workspace.name == ws_name)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "A workspace with that name already exists")
+
+    # The directory a fresh clone lands in — reusing the same root-confinement
+    # and collision check the rest of this router already applies to a
+    # hand-typed path, rather than inventing a second rule for this one.
+    slug = _slugify_dir(repo_name)
+    path = resolve_workspace_path(slug)
+    if os.path.exists(path):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} already exists under the workspace root. Choose a different "
+            "workspace name, or remove that directory first.",
+        )
+
+    creds = github_creds.prepare(account)
+    if creds is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "That GitHub account's token could not be read — it may need to be re-entered.",
+        )
+    try:
+        proc = await agent_env.spawn(
+            ["git", "clone", "--", clone_url, path],
+            cwd=settings.workspace_root,
+            env=creds.env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+        except asyncio.TimeoutError:
+            agent_env.kill_agent(proc)
+            raise HTTPException(
+                status.HTTP_504_GATEWAY_TIMEOUT, "Cloning that repository timed out."
+            ) from None
+    finally:
+        creds.cleanup()
+
+    if proc.returncode != 0:
+        # A partial clone left on disk would silently register as an empty
+        # workspace the next attempt collides with; clear it so the operator
+        # can simply try again.
+        shutil.rmtree(path, ignore_errors=True)
+        detail = out.decode("utf-8", errors="replace").strip()[-2000:]
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"git clone failed: {detail or f'exit code {proc.returncode}'}",
+        )
+
+    # Verified rather than assumed: the whole point of the credential helper in
+    # github_creds.py is that the token never lands in the repository's own
+    # config. `git clone <plain-url>` never writes a credential into
+    # `origin.url` on its own, but this is exactly the property a regression
+    # here would break silently, so it is checked before the workspace is ever
+    # registered.
+    origin_cfg = os.path.join(path, ".git", "config")
+    if os.path.isfile(origin_cfg):
+        with open(origin_cfg, "r", encoding="utf-8", errors="replace") as fh:
+            cfg_text = fh.read()
+        if "@github.com" in cfg_text or (account.token_enc and _looks_like_token(cfg_text)):
+            log.error(
+                "github: clone of %s left a credential-looking string in .git/config; "
+                "refusing to register the workspace",
+                clone_url,
+            )
+            import shutil as _shutil
+
+            _shutil.rmtree(path, ignore_errors=True)
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "The clone appeared to leave a credential in .git/config, so it was removed "
+                "rather than registered. This is a bug — please report it.",
+            )
+
+    agent_env.grant_agent_access(path, writable=True)
+    ws = Workspace(
+        name=ws_name,
+        path=path,
+        description=payload.description,
+        owner_id=user.id,
+        github_account_id=account.id,
+    )
+    db.add(ws)
+    await db.commit()
+    await db.refresh(ws)
+    await _apply_grants(db, ws, payload.grants, user)
+    await db.commit()
+    await db.refresh(ws)
+    return _out(ws, "owner")
+
+
+def _slugify_dir(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-")
+    return slug or "repo"
+
+
+def _looks_like_token(text: str) -> bool:
+    """A crude, best-effort check for a leaked GitHub token shape.
+
+    Not the primary defence — `github_creds.prepare` not writing the token
+    anywhere near the clone is — this is a second, independent check on the
+    actual artifact the clone produced, worth having precisely because it does
+    not share any code with the mechanism it is checking.
+    """
+    return bool(re.search(r"gh[pousr]_[A-Za-z0-9]{20,}", text))
+
+
 @router.patch("/{workspace_id}", response_model=WorkspaceOut)
 async def update_workspace(
     workspace_id: int,
@@ -180,6 +367,12 @@ async def update_workspace(
     ws, level = await _require(db, workspace_id, user, manage=True)
     _validate(payload.grants)
     data = payload.model_dump(exclude_unset=True)
+
+    if "github_account_id" in data:
+        await _check_github_account(db, data["github_account_id"], user)
+        # Applied here rather than by the loop below, which skips nulls: null
+        # is the meaningful value that unlinks the account.
+        ws.github_account_id = data.pop("github_account_id")
 
     new_owner = data.pop("owner_id", None)
     if new_owner is not None and new_owner != ws.owner_id:
