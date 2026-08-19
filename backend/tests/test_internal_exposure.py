@@ -95,6 +95,7 @@ INTERNAL = [
     ("/api/internal/browser/screenshot", {"token": "nonsense"}),
     ("/api/internal/browser/reach", {"token": "nonsense"}),
     ("/api/internal/browser/log", {"token": "nonsense", "action": "opened"}),
+    ("/api/internal/github/credential", {"token": "nonsense"}),
 ]
 
 #: What Traefik's peer looks like from inside the container: an address on the
@@ -184,7 +185,7 @@ with TestClient(AsPeer(stack, FROM_THE_PROXY)) as outside:
             for path, body in INTERNAL
             if (r := outside.post(path, json=body, headers=headers)).status_code != 404
         ]
-        check(f"FORGED [{label}] reaches none of the five internal routes",
+        check(f"FORGED [{label}] reaches none of the {len(INTERNAL)} internal routes",
               not bad, str(bad))
 
     # The screenshot route reads a raw body rather than JSON, and the approvals
