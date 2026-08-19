@@ -549,8 +549,17 @@ with TestClient(app) as c:
     check("erin can read the same session, but was never granted george's "
           "account, so nothing of george's is disclosed to her",
           view.get("github_accounts") == [], str(view.get("github_accounts")))
-    check("nothing at all is at stake for her here",
-          view.get("at_stake") is False, str(view)[:200])
+    # Not "nothing at all is at stake for her" — by this point erin also has
+    # her own stored SSH system (added above), and that system is reachable
+    # from *any* session she can prompt in, this one included; visible_targets
+    # is deliberately global, not scoped to a workspace, the same way it is for
+    # every other member in this file. What is under test here is specifically
+    # that george's GitHub account contributes nothing to her exposure.
+    check("her own unrelated stored system is what is at stake for her here, "
+          "not george's account",
+          [s["slug"] for s in view.get("systems", [])] == ["erin-box"]
+          and view.get("at_stake") is True,
+          str(view)[:200])
 
     # --- the confused deputy, exactly as the module's docstring describes ---
     # Frank creates his own room and speaks first, so his message is genuinely

@@ -412,8 +412,21 @@ with TestClient(app) as c:
     c.patch(f"/api/github-accounts/{run_acct_id}",
             json={"grants": [{"user_id": otheradmin, "level": "use"}]})
     login(c, "otheradmin")
+    # otheradmin now has 'use' on both the workspace and the linked GitHub
+    # account, so this account is genuinely reachable from a turn of theirs —
+    # exactly what exposure.py's disclosure gate exists to catch (see
+    # test_exposure.py). The first such prompt is refused until it is
+    # acknowledged, the same way a stored SSH target would be; this is not the
+    # "GitHub account is not theirs" failure the guest check above covers.
+    state = c.get(f"/api/sessions/{sess['id']}/exposure").json()
+    check("(setup) the account being reachable is itself disclosed first",
+          state.get("needs_acknowledgement") is True, str(state)[:200])
+    c.post(f"/api/sessions/{sess['id']}/exposure/ack",
+           json={"viewer_ids": [v["id"] for v in state.get("viewers", [])]})
     allowed = c.post(f"/api/sessions/{sess['id']}/prompt", json={"prompt": "a granted turn"})
-    granted_row = settle(c, allowed.json()["id"])
+    check("(setup) once acknowledged, the turn is queued rather than held for disclosure",
+          allowed.status_code == 202, f"{allowed.status_code} {allowed.text[:200]}")
+    granted_row = settle(c, allowed.json()["id"] if allowed.status_code == 202 else None)
     check("a granted requester's turn is not refused for a GitHub-account reason",
           "GitHub account" not in (granted_row.get("error") or ""),
           str(granted_row.get("error"))[:200])
