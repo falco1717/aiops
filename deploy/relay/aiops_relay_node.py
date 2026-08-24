@@ -791,6 +791,27 @@ def local_networks() -> list[str]:
 
 
 # --- enrolment ---------------------------------------------------------
+def response_detail(body: bytes) -> str | None:
+    """AIOps' own error message, if `body` is actually shaped like one.
+
+    Every HTTPException this app raises comes back from FastAPI as
+    `{"detail": "..."}`, so that shape is what a genuine refusal looks like.
+    A non-2xx response can also come from something in front of the app - a
+    proxy, a load balancer, a WAF - answering on AIOps' behalf before the
+    request ever reaches it, and urllib cannot tell those two apart: both are
+    just an HTTPError with a status code and a body. This is what can: a body
+    that does not parse as `{"detail": ...}` did not come from this app,
+    whatever status code rode along with it.
+    """
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return None
+    if isinstance(parsed, dict) and isinstance(parsed.get("detail"), str):
+        return parsed["detail"]
+    return None
+
+
 def enrol(base_url: str, token: str, egress: Egress) -> dict:
     """Spend the one-time token for a long-lived credential.
 
@@ -1601,7 +1622,25 @@ def main(argv: list[str]) -> int:
         try:
             result = enrol(args.url.rstrip("/"), args.token, egress)
         except urllib.error.HTTPError as exc:
-            log.error("enrolment refused by AIOps: %s %s", exc.code, exc.read().decode()[:300])
+            body = exc.read()
+            detail = response_detail(body)
+            if detail is not None:
+                # Shaped like AIOps' own HTTPException body - the token really
+                # was wrong, spent, or expired, and it is safe to say so.
+                log.error("enrolment refused by AIOps: %s %s", exc.code, detail)
+            else:
+                # A non-2xx response with a body AIOps does not write is not a
+                # refusal from the app - something in front of it answered
+                # instead. Blaming the token for that sends the operator to
+                # regenerate it forever while the real block goes unfixed.
+                log.error(
+                    "enrolment got HTTP %s back, but the response does not look "
+                    "like AIOps' own answer: %s. This looks like something in "
+                    "front of AIOps - a proxy, load balancer, or WAF - answered "
+                    "instead of the app; check there before assuming the token "
+                    "is at fault.",
+                    exc.code, body.decode(errors="replace")[:300],
+                )
             return 1
         except (urllib.error.URLError, OSError) as exc:
             log.error("could not reach AIOps to enrol: %s", exc)

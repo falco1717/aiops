@@ -817,8 +817,28 @@ if ($Token -and -not (Test-Path $credential)) {
     # proxy was there for - so the operator never reached the part that worked.
     if ($Proxy) { $enrolArgs += @("--proxy", $Proxy) }
     if ($installedCaBundle) { $enrolArgs += @("--ca-bundle", $installedCaBundle) }
-    & $python @enrolArgs
-    if ($LASTEXITCODE -ne 0) { throw "Enrolment failed. The token may already have been used." }
+    # aiops_relay_node.py already tells apart the two ways this can fail - a
+    # network that never got the request to AIOps at all, or AIOps itself
+    # refusing the token - and logs whichever one actually happened. A generic
+    # "the token may already have been used" here, regardless of which one it
+    # was, sent every network failure (a proxy, a TLS-inspecting gateway, a
+    # firewalled VDI) to an operator who then regenerated tokens forever while
+    # the real problem went undiagnosed. Captured rather than left to stream,
+    # so the one line that says what actually happened can be quoted instead
+    # of re-guessed - the same thing Invoke-Sc does for sc.exe above.
+    $enrolOutput = & $python @enrolArgs 2>&1 | ForEach-Object { $_.ToString() }
+    foreach ($line in $enrolOutput) { Write-Host $line }
+    if ($LASTEXITCODE -ne 0) {
+        $reason = $enrolOutput | Where-Object { $_ -match '\bERROR\b' } | Select-Object -Last 1
+        if (-not $reason) { $reason = $enrolOutput | Select-Object -Last 1 }
+        if (-not $reason) { $reason = "aiops_relay_node.py exited $LASTEXITCODE with no output." }
+        Write-Host ""
+        Write-Host "Find out exactly what this machine can and cannot reach:"
+        Write-Host ""
+        Write-Host "    & '$python' '$InstallDir\aiops_relay_node.py' --url $Url --state-dir '$StateDir' --diagnose"
+        Write-Host ""
+        throw "Enrolment failed: $reason"
+    }
 } elseif (-not (Test-Path $credential)) {
     Write-Warning "No -Token given and no credential stored. The service will idle until you re-run with a token."
 }

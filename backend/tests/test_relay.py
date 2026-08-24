@@ -1390,6 +1390,131 @@ check("each names its own kind up front, so a log can be read without guessing",
       str({label: text.split(":")[0] for label, text in spoken.items()}))
 
 
+# --- install.ps1 no longer guesses why enrolment failed ----------------
+# The bug this answers: install.ps1 threw "the token may already have been
+# used" on ANY non-zero exit from --enrol-only, so a DNS failure, a blocked
+# proxy, a TLS-inspecting gateway, or a firewalled VDI — none of which have
+# anything to do with the token — all sent the operator to regenerate tokens
+# forever while the real problem went undiagnosed. aiops_relay_node.py already
+# tells these apart and logs which one happened; this proves it still does,
+# for both the network case and the server-refusal case, and that a
+# server-refusal-shaped response that did not actually come from AIOps (an
+# edge box in front of it) is named as such rather than blamed on the token.
+check('response_detail reads AIOps\' own {"detail": ...} body',
+      node.response_detail(b'{"detail": "That enrolment token is not valid."}')
+      == "That enrolment token is not valid.")
+check("and returns nothing for a body that is not shaped like one",
+      node.response_detail(b"<html><body>Access Denied</body></html>") is None)
+check("nor for JSON that just is not AIOps' shape",
+      node.response_detail(b'{"error": "blocked", "ray_id": "abc123"}') is None)
+check("nor for an empty body", node.response_detail(b"") is None)
+
+
+def enroll_answerer(status_line: bytes, body: bytes, content_type: bytes = b"application/json") -> int:
+    """A fake AIOps that answers /api/relay/enroll with exactly this response.
+
+    Raw sockets, like the http_answerer above it, so the response is
+    byte-for-byte what is asked for rather than whatever a real framework
+    would have wrapped it in.
+    """
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(2)
+    port = listener.getsockname()[1]
+
+    def serve():
+        try:
+            conn, _ = listener.accept()
+            head = b""
+            while b"\r\n\r\n" not in head and len(head) < 65536:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                head += chunk
+            response = (
+                status_line + b"\r\n"
+                + b"Content-Type: " + content_type + b"\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                + body
+            )
+            conn.sendall(response)
+            conn.close()
+        except OSError:
+            pass
+        finally:
+            listener.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return port
+
+
+enrol_state = tempfile.mkdtemp(prefix="aiops-relay-enrol-")
+
+genuine_port = enroll_answerer(
+    b"HTTP/1.1 401 Unauthorized",
+    b'{"detail": "That enrolment token is not valid. Tokens are single-use and '
+    b'expire; ask AIOps for a new one."}',
+)
+genuine = subprocess.run(
+    [sys.executable, AGENT, "--url", f"http://127.0.0.1:{genuine_port}",
+     "--token", "1.deadbeef", "--state-dir", enrol_state, "--enrol-only"],
+    capture_output=True, text=True, timeout=15,
+)
+check("a genuine 401 from AIOps is reported as the token being refused",
+      genuine.returncode == 1 and "enrolment refused by AIOps: 401" in genuine.stdout
+      and "That enrolment token is not valid" in genuine.stdout,
+      genuine.stdout[-400:])
+check("and is not confused for a network failure",
+      "could not reach AIOps" not in genuine.stdout, genuine.stdout[-400:])
+
+edge_port = enroll_answerer(
+    b"HTTP/1.1 403 Forbidden",
+    b"<html><head><title>403 Forbidden</title></head><body>Request blocked</body></html>",
+    content_type=b"text/html",
+)
+edge = subprocess.run(
+    [sys.executable, AGENT, "--url", f"http://127.0.0.1:{edge_port}",
+     "--token", "1.deadbeef", "--state-dir", enrol_state, "--enrol-only"],
+    capture_output=True, text=True, timeout=15,
+)
+check("a refusal that is not shaped like AIOps' own answer is not blamed on the token",
+      edge.returncode == 1 and "enrolment refused by AIOps" not in edge.stdout,
+      edge.stdout[-400:])
+check("and names what it actually looks like instead of guessing",
+      "does not look like AIOps" in edge.stdout
+      and "proxy, load balancer, or WAF" in edge.stdout,
+      edge.stdout[-400:])
+
+with socket.socket() as probe:
+    probe.bind(("127.0.0.1", 0))
+    unreachable_port = probe.getsockname()[1]
+unreachable = subprocess.run(
+    [sys.executable, AGENT, "--url", f"http://127.0.0.1:{unreachable_port}",
+     "--token", "1.deadbeef", "--state-dir", enrol_state, "--enrol-only"],
+    capture_output=True, text=True, timeout=15,
+)
+check("a port nothing is listening on is reported as unreachable, not as a spent token",
+      unreachable.returncode == 1 and "could not reach AIOps to enrol" in unreachable.stdout
+      and "already" not in unreachable.stdout.lower(),
+      unreachable.stdout[-400:])
+
+# install.ps1 itself: it must capture and quote whatever aiops_relay_node.py
+# actually said, rather than throwing the same guess on every non-zero exit.
+_ps1_preview = open(os.path.join(RELAY_SRC, "install.ps1"), encoding="utf-8-sig").read()
+check("install.ps1 no longer throws a blanket guess on every enrolment failure",
+      "Enrolment failed. The token may already have been used." not in _ps1_preview)
+check("it captures what the enrolment process actually said",
+      "$enrolOutput = & $python @enrolArgs 2>&1" in _ps1_preview)
+check("and quotes that in the failure it throws",
+      'throw "Enrolment failed: $reason"' in _ps1_preview)
+check("and points at the exact --diagnose command from the enrolment failure itself",
+      "Find out exactly what this machine can and cannot reach" in _ps1_preview
+      and _ps1_preview.count(
+          "aiops_relay_node.py' --url $Url --state-dir '$StateDir' --diagnose") >= 2,
+      "expected the diagnose invocation in both the preflight and the enrolment failure")
+
+
 # --- what the installers persist --------------------------------------
 # The setting has to survive a restart. A proxy that only applied to the run
 # that installed the node is a proxy that works once.
