@@ -172,10 +172,11 @@ proxy's docker network (`TRAEFIK_NETWORK`).
 
 #### Routing from a file instead of labels
 
-If you keep per-app routing in Traefik's file provider, `deploy/traefik/aiops.yml`
-is a ready-made config. Copy it into that directory (`/opt/traefik/` on a
-Saltbox host, mounted at `/etc/traefik`) and set `TRAEFIK_ENABLE=false` in
-`.env`, then recreate the container.
+If you keep per-app routing in Traefik's file provider,
+`deploy/traefik/aiops.yml.example` is a starting point. Copy it to
+`aiops.yml` in that directory (`/opt/traefik/` on a Saltbox host, mounted at
+`/etc/traefik`), edit the domain to your own, and set `TRAEFIK_ENABLE=false`
+in `.env`, then recreate the container.
 
 Turn the labels off when you do. Leaving both on means two providers serve the
 same `Host` rule at equal priority, and which one wins is not deterministic.
