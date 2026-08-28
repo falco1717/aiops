@@ -42,6 +42,19 @@ class UserSummary(BaseModel):
     display_name: str | None = None
 
 
+class SetupStatusOut(BaseModel):
+    #: True until the very first user is created, by any means — bootstrap
+    #: from AIOPS_ADMIN_PASSWORD, this screen, or a pre-existing install.
+    needs_setup: bool
+
+
+class SetupIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    #: Same floor as every other password field in the app (PasswordChangeIn,
+    #: UserCreate, UserPasswordReset) — see security.py.
+    password: str = Field(min_length=8)
+
+
 class PasswordChangeIn(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8)

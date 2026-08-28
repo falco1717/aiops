@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import logging
 import os
-import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +34,7 @@ from .routers import (
     runs,
     schedules,
     sessions,
+    setup,
     targets,
     teams,
     usage,
@@ -56,27 +56,29 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 async def bootstrap_admin() -> None:
+    """Create the admin from AIOPS_ADMIN_PASSWORD, when one is set.
+
+    Unset is no longer "generate one and print it to the log" — that made a
+    fresh open-source deploy unusable until someone thought to read `docker
+    compose logs app`. Instead this simply does nothing, and the instance is
+    left with zero users. `routers/setup.py` is what notices that and offers
+    the first person who loads the app a "create your admin account" screen
+    instead of the login screen; see it for the concurrency guard around that.
+    """
+    if not settings.admin_password:
+        return
     async with SessionLocal() as db:
         if await db.scalar(select(func.count(User.id))):
             return
-        password = settings.admin_password or secrets.token_urlsafe(18)
         db.add(
             User(
                 username=settings.admin_username,
-                password_hash=hash_password(password),
+                password_hash=hash_password(settings.admin_password),
                 is_admin=True,
             )
         )
         await db.commit()
-        if settings.admin_password:
-            log.info("Created admin user %r from AIOPS_ADMIN_PASSWORD", settings.admin_username)
-        else:
-            log.warning(
-                "No AIOPS_ADMIN_PASSWORD set. Created user %r with generated password: %s",
-                settings.admin_username,
-                password,
-            )
-            log.warning("Save it now — it is not stored anywhere else and won't be shown again.")
+        log.info("Created admin user %r from AIOPS_ADMIN_PASSWORD", settings.admin_username)
 
 
 async def reap_orphaned_runs() -> None:
@@ -167,6 +169,7 @@ if settings.cors_origin_list:
 app.add_middleware(LoopbackOnlyMiddleware)
 
 for module in (
+    setup,
     auth,
     users,
     accounts,

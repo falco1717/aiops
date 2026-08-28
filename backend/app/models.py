@@ -47,6 +47,29 @@ class User(Base):
     )
 
 
+class SetupLock(Base):
+    """Marks that first-run setup has been claimed. A single row, id fixed at 1.
+
+    `needs_setup` (routers/setup.py) is decided by whether any `User` row
+    exists at all, not by this table — an instance started with
+    `AIOPS_ADMIN_PASSWORD` never touches this table and must still report
+    `needs_setup=False` the moment its bootstrap admin exists. What this table
+    is for is the one thing a plain "is there a user yet" check cannot do
+    safely: two POST /api/setup requests arriving at the same moment both see
+    zero users and both try to become the one that creates the first admin.
+    Both insert this row with the same primary key inside their own
+    transaction; the database's own primary key stops the second one before it
+    ever gets to insert a User, so there is never a moment where two "first"
+    admins exist. A check-then-act on the user count alone cannot promise
+    that — this row is the actual lock.
+    """
+
+    __tablename__ = "setup_lock"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Team(Base):
     """A group of people who work in the same place.
 

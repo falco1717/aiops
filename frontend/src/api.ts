@@ -67,6 +67,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 const body = (data: unknown) => JSON.stringify(data);
 
 export const api = {
+  // first-run setup — unauthenticated, and only ever useful before any user exists
+  setupStatus: () => request<{ needs_setup: boolean }>("/api/setup/status"),
+  completeSetup: (username: string, password: string) =>
+    request<User>("/api/setup", { method: "POST", body: body({ username, password }) }),
+
   // auth
   me: () => request<User>("/api/auth/me"),
   login: (username: string, password: string) =>

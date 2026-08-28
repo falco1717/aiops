@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ApiError, api } from "./api";
+import { gateFor } from "./gate";
 import { displayName } from "./names";
 import Logo, { Mark } from "./components/Logo";
 import Working from "./components/Working";
@@ -16,6 +17,7 @@ import Presets from "./views/Presets";
 import Providers from "./views/Providers";
 import Schedules from "./views/Schedules";
 import Sessions from "./views/Sessions";
+import Setup from "./views/Setup";
 import Targets from "./views/Targets";
 import Teams from "./views/Teams";
 import Workspaces from "./views/Workspaces";
@@ -87,11 +89,31 @@ function useActiveWork(enabled: boolean) {
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [needsSetup, setNeedsSetup] = useState(false);
   const [ready, setReady] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
   const location = useLocation();
 
+  // Setup status is checked first and, while it says yes, /me is never even
+  // called — nobody can possibly be signed in to an instance with zero users,
+  // so there is nothing for that request to usefully answer. Both this
+  // function and the render below funnel through gateFor (see gate.ts),
+  // which is the one place the four resulting states — loading, setup,
+  // login, forced-password-change, app — and their precedence are decided.
   const refresh = useCallback(async () => {
+    let stillNeedsSetup = false;
+    try {
+      stillNeedsSetup = (await api.setupStatus()).needs_setup;
+    } catch {
+      // A broken setup-status check must not block sign-in forever for an
+      // instance that already has users — fall through and let /me decide.
+    }
+    setNeedsSetup(stillNeedsSetup);
+    if (stillNeedsSetup) {
+      setUser(null);
+      setReady(true);
+      return;
+    }
     try {
       setUser(await api.me());
     } catch (err) {
@@ -117,8 +139,11 @@ export default function App() {
   const { runs, now } = useActiveWork(Boolean(user) && !user?.must_change_password);
   const work = useMemo(() => workView(runs, now, user?.id ?? -1), [runs, now, user?.id]);
 
-  if (!ready) return <div className="empty">Loading…</div>;
-  if (!user) return <Login onAuthenticated={refresh} />;
+  const gate = gateFor({ ready, needsSetup, user });
+
+  if (gate === "loading") return <div className="empty">Loading…</div>;
+  if (gate === "setup") return <Setup onAuthenticated={refresh} />;
+  if (gate === "login") return <Login onAuthenticated={refresh} />;
 
   const logout = async () => {
     await api.logout();
@@ -127,7 +152,7 @@ export default function App() {
 
   // An admin-forced password change blocks everything else — the API enforces
   // this too, so there is nothing to gain by routing around the UI.
-  if (user.must_change_password) {
+  if (gate === "forced-password") {
     return (
       <div className="login-wrap">
         <div className="forced-change">
@@ -143,6 +168,10 @@ export default function App() {
       </div>
     );
   }
+
+  // Unreachable: gateFor only returns "app" when `user` is set. Here for
+  // TypeScript's narrowing, not because this instance is expected to occur.
+  if (!user) return null;
 
   return (
     <div className={`app${navOpen ? " nav-open" : ""}`}>

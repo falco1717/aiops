@@ -177,6 +177,17 @@ label.check span { margin: 0; color: var(--text); font-size: 13px; }
 .login-wrap { display: grid; place-items: center; height: 100%; }
 .login-card { width: 320px; }
 
+/* ---- first-run setup ----
+   A raised surface *inside* the login card's own panel surface, the same
+   pairing `--bg-raised` on `--bg-panel` used elsewhere (see the note near
+   the credential-exposure banner below) — not `--panel`, which is not a
+   token this app defines. */
+.setup-banner {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-dim); font-size: 12.5px; line-height: 1.5;
+  padding: 9px 12px; margin-bottom: 14px;
+}
+
 /* ---- sessions ---- */
 /* minmax(0, 1fr), not 1fr: a plain `1fr` column is floored at its content's
    min-content width, so one wide line of tool output stretches the whole pane

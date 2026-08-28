@@ -104,11 +104,13 @@ keeps the forward-auth in front of it meaningful. To run without a proxy:
 docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 ```
 
-If you left `AIOPS_ADMIN_PASSWORD` blank, grab the generated one:
-
-```bash
-docker compose logs app | grep -i password
-```
+If you left `AIOPS_ADMIN_PASSWORD` blank, open the app in a browser. A fresh
+instance with no users yet shows a **Create your admin account** screen in
+place of the login screen — pick a username and password there instead of
+digging one out of `docker compose logs app`. It only ever appears once: the
+moment that first account exists (this way, or by having set
+`AIOPS_ADMIN_PASSWORD` at all), every later visit gets the ordinary login
+screen, for everyone.
 
 ### Sign the agent CLIs in
 
@@ -482,8 +484,8 @@ Every setting is an `AIOPS_`-prefixed environment variable.
 | `AIOPS_DATABASE_URL` | `postgresql+asyncpg://aiops:aiops@db:5432/aiops` | SQLAlchemy async URL |
 | `AIOPS_JWT_SECRET` | — | **Required.** Signs session cookies |
 | `AIOPS_JWT_TTL_HOURS` | `720` | Login lifetime |
-| `AIOPS_ADMIN_USERNAME` | `admin` | Bootstrap account, created only when the user table is empty |
-| `AIOPS_ADMIN_PASSWORD` | — | Blank generates one and logs it once |
+| `AIOPS_ADMIN_USERNAME` | `admin` | Username the bootstrap account gets, when `AIOPS_ADMIN_PASSWORD` is set |
+| `AIOPS_ADMIN_PASSWORD` | — | Optional. Set it for a scripted/CI deploy to create the admin at startup non-interactively. Left blank, no account is created at startup at all — the first person to open the app is offered a one-time "create your admin account" screen instead, and `AIOPS_ADMIN_USERNAME` is not used |
 | `AIOPS_WORKSPACE_ROOT` | `/workspaces` | Hard boundary for every workspace path |
 | `AIOPS_ATTACHMENTS_ROOT` | `/attachments` | Where uploaded files are stored (its own volume) |
 | `AIOPS_MAX_ATTACHMENT_BYTES` | `26214400` | Largest single upload, enforced while streaming |
