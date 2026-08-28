@@ -333,6 +333,12 @@ EXPECTED_PUBLIC = {
     "/api/auth/logout",         # clears a cookie; nothing to leak
     "/api/health",              # the container healthcheck
     "/api/relay/enroll",        # a node presents an enrolment token here
+    "/api/setup/status",        # "does this instance need first-run setup" —
+                                 # asked before anyone could possibly be signed in
+    "/api/setup",               # creates the first admin; refuses itself the
+                                 # instant a user exists (see routers/setup.py's
+                                 # transactional guard for what stops two
+                                 # concurrent callers both succeeding)
     "/{full_path:path}",        # the SPA shell, deliberately pre-login
 }
 
